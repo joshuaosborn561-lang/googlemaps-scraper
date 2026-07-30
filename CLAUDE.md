@@ -8,23 +8,54 @@ expects a CSV at the end, not a lecture on flags.
 Run everything through the CLI below. Don't write ad-hoc scrapers or one-off
 scripts; the pipeline already handles retries, checkpointing and dedup.
 
-## Spending rules — read before running anything
+## The default interaction
+
+Josh opens a terminal and types one sentence:
+
+> *"find me funeral homes in Texas with 4+ stars, I need owner names and emails"*
+
+That is a complete instruction. Take it and run the whole thing to a CSV.
+Don't hand back a checklist, don't ask which flags he wants, don't walk him
+through the stages. He wants the file.
+
+The flow, every time:
+
+1. `plan` the brief.
+2. Sanity-check the category list yourself before pricing it. If an obvious
+   Maps synonym is missing, add it — a missing category is a missing slice of
+   the market, and this is the single biggest driver of list quality.
+3. Show **one line**: `24,908 requests, $0.83, 1,916 zips, 13 categories`.
+4. Under `AUTO_APPROVE_UNDER`? Just go. Over it? Ask once, then wait.
+5. Run every stage. Report rows, email coverage %, owner coverage %, and ~15
+   sample rows.
+
+Setup steps (venv, `.env`, `ollama list`, `zips`) are one-time. Do them
+silently if they're missing; don't make him watch.
+
+## Spending rules
 
 `scrape` and `run` cost real money on Josh's RapidAPI plan. Everything else
 is free.
 
-1. **Always print the cost estimate and get an explicit yes before scraping.**
-   `estimate` (or `plan`) shows requests and dollars. Never pass `--yes` to
-   `run` unless Josh has just seen the number and approved it in the
-   conversation.
-2. **Run `probe` before the first scrape in a fresh checkout or after any
+```
+AUTO_APPROVE_UNDER = $2.00
+```
+
+1. **Under $2, just run it** — show the number, don't wait. That covers any
+   single state, which is most requests. **Over $2, ask once** with the
+   dollar figure, and wait for a yes. Never pass `--yes` to `run` for an
+   over-threshold job he hasn't approved in the conversation.
+2. **No region named?** Ask which state(s) before running. Nationwide is
+   20–30x the cost of one state — never assume it.
+3. **Run `probe` before the first scrape in a fresh checkout or after any
    `.env` change.** It makes one request and prints the raw API response. If
    fields come back empty, fix `ALIASES` in `gmscraper/mapsdata.py`, then run
    `renormalize` — never re-scrape to fix a mapping problem.
-3. **Pilot one state before going national.** `--states OH` first. A national
-   vertical is ~$12–20 and several hours; a single state is under a dollar.
-4. Free stages (`enrich`, `classify`, `owners` without `--fallback`, `export`,
-   `stats`, `plan`, `zips`, `estimate`) can be run without asking.
+4. **Pilot one state before going national.** For a first-time vertical, run
+   `--states <one>` and show him the sample before offering the national run.
+   Once he's seen the quality, a national run is a normal over-threshold ask.
+5. Free stages (`enrich`, `classify`, `owners` without `--fallback`, `export`,
+   `stats`, `plan`, `zips`, `estimate`) never need asking. Re-run them freely.
 
 ## The commands
 
@@ -52,7 +83,8 @@ without re-scraping).
 
 | Josh says | Do |
 |---|---|
-| "get me X in Y" | `plan` it, show him the plan + cost, then `run` on approval |
+| "get me X in Y" | the default flow above — plan, one cost line, run, report |
+| "/leads <brief>" | same thing; the slash command just wraps it |
 | "that list is too broad / has junk in it" | tighten the `icp:` exclusions, re-run `classify` only. Do **not** re-scrape |
 | "I need more of them" | add category aliases (the usual cause of a short list), `estimate`, then scrape the new categories — existing ones are already checkpointed and won't re-charge |
 | "no emails in the CSV" | check `stats` for `domains with email`. Maps returns no emails; they come from the website scrape, so coverage is partial by nature. Say so plainly rather than implying it's a bug |
