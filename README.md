@@ -37,7 +37,8 @@ ollama serve               # if it isn't already running
 **2. This repo:**
 
 ```bash
-git clone https://github.com/joshuaosborn561-lang/googlemaps-scraper
+git clone -b claude/google-maps-scraping-3v0uqa \
+    https://github.com/joshuaosborn561-lang/googlemaps-scraper
 cd googlemaps-scraper
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
