@@ -110,12 +110,13 @@ def cmd_estimate(args) -> None:
     _, cats = resolve_categories(args)
     rows = zips.load(args.zips, states=args.states, limit=args.limit)
     n = len(rows) * len(cats)
-    price = settings.price_per_request
+    used = make_store(args).requests_this_month()
     print(f"ZIP codes:   {len(rows):,}")
     print(f"Categories:  {len(cats)}")
     print(f"Requests:    {n:,}")
-    print(f"Cost:        ${n * price:,.2f}  (at ${price:.8f}/request)")
     print(f"Max rows:    {n * args.limit_results:,} before dedup")
+    for line in brief_mod.cost_lines(n, settings.plan, used):
+        print(line)
     for w in (4, 8, 16):
         print(f"  ~{n / (w * 3) / 3600:,.1f}h at {w} workers (assumes ~3 req/s/worker)")
 
@@ -250,8 +251,9 @@ def _build_plan(args):
 def cmd_plan(args) -> None:
     plan = _build_plan(args)
     zip_rows = zips.load(args.zips, states=plan.states or None, limit=args.limit)
+    used = make_store(args).requests_this_month()
     print("PLAN")
-    print(plan.describe(len(zip_rows), settings.price_per_request))
+    print(plan.describe(len(zip_rows), settings.plan, used))
     if args.save:
         brief_mod.save(plan, args.save)
         print(f"\nSaved -> {args.save}")
@@ -268,8 +270,9 @@ def cmd_run(args) -> None:
     plan = _build_plan(args)
     zip_rows = zips.load(args.zips, states=plan.states or None, limit=args.limit)
 
+    store = make_store(args)
     print("PLAN")
-    print(plan.describe(len(zip_rows), settings.price_per_request))
+    print(plan.describe(len(zip_rows), settings.plan, store.requests_this_month()))
     if not args.yes:
         try:
             if input("\nProceed? [y/N] ").strip().lower() not in ("y", "yes"):
@@ -277,7 +280,6 @@ def cmd_run(args) -> None:
         except EOFError:
             raise SystemExit("Cancelled (no tty). Re-run with --yes.") from None
 
-    store = make_store(args)
     client = MapsDataClient(settings, limit=args.limit_results,
                             query_template=args.query_template)
 

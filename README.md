@@ -103,7 +103,10 @@ PLAN
   quality     rating >= 4.0, reviews >= 20
   must have   phone, email, owner name
   requests    24,908
-  est. cost   $0.83   (LLM stages are free)
+  plan        pro — $5/mo, 30,000 requests included
+  quota left  30,000 of 30,000 (0 used this month)
+  est. cost   $0.00 extra — fits inside this month's quota
+  (enrich / classify / owners run locally and are free)
 ```
 
 Happy with it? Run the whole thing — scrape, website fetch, ICP filter, owner
@@ -144,7 +147,7 @@ python -m gmscraper zips
 
 # 1. See what a run costs BEFORE spending anything
 python -m gmscraper estimate --vertical funeral
-#    Requests: 356,076   Cost: $11.87
+#    Requests: 356,076   ultra: $50.47 overage, $75.47 for the month
 
 # 2. Verify the API actually returns what you expect — one request
 python -m gmscraper probe --zip 01001 --category "funeral home"
@@ -236,32 +239,49 @@ coverage and spend. Run `estimate` after editing.
 
 ## What it actually costs
 
-At the quoted $100 / 3M requests (`PRICE_PER_REQUEST` in `.env`), with the
-default 29,673-ZIP list:
+Maps Data bills as a monthly plan with an included request quota, then
+per-request overage. Set `MAPS_PLAN` in `.env` and every estimate prices
+against your real tier:
 
-| Vertical | Categories | Requests | Cost |
+| Plan | Monthly | Included | Overage |
 |---|---:|---:|---:|
-| funeral | 12 | 356,076 | $11.87 |
-| hvac | 14 | 415,422 | $13.85 |
-| home_services | 20 | 593,460 | $19.78 |
-| one category | 1 | 29,673 | $0.99 |
+| basic | $0 | 1,000 | hard limit — requests just fail |
+| pro | $5 | 30,000 | $0.001 |
+| ultra | $25 | 300,000 | $0.0009 |
+| mega | $250 | 6,000,000 | $0.00005 |
+
+With the default 29,673-ZIP list:
+
+| Job | Requests | Cheapest plan | Cost that month |
+|---|---:|---|---:|
+| HVAC, one state | 14,126 | pro | **$5** (inside quota) |
+| HVAC, OH + MI | 24,908 | pro | **$5** (inside quota) |
+| funeral, national | 356,076 | ultra | **$75** ($25 + $50 overage) |
+| home services, national | 593,460 | ultra | **$289** ($25 + $264) |
+| 10 national verticals | ~5M | mega | **$250** (inside quota) |
+
+`estimate` and `plan` also track how much quota you've already burned this
+month (from the `jobs` table) so the number reflects what the run will
+*actually* add, not a fresh-quota fiction.
+
+Two corrections to the numbers in the post that prompted this project:
+
+* **"3 million requests for $100" is not an available plan.** The closest is
+  mega at $250 for 6M. Every earlier cost in this README was computed from
+  that claimed rate and was roughly 4x too low; the table above is from the
+  live plan page.
+* **"$19 a category"** doesn't match either. One category nationally is
+  29,673 requests — inside pro's quota, so effectively $5.
+
+Also watch the **bandwidth platform fee**: 10,240 MB/month included, then
+$0.001/MB. A national vertical returning ~30 KB per response lands near that
+limit; several verticals a month will exceed it. Rough order: ~$30 extra per
+million requests. Check your actual usage on the RapidAPI dashboard rather
+than trusting that estimate.
 
 Steps 4–6 are free — html2text is open source and Gemma runs on your own
 machine. OpenWeb Ninja in step 6 is the only other paid piece, and only fires
 for businesses where the website came up empty.
-
-Two notes on the numbers in the post you sent:
-
-* **"$19 a category"** doesn't reconcile with "$100 for 3M requests" — at that
-  rate one category nationwide is about **$1**, and $19 is roughly a *20-category
-  vertical*. That matches the post's other line ("one vertical of 20 categories
-  ≈ $100" is also high). Either way, `estimate` prints your real number from
-  your real plan price, so set `PRICE_PER_REQUEST` and trust that.
-* **"42,734 ZIP codes"** counts every ZIP type. The default list here is
-  29,673 — active, standard, 50 states + DC. PO Box, military and territory
-  ZIPs are radius-searched from inside a standard ZIP's footprint anyway, so
-  they return duplicates you pay for and dedup throws away. `--types all
-  --territories` if you want them.
 
 ---
 
@@ -389,7 +409,7 @@ they're not the business's own site, so there's nothing on them worth reading.
 ## Tests
 
 ```bash
-pip install pytest && python -m pytest tests/ -q     # 29 tests, no network, no API key
+pip install pytest && python -m pytest tests/ -q     # 31 tests, no network, no API key
 ```
 
 Covers response normalization across differing field names, address parsing,

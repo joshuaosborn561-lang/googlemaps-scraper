@@ -141,7 +141,7 @@ class Plan:
         lines += [f"    - {c}" for c in self.categories]
         return "\n".join(lines)
 
-    def describe(self, n_zips: int, price: float) -> str:
+    def describe(self, n_zips: int, plan=None, used_this_month: int = 0) -> str:
         n = n_zips * len(self.categories)
         req = [
             k for k, v in (
@@ -163,11 +163,39 @@ class Plan:
             )
         if req:
             out.append(f"  must have   {', '.join(req)}")
-        out += [
-            f"  requests    {n:,}",
-            f"  est. cost   ${n * price:,.2f}   (LLM stages are free)",
-        ]
+        out.append(f"  requests    {n:,}")
+        out += cost_lines(n, plan, used_this_month)
         return "\n".join(out)
+
+
+def cost_lines(n: int, plan=None, used_this_month: int = 0) -> list[str]:
+    """Price a run against the subscription tier, not a flat per-request rate."""
+    if plan is None:
+        return [f"  est. cost   {n:,} requests (no plan configured)"]
+
+    left = max(0, plan.included - used_this_month)
+    cost, billable = plan.cost_for(n, used_this_month)
+    out = [
+        f"  plan        {plan.name} — ${plan.monthly_usd:,.0f}/mo, "
+        f"{plan.included:,} requests included",
+        f"  quota left  {left:,} of {plan.included:,} "
+        f"({used_this_month:,} used this month)",
+    ]
+    if billable == 0:
+        out.append(f"  est. cost   $0.00 extra — fits inside this month's quota")
+    elif cost == float("inf"):
+        out.append(
+            f"  est. cost   BLOCKED — {billable:,} requests over a hard-limit "
+            f"plan. Upgrade before running."
+        )
+    else:
+        out.append(
+            f"  est. cost   ${cost:,.2f} overage "
+            f"({billable:,} x ${plan.overage_usd:g})"
+        )
+        out.append(f"  month total ${plan.monthly_usd + cost:,.2f} including the plan fee")
+    out.append("  (enrich / classify / owners run locally and are free)")
+    return out
 
 
 def make_plan(ollama: Ollama, brief: str) -> Plan:

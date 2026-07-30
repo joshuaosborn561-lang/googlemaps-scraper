@@ -348,10 +348,46 @@ def test_plan_yaml_block_is_valid_yaml():
     assert "Independent HVAC shops" in data["hvac"]["icp"]
 
 
-def test_plan_describe_reports_cost():
+def test_plan_describe_reports_cost_against_the_subscription_tier():
+    from gmscraper.config import PLANS
+
     p = Plan(vertical="hvac", categories=["a", "b"], icp="x", states=["OH"])
-    text = p.describe(1000, 0.0000333)
-    assert "2,000" in text and "$0.07" in text and "OH" in text
+    # 2,000 requests fits inside Pro's 30,000/mo quota -> no extra charge.
+    text = p.describe(1000, PLANS["pro"])
+    assert "2,000" in text and "OH" in text and "fits inside" in text
+
+    # Same run with the quota nearly gone is billed as overage.
+    text = p.describe(1000, PLANS["pro"], used_this_month=29_500)
+    assert "$1.50" in text and "1,500" in text
+
+
+def test_plan_cost_model_matches_the_published_tiers():
+    from gmscraper.config import PLANS
+
+    # National funeral vertical: 29,673 zips x 12 categories.
+    n = 29_673 * 12
+    assert n == 356_076
+
+    cost, billable = PLANS["ultra"].cost_for(n)
+    assert billable == 56_076                       # 300,000 included
+    assert round(cost, 2) == 50.47
+    assert round(PLANS["ultra"].monthly_usd + cost, 2) == 75.47
+
+    # Mega swallows it whole.
+    assert PLANS["mega"].cost_for(n) == (0.0, 0)
+
+    # Basic is a hard limit -- surfaced as infinite, not a small number.
+    cost, billable = PLANS["basic"].cost_for(n)
+    assert cost == float("inf") and billable == 355_076
+
+
+def test_plan_cost_accounts_for_quota_already_spent():
+    from gmscraper.config import PLANS
+
+    pro = PLANS["pro"]
+    assert pro.cost_for(10_000, already_used=0) == (0.0, 0)
+    cost, billable = pro.cost_for(10_000, already_used=25_000)
+    assert billable == 5_000 and round(cost, 2) == 5.00
 
 
 # --------------------------------------------------------------- raw round trip

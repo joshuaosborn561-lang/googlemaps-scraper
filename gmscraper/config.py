@@ -12,6 +12,41 @@ DEFAULT_ZIPS = ROOT / "data" / "us_zipcodes.csv"
 DEFAULT_CATEGORIES = ROOT / "config" / "categories.yml"
 
 
+@dataclass(frozen=True)
+class Plan:
+    """A Maps Data subscription tier.
+
+    Billing is a monthly fee that includes a request quota, then a per-request
+    overage. A flat cents-per-request number cannot express that: the same
+    10,000 searches cost $0 with quota left and $10 without, which is exactly
+    the difference that decides whether a run should auto-approve.
+    """
+
+    name: str
+    monthly_usd: float
+    included: int
+    overage_usd: float | None      # None = hard limit, requests just fail
+
+    def cost_for(self, requests: int, already_used: int = 0) -> tuple[float, int]:
+        """(overage cost, billable requests) for `requests` more this month."""
+        remaining = max(0, self.included - already_used)
+        billable = max(0, requests - remaining)
+        if billable == 0:
+            return 0.0, 0
+        if self.overage_usd is None:
+            return float("inf"), billable
+        return billable * self.overage_usd, billable
+
+
+# Maps Data on RapidAPI, as listed on the plan page.
+PLANS: dict[str, Plan] = {
+    "basic": Plan("basic", 0.0, 1_000, None),
+    "pro": Plan("pro", 5.0, 30_000, 0.001),
+    "ultra": Plan("ultra", 25.0, 300_000, 0.0009),
+    "mega": Plan("mega", 250.0, 6_000_000, 0.00005),
+}
+
+
 def _load_dotenv() -> None:
     """Load .env if python-dotenv is installed; fall back to a tiny parser."""
     env_path = ROOT / ".env"
@@ -72,9 +107,20 @@ class Settings:
     )
     owj_path: str = field(default_factory=lambda: _env("OPENWEBNINJA_PATH", "/search"))
 
-    price_per_request: float = field(
-        default_factory=lambda: _env_float("PRICE_PER_REQUEST", 100.0 / 3_000_000)
-    )
+    maps_plan: str = field(default_factory=lambda: _env("MAPS_PLAN", "pro").lower())
+
+    @property
+    def plan(self) -> Plan:
+        return PLANS.get(self.maps_plan, PLANS["pro"])
+
+    @property
+    def price_per_request(self) -> float:
+        """Marginal cost once the monthly quota is gone — the honest number
+        to price a large run against."""
+        override = _env_float("PRICE_PER_REQUEST", 0.0)
+        if override:
+            return override
+        return self.plan.overage_usd or 0.0
 
     @staticmethod
     def _url(host: str, path: str) -> str:

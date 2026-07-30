@@ -318,6 +318,17 @@ class Store:
         row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
 
+    def requests_this_month(self) -> int:
+        """Searches billed since the 1st — how much of the plan quota is gone.
+
+        Errored jobs count: RapidAPI bills the request, not the useful result.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ('done','error') "
+            "AND updated_at >= date('now','start of month')"
+        ).fetchone()
+        return row[0] if row else 0
+
     # ---------------------------------------------------------------- stats
 
     def stats(self) -> dict[str, Any]:
