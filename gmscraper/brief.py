@@ -179,10 +179,10 @@ def cost_lines(n: int, plan=None, used_this_month: int = 0) -> list[str]:
         f"  plan        {plan.name} — ${plan.monthly_usd:,.0f}/mo, "
         f"{plan.included:,} requests included",
         f"  quota left  {left:,} of {plan.included:,} "
-        f"({used_this_month:,} used this month)",
+        f"({used_this_month:,} used this cycle)",
     ]
     if billable == 0:
-        out.append(f"  est. cost   $0.00 extra — fits inside this month's quota")
+        out.append(f"  est. cost   $0.00 extra — fits inside this cycle's quota")
     elif cost == float("inf"):
         out.append(
             f"  est. cost   BLOCKED — {billable:,} requests over a hard-limit "
@@ -193,7 +193,7 @@ def cost_lines(n: int, plan=None, used_this_month: int = 0) -> list[str]:
             f"  est. cost   ${cost:,.2f} overage "
             f"({billable:,} x ${plan.overage_usd:g})"
         )
-        out.append(f"  month total ${plan.monthly_usd + cost:,.2f} including the plan fee")
+        out.append(f"  cycle total ${plan.monthly_usd + cost:,.2f} including the plan fee")
 
     from .config import cheapest_plan
 
@@ -201,7 +201,7 @@ def cost_lines(n: int, plan=None, used_this_month: int = 0) -> list[str]:
     mine = plan.monthly_usd + (0.0 if cost == float("inf") else cost)
     if best.name != plan.name and best_total < mine:
         out.append(
-            f"  cheaper on  {best.name} — ${best_total:,.2f} this month "
+            f"  cheaper on  {best.name} — ${best_total:,.2f} this cycle "
             f"(saves ${mine - best_total:,.2f})"
         )
     out.append("  (enrich / classify / owners run locally and are free)")

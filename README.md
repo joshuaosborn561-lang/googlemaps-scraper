@@ -103,9 +103,9 @@ PLAN
   quality     rating >= 4.0, reviews >= 20
   must have   phone, email, owner name
   requests    24,908
-  plan        pro — $5/mo, 30,000 requests included
-  quota left  30,000 of 30,000 (0 used this month)
-  est. cost   $0.00 extra — fits inside this month's quota
+  plan        ultra — $25/mo, 300,000 requests included
+  quota left  300,000 of 300,000 (0 used this cycle)
+  est. cost   $0.00 extra — fits inside this cycle's quota
   (enrich / classify / owners run locally and are free)
 ```
 
