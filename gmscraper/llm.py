@@ -1,0 +1,94 @@
+"""Local Ollama client.
+
+Uses Ollama's structured-output support: `format` takes a JSON schema and the
+model is constrained to emit matching JSON, so there is no brittle parsing of
+prose.  `keep_alive` holds the model in VRAM between calls -- without it a
+long run pays the reload cost on every request.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import requests
+
+
+class OllamaError(RuntimeError):
+    pass
+
+
+class Ollama:
+    def __init__(
+        self,
+        host: str = "http://localhost:11434",
+        model: str = "gemma4:12b",
+        timeout: int = 180,
+        keep_alive: str = "30m",
+        num_ctx: int = 8192,
+    ):
+        self.host = host.rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self.keep_alive = keep_alive
+        self.num_ctx = num_ctx
+        self.session = requests.Session()
+
+    # ------------------------------------------------------------ preflight
+
+    def check(self) -> None:
+        """Fail early and with a fixable message rather than mid-run."""
+        try:
+            r = self.session.get(f"{self.host}/api/tags", timeout=10)
+            r.raise_for_status()
+            tags = [m["name"] for m in r.json().get("models", [])]
+        except requests.RequestException as exc:
+            raise SystemExit(
+                f"Cannot reach Ollama at {self.host} ({exc}).\n"
+                f"Start it with `ollama serve` and check OLLAMA_HOST in .env."
+            ) from exc
+
+        # Ollama reports "gemma4:12b"; accept a bare "gemma4" as a match too.
+        if not any(t == self.model or t.split(":")[0] == self.model.split(":")[0]
+                   for t in tags):
+            raise SystemExit(
+                f"Model '{self.model}' is not pulled. Run:\n"
+                f"    ollama pull {self.model}\n"
+                f"Installed: {', '.join(tags) or '(none)'}"
+            )
+
+    # ----------------------------------------------------------------- chat
+
+    def json_chat(
+        self,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        temperature: float = 0.0,
+    ) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": False,
+            "format": schema,
+            "keep_alive": self.keep_alive,
+            "options": {"temperature": temperature, "num_ctx": self.num_ctx},
+        }
+        try:
+            r = self.session.post(
+                f"{self.host}/api/chat", json=payload, timeout=self.timeout
+            )
+            r.raise_for_status()
+            content = r.json().get("message", {}).get("content", "")
+        except requests.RequestException as exc:
+            raise OllamaError(f"ollama request failed: {exc}") from exc
+
+        if not content:
+            raise OllamaError("empty response from model")
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise OllamaError(f"model returned non-JSON: {content[:200]}") from exc
