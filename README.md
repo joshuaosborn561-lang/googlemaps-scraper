@@ -55,6 +55,30 @@ without it.
 
 ---
 
+## Or just talk to Claude Code
+
+If you'd rather not learn the flags, run [Claude Code](https://code.claude.com/docs/en/quickstart)
+inside this repo and describe what you want:
+
+```bash
+# install once - Windows PowerShell:
+irm https://claude.ai/install.ps1 | iex
+# macOS / Linux / WSL:
+curl -fsSL https://claude.ai/install.sh | bash
+
+cd googlemaps-scraper
+claude
+```
+
+Then: *"get me independent HVAC companies in Ohio with owner names and emails."*
+
+`CLAUDE.md` in this repo tells it which commands to run, to show you the cost
+estimate and wait for approval before anything paid, to pilot one state before
+going national, and to never delete `leads.db`. It runs on your machine, so it
+can reach your Ollama and your RapidAPI key directly.
+
+---
+
 ## Just describe what you want
 
 ```bash
