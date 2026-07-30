@@ -8,11 +8,15 @@ The businesses worth reaching here — funeral homes, HVAC shops, gyms, dentists
 them. Google Maps does.
 
 ```
-zips ──► scrape ──► enrich ──► classify ──► owners ──► export
- │         │          │           │            │          │
-offline  RapidAPI  html2text   Gemma on     Gemma on    CSV
-         (paid)     (free)     Ollama       Ollama +
-                               (free)       web (cheap)
+       "independent HVAC shops in Ohio, 4+ stars, owner name and email"
+                              │
+                        plan (local Gemma, free)
+                              ▼
+zips ──► scrape ──► enrich ──────► classify ──► owners ──► export
+ │         │          │              │            │          │
+offline  RapidAPI  html2text      Gemma on     Gemma on    CSV
+         (paid)    + emails       Ollama       Ollama +
+                    (free)        (free)       web (cheap)
 ```
 
 Every stage checkpoints into one SQLite file. Kill any stage at any point and
@@ -50,7 +54,63 @@ without it.
 
 ---
 
-## Run it
+## Just describe what you want
+
+```bash
+python -m gmscraper plan "independent HVAC companies in Ohio and Michigan, \
+    4+ stars and at least 20 reviews, I need the owner's name and an email"
+```
+
+Your local Gemma expands that into a plan and prices it before you spend
+anything:
+
+```
+PLAN
+  vertical    hvac_contractors
+  categories  13: hvac contractor, heating contractor, air conditioning
+              contractor, furnace repair service, air conditioning repair
+              service, heat pump supplier, boiler supplier, ...
+  ICP         Independent residential and light-commercial HVAC contractors.
+              Exclude equipment manufacturers, parts wholesalers, big-box
+              retailers and national franchise call centers.
+  region      OH, MI
+  zips        1,916
+  quality     rating >= 4.0, reviews >= 20
+  must have   phone, email, owner name
+  requests    24,908
+  est. cost   $0.83   (LLM stages are free)
+```
+
+Happy with it? Run the whole thing — scrape, website fetch, ICP filter, owner
+lookup, CSV — with one command:
+
+```bash
+python -m gmscraper run "independent HVAC companies in Ohio and Michigan, \
+    4+ stars and 20+ reviews, owner name and email" --out out/hvac.csv
+```
+
+It prints the same plan, asks you to confirm, then drives all five stages.
+`--yes` skips the prompt.
+
+Planning is free and runs entirely on your machine, so iterate on the wording
+until the category list looks right. To hand-edit before running:
+
+```bash
+python -m gmscraper plan "..." --save plans/hvac.json
+$EDITOR plans/hvac.json
+python -m gmscraper run --plan plans/hvac.json --out out/hvac.csv
+```
+
+The category list is the single biggest driver of both cost and list quality,
+which is why `run` always shows it and never executes blind.
+
+The stages below are the same thing with the lid off — use them when you want
+to re-run one part (say, re-classify against a tighter ICP) without redoing
+the scrape.
+
+---
+
+## Run it stage by stage
 
 ```bash
 # 0. Build the ZIP list (offline, no API calls, ~2s)
@@ -213,20 +273,69 @@ If it's too loose, tighten the `icp:` exclusions or raise `--min-confidence`.
 
 ---
 
+## Emails — read this before you plan a campaign
+
+**Google Maps does not return email addresses.** Not in this API, not in any
+of them. Name, phone, website, address, rating — yes. Email, never. Any tool
+claiming Maps emails is getting them somewhere else.
+
+So this pipeline gets them somewhere else too, for free: the `enrich` stage is
+already downloading each business's homepage, about, team and contact pages
+for the classifier, and the contact page is exactly where a local business
+puts its address. Emails are pulled from the raw HTML *before* html2text runs,
+because the converter discards `mailto:` links — which is where most of them
+live. Obfuscated ones (`info [at] example [dot] com`) are decoded too.
+
+Addresses are then ranked, not just collected:
+
+| Beats | Because |
+|---|---|
+| `margaret@shop.com` over `info@shop.com` | a named human, especially when it matches the owner name found in step 6 |
+| `info@shop.com` over `owner@gmail.com` | on the company's own domain |
+| anything over `careers@`, `billing@` | not who you want |
+| everything over `noreply@`, `webmaster@` | dropped entirely, along with `you@example.com`-style boilerplate |
+
+The CSV gets a chosen `email` plus up to five more in `all_emails`.
+
+**Expect partial coverage.** Roughly half to two-thirds of local businesses on
+Maps list a website at all, and not all of those publish an address. So plan
+for an email on a meaningful minority of rows, not most of them — and check
+your own number after a pilot state rather than trusting mine:
+
+```bash
+python -m gmscraper run "HVAC in Ohio, owner name and email" --out out/oh.csv
+python -m gmscraper stats     # businesses / with website / domains with email
+```
+
+Two things worth knowing:
+
+* **Phone coverage is near-total** and, for funeral homes and HVAC shops,
+  a phone number is often the better channel anyway.
+* If you need email on the rows the website scrape missed, export the CSV and
+  push `owner_name` + `domain` through a dedicated finder. You already have
+  LeadMagic, AI Ark and BillionVerify connected on the Claude side — hand me
+  the CSV and I can run that waterfall and verify the results.
+
+Always verify before sending. Scraped addresses go stale and hitting dead ones
+wrecks your domain reputation.
+
+---
+
 ## Export
 
 ```bash
 python -m gmscraper export --out out/leads.csv                  # in-ICP only
+python -m gmscraper export --out out/leads.csv --with-email     # only rows with an email
 python -m gmscraper export --out out/leads.csv --with-owner     # named owner only
 python -m gmscraper export --out out/oh.csv --states OH PA MI
+python -m gmscraper export --out out/good.csv --min-rating 4.0 --min-reviews 20
 python -m gmscraper export --out out/all.csv --all              # everything
-python -m gmscraper export --out out/leads.csv --min-confidence 0.8
 ```
 
-Columns: `place_id, name, owner_name, owner_title, owner_source, phone,
-website, domain, address, city, state, zip, rating, reviews, main_category,
-types, latitude, longitude, maps_url, in_icp, icp_confidence, icp_reason,
-source_category`.
+Columns: `place_id, name, owner_name, owner_title, owner_source, email,
+all_emails, phone, website, domain, address, city, state, zip, rating,
+reviews, main_category, types, latitude, longitude, maps_url, in_icp,
+icp_confidence, icp_reason, source_category`.
 
 `owner_source` is `website`, `websearch` or `none` — useful for deciding how
 much to trust a first name before you merge it into a mail-merge.
@@ -255,12 +364,12 @@ they're not the business's own site, so there's nothing on them worth reading.
 ## Tests
 
 ```bash
-pip install pytest && python -m pytest tests/ -q     # 17 tests, no network, no API key
+pip install pytest && python -m pytest tests/ -q     # 29 tests, no network, no API key
 ```
 
 Covers response normalization across differing field names, address parsing,
-aggregator rejection, cross-ZIP dedup, job checkpoint/resume and export
-filtering.
+aggregator rejection, email harvesting/ranking, brief-to-plan parsing,
+cross-ZIP dedup, job checkpoint/resume and export filtering.
 
 ---
 

@@ -90,6 +90,16 @@ CREATE TABLE IF NOT EXISTS owners (
     updated_at   TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Keyed by domain like `sites`, so multi-location businesses share them.
+CREATE TABLE IF NOT EXISTS emails (
+    domain     TEXT NOT NULL,
+    email      TEXT NOT NULL,
+    source     TEXT,
+    found_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (domain, email)
+);
+CREATE INDEX IF NOT EXISTS idx_emails_domain ON emails(domain);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -230,6 +240,27 @@ class Store:
         ).fetchone()
         return row["text"] if row else None
 
+    # --------------------------------------------------------------- emails
+
+    def save_emails(
+        self, domain: str, addresses: Iterable[str], source: str = "website"
+    ) -> int:
+        rows = [(domain, e, source) for e in sorted(set(addresses)) if e]
+        if not rows:
+            return 0
+        with self.conn as c:
+            cur = c.executemany(
+                "INSERT OR IGNORE INTO emails (domain, email, source) VALUES (?,?,?)",
+                rows,
+            )
+            return cur.rowcount or 0
+
+    def emails_by_domain(self) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for r in self.conn.execute("SELECT domain, email FROM emails ORDER BY domain"):
+            out.setdefault(r["domain"], []).append(r["email"])
+        return out
+
     # ------------------------------------------------------ verdicts/owners
 
     def save_verdict(
@@ -306,6 +337,8 @@ class Store:
             "domains": q("SELECT COUNT(*) FROM sites"),
             "sites_ok": q("SELECT COUNT(*) FROM sites WHERE status='ok'"),
             "sites_pending": q("SELECT COUNT(*) FROM sites WHERE status='pending'"),
+            "emails": q("SELECT COUNT(*) FROM emails"),
+            "domains_with_email": q("SELECT COUNT(DISTINCT domain) FROM emails"),
             "classified": q("SELECT COUNT(*) FROM verdicts"),
             "in_icp": q("SELECT COUNT(*) FROM verdicts WHERE in_icp=1"),
             "owners_found": q(

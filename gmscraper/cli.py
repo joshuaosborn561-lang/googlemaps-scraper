@@ -8,7 +8,17 @@ import os
 import sys
 from pathlib import Path
 
-from . import __version__, classify, enrich_site, export, mapsdata, owner, scrape, zips
+from . import (
+    __version__,
+    brief as brief_mod,
+    classify,
+    enrich_site,
+    export,
+    mapsdata,
+    owner,
+    scrape,
+    zips,
+)
 from .config import DEFAULT_CATEGORIES, DEFAULT_DB, DEFAULT_ZIPS, settings
 from .llm import Ollama
 from .mapsdata import MapsDataClient
@@ -217,10 +227,95 @@ def cmd_export(args) -> None:
         with_owner=args.with_owner,
         with_phone=args.with_phone,
         with_website=args.with_website,
+        with_email=args.with_email,
         min_confidence=args.min_confidence,
+        min_rating=args.min_rating,
+        min_reviews=args.min_reviews,
         states=args.states,
     )
     print(f"Wrote {n:,} rows -> {args.out}")
+
+
+def _build_plan(args):
+    """Plan from a --plan file, or by asking the local model about the brief."""
+    if getattr(args, "plan", ""):
+        return brief_mod.load(args.plan)
+    text = " ".join(args.brief).strip()
+    if not text:
+        raise SystemExit('Describe what you want, e.g. gmscraper plan "HVAC in Ohio"')
+    print(f'Planning: "{text}"\n(asking {args.model or settings.ollama_model}...)\n')
+    return brief_mod.make_plan(make_ollama(args), text)
+
+
+def cmd_plan(args) -> None:
+    plan = _build_plan(args)
+    zip_rows = zips.load(args.zips, states=plan.states or None, limit=args.limit)
+    print("PLAN")
+    print(plan.describe(len(zip_rows), settings.price_per_request))
+    if args.save:
+        brief_mod.save(plan, args.save)
+        print(f"\nSaved -> {args.save}")
+        print(f"Edit it, then: python -m gmscraper run --plan {args.save}")
+    else:
+        print("\nAdd to config/categories.yml to keep it:\n")
+        print(plan.to_yaml_block())
+
+
+def cmd_run(args) -> None:
+    """Plan, confirm, then drive every stage to a finished CSV."""
+    settings.require_rapidapi()
+    ollama = make_ollama(args)          # fail now, not after the scrape
+    plan = _build_plan(args)
+    zip_rows = zips.load(args.zips, states=plan.states or None, limit=args.limit)
+
+    print("PLAN")
+    print(plan.describe(len(zip_rows), settings.price_per_request))
+    if not args.yes:
+        try:
+            if input("\nProceed? [y/N] ").strip().lower() not in ("y", "yes"):
+                raise SystemExit("Cancelled. Nothing spent.")
+        except EOFError:
+            raise SystemExit("Cancelled (no tty). Re-run with --yes.") from None
+
+    store = make_store(args)
+    client = MapsDataClient(settings, limit=args.limit_results,
+                            query_template=args.query_template)
+
+    print("\n[1/5] scraping Google Maps")
+    scrape.run(store, client, zip_rows, plan.categories, workers=args.workers,
+               price_per_request=settings.price_per_request)
+
+    print("\n[2/5] fetching websites")
+    store.queue_sites()
+    enrich_site.run(store, store.pending_sites(), workers=args.site_workers,
+                    respect_robots=not args.ignore_robots)
+
+    print("\n[3/5] qualifying against the ICP")
+    classify.run(store, ollama, plan.icp, workers=args.llm_workers,
+                 min_confidence=args.min_confidence)
+
+    if plan.require_owner or args.owners:
+        print("\n[4/5] finding owner names")
+        owj = OpenWebNinja(settings) if args.fallback else None
+        owner.run(store, ollama, owj, workers=args.llm_workers)
+    else:
+        print("\n[4/5] skipping owner lookup (not requested; --owners to force)")
+
+    print("\n[5/5] exporting")
+    n = export.run(
+        store, args.out,
+        icp_only=True,
+        with_owner=plan.require_owner,
+        with_phone=plan.require_phone,
+        with_website=plan.require_website,
+        with_email=plan.require_email,
+        min_confidence=args.min_confidence,
+        min_rating=plan.min_rating,
+        min_reviews=plan.min_reviews,
+        states=plan.states or None,
+    )
+    print(f"\nDone. {n:,} leads -> {args.out}")
+    cmd_stats(args)
 
 
 def cmd_stats(args) -> None:
@@ -287,6 +382,34 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--model", default="", help=f"default: {settings.ollama_model}")
         sp.add_argument("--ollama-host", default="")
         sp.add_argument("--num-ctx", type=int, default=8192)
+
+    sp = sub.add_parser(
+        "plan", help='turn a plain-English brief into a run plan (free, no scraping)'
+    )
+    sp.add_argument("brief", nargs="*", help='e.g. "HVAC companies in Ohio, 4+ stars"')
+    sp.add_argument("--plan", default="", help="load a saved plan instead")
+    sp.add_argument("--save", default="", help="write the plan to this JSON file")
+    add_zip_args(sp)
+    add_llm_args(sp)
+    sp.set_defaults(func=cmd_plan)
+
+    sp = sub.add_parser("run", help="plan, confirm, then run every stage to a CSV")
+    sp.add_argument("brief", nargs="*", help='e.g. "gyms in TX with 50+ reviews"')
+    sp.add_argument("--plan", default="", help="use a saved/edited plan")
+    sp.add_argument("--out", default="out/leads.csv")
+    sp.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
+    sp.add_argument("--workers", type=int, default=8, help="scrape workers")
+    sp.add_argument("--site-workers", type=int, default=12)
+    sp.add_argument("--llm-workers", type=int, default=2)
+    sp.add_argument("--limit-results", type=int, default=20)
+    sp.add_argument("--query-template", default="{category} in {zip}")
+    sp.add_argument("--min-confidence", type=float, default=0.0)
+    sp.add_argument("--owners", action="store_true", help="force the owner stage")
+    sp.add_argument("--fallback", action="store_true", help="OpenWeb Ninja fallback")
+    sp.add_argument("--ignore-robots", action="store_true")
+    add_zip_args(sp)
+    add_llm_args(sp)
+    sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("zips", help="build the US ZIP list (offline)")
     sp.add_argument("--out", default=str(DEFAULT_ZIPS))
@@ -358,7 +481,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--with-owner", action="store_true")
     sp.add_argument("--with-phone", action="store_true")
     sp.add_argument("--with-website", action="store_true")
+    sp.add_argument("--with-email", action="store_true")
     sp.add_argument("--min-confidence", type=float, default=0.0)
+    sp.add_argument("--min-rating", type=float, default=0.0)
+    sp.add_argument("--min-reviews", type=int, default=0)
     sp.add_argument("--states", nargs="*")
     sp.set_defaults(func=cmd_export)
 

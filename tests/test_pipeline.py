@@ -8,7 +8,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from gmscraper import emails as email_lib  # noqa: E402
 from gmscraper import export, zips  # noqa: E402
+from gmscraper.brief import Plan  # noqa: E402
 from gmscraper.mapsdata import (  # noqa: E402
     domain_of,
     extract_list,
@@ -223,6 +225,133 @@ def test_zip_build_all_types_is_larger(tmp_path):
     small = zips.build(tmp_path / "a.csv", types=["STANDARD"])
     big = zips.build(tmp_path / "b.csv", types=["all"], include_territories=True)
     assert big > small > 0
+
+
+# ----------------------------------------------------------------- emails
+
+
+def test_harvest_finds_mailto_text_and_obfuscated():
+    html = """<html><body>
+      <a href="mailto:info@riversidefh.com">Email us</a>
+      <p>Owner: margaret@riversidefh.com</p>
+      <p>Billing: billing [at] riversidefh [dot] com</p>
+      <img src="logo@2x.png"><script>x="a3f9c1d2e4b5a6c7@cdn.io"</script>
+    </body></html>"""
+    got = email_lib.harvest(html)
+    assert "info@riversidefh.com" in got
+    assert "margaret@riversidefh.com" in got
+    assert "billing@riversidefh.com" in got
+    assert not any(e.endswith(".png") for e in got)
+
+
+def test_harvest_rejects_boilerplate_and_junk():
+    html = """<a href="mailto:noreply@x.com">x</a>
+              <p>you@example.com sentry@wixpress.com webmaster@x.com</p>"""
+    assert email_lib.harvest(html) == set()
+
+
+def test_email_ranking_prefers_owner_then_own_domain():
+    pool = ["info@fh.com", "margaret@fh.com", "someone@gmail.com", "careers@fh.com"]
+    # Owner known -> their personal address wins outright.
+    assert email_lib.best_for(pool, "fh.com", "Margaret A. Whitfield") == "margaret@fh.com"
+    # Owner unknown -> a named human on the company domain still beats the role
+    # inbox, which is what you want for cold outreach.
+    assert email_lib.best_for(pool, "fh.com", "") == "margaret@fh.com"
+
+    order = email_lib.rank(pool, "fh.com")
+    assert order.index("info@fh.com") < order.index("careers@fh.com")   # role priority
+    assert order.index("info@fh.com") < order.index("someone@gmail.com")  # own domain
+
+
+def test_email_ranking_role_inbox_wins_when_no_human_present():
+    pool = ["careers@fh.com", "info@fh.com", "owner@gmail.com"]
+    assert email_lib.best_for(pool, "fh.com", "") == "info@fh.com"
+
+
+def test_email_ranking_handles_empty():
+    assert email_lib.best_for([], "fh.com", "X") == ""
+
+
+def test_store_saves_and_groups_emails(tmp_path):
+    s = Store(tmp_path / "t.db")
+    assert s.save_emails("x.com", {"a@x.com", "b@x.com"}) == 2
+    assert s.save_emails("x.com", {"a@x.com"}) == 0          # idempotent
+    assert sorted(s.emails_by_domain()["x.com"]) == ["a@x.com", "b@x.com"]
+    assert s.stats()["domains_with_email"] == 1
+
+
+def test_export_includes_ranked_email(tmp_path):
+    s = Store(tmp_path / "t.db")
+    s.upsert_businesses([_biz("a", domain="fh.com", website="https://fh.com")])
+    s.save_verdict("a", True, 0.9, "ok", "m")
+    s.save_owner("a", "Margaret Whitfield", "Owner", "website", 0.9, "m")
+    s.save_emails("fh.com", {"info@fh.com", "margaret@fh.com"})
+
+    out = tmp_path / "l.csv"
+    assert export.run(s, out) == 1
+    body = out.read_text().splitlines()[1]
+    assert "margaret@fh.com" in body          # chosen
+    assert "info@fh.com" in body              # kept in all_emails
+
+    # --with-email filters out businesses with no address on file
+    s.upsert_businesses([_biz("b", domain="none.com")])
+    s.save_verdict("b", True, 0.9, "ok", "m")
+    assert export.run(s, out, with_email=True) == 1
+    assert export.run(s, out, with_email=False) == 2
+
+
+def test_export_quality_filters(tmp_path):
+    s = Store(tmp_path / "t.db")
+    s.upsert_businesses([_biz("a", rating=4.8, reviews=120),
+                         _biz("b", rating=3.1, reviews=4)])
+    for pid in ("a", "b"):
+        s.save_verdict(pid, True, 0.9, "ok", "m")
+    out = tmp_path / "l.csv"
+    assert export.run(s, out, min_rating=4.0) == 1
+    assert export.run(s, out, min_reviews=50) == 1
+    assert export.run(s, out, min_rating=4.0, min_reviews=200) == 0
+
+
+# ------------------------------------------------------------------- plan
+
+
+def test_plan_from_model_cleans_up_output():
+    p = Plan.from_model({
+        "vertical": "HVAC Contractors!",
+        "categories": ["HVAC contractor", "hvac contractor  ", "Heating Contractor", ""],
+        "icp": "Independent  HVAC   shops.\nExclude wholesalers.",
+        "states": ["oh", "MI", "ZZ", "OH"],          # dupe + invalid dropped
+        "min_rating": "4.0", "min_reviews": "20",
+        "require_website": True, "require_phone": False,
+        "require_email": True, "require_owner": True,
+    })
+    assert p.vertical == "hvac_contractors"
+    assert p.categories == ["hvac contractor", "heating contractor"]   # deduped
+    assert p.states == ["OH", "MI"]
+    assert p.min_rating == 4.0 and p.min_reviews == 20
+    assert p.icp == "Independent HVAC shops. Exclude wholesalers."
+    assert p.require_email and p.require_owner and not p.require_phone
+
+
+def test_plan_tolerates_garbage_numbers():
+    p = Plan.from_model({"vertical": "", "categories": ["gym"], "icp": "x",
+                         "states": [], "min_rating": "n/a", "min_reviews": None})
+    assert p.vertical == "custom" and p.min_rating == 0.0 and p.min_reviews == 0
+
+
+def test_plan_yaml_block_is_valid_yaml():
+    import yaml
+    p = Plan(vertical="hvac", categories=["hvac contractor", "heating contractor"],
+             icp="Independent HVAC shops that serve homeowners. " * 4)
+    data = yaml.safe_load(p.to_yaml_block())
+    assert data["hvac"]["categories"] == ["hvac contractor", "heating contractor"]
+    assert "Independent HVAC shops" in data["hvac"]["icp"]
+
+
+def test_plan_describe_reports_cost():
+    p = Plan(vertical="hvac", categories=["a", "b"], icp="x", states=["OH"])
+    text = p.describe(1000, 0.0000333)
+    assert "2,000" in text and "$0.07" in text and "OH" in text
 
 
 # --------------------------------------------------------------- raw round trip

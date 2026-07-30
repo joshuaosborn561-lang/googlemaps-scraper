@@ -20,6 +20,7 @@ from urllib.robotparser import RobotFileParser
 import html2text
 import requests
 
+from . import emails as email_lib
 from .store import Store
 
 UA = (
@@ -135,27 +136,37 @@ def fetch_domain(
     robots: RobotsCache,
     timeout: int = 15,
     delay: float = 0.0,
-) -> tuple[str, str, list[str], str | None]:
-    """Return (status, text, pages_fetched, error)."""
+) -> tuple[str, str, list[str], set[str], str | None]:
+    """Return (status, text, pages_fetched, emails, error).
+
+    Emails are harvested from the raw HTML before html2text runs -- the
+    converter drops `mailto:` hrefs, which is exactly where contact addresses
+    usually live.
+    """
     conv = _converter()
     pages, chunks = [], []
+    found: set[str] = set()
     home_html = None
 
     for scheme in ("https", "http"):
         url = f"{scheme}://{domain}/"
         if not robots.allows(url):
-            return "skipped", "", [], "robots.txt disallows /"
+            return "skipped", "", [], set(), "robots.txt disallows /"
         home_html = _get(session, url, timeout)
         if home_html:
             pages.append(url)
             chunks.append(conv.handle(home_html))
+            found |= email_lib.harvest(home_html)
             break
 
     if not home_html:
-        return "error", "", [], "homepage unreachable"
+        return "error", "", [], set(), "homepage unreachable"
 
+    # Keep visiting contact-ish pages even once we have enough text: the
+    # contact page is where the email is, and it is often the last one.
     for sub in _sub_pages(home_html, pages[0]):
-        if sum(len(c) for c in chunks) >= MAX_CHARS:
+        enough_text = sum(len(c) for c in chunks) >= MAX_CHARS
+        if enough_text and found:
             break
         if not robots.allows(sub):
             continue
@@ -164,14 +175,16 @@ def fetch_domain(
         html = _get(session, sub, timeout)
         if html:
             pages.append(sub)
-            chunks.append(conv.handle(html))
+            found |= email_lib.harvest(html)
+            if not enough_text:
+                chunks.append(conv.handle(html))
 
     text = WS.sub("\n\n", "\n\n".join(chunks)).strip()
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
     if not text:
-        return "error", "", pages, "no text extracted"
-    return "ok", text, pages, None
+        return "error", "", pages, found, "no text extracted"
+    return "ok", text, pages, found, None
 
 
 def run(
@@ -188,7 +201,7 @@ def run(
 
     print(f"Fetching {len(domains):,} domains with {workers} workers")
     robots = RobotsCache(respect_robots)
-    counts = {"ok": 0, "error": 0, "skipped": 0}
+    counts = {"ok": 0, "error": 0, "skipped": 0, "emails": 0}
     lock = threading.Lock()
     done = 0
 
@@ -197,21 +210,27 @@ def run(
         session = requests.Session()
         session.headers.update({"User-Agent": UA, "Accept": "text/html"})
         try:
-            status, text, pages, err = fetch_domain(
+            status, text, pages, found, err = fetch_domain(
                 domain, session, robots, timeout, delay
             )
         except Exception as exc:  # noqa: BLE001
-            status, text, pages, err = "error", "", [], f"{type(exc).__name__}: {exc}"
+            status, text, pages, found, err = (
+                "error", "", [], set(), f"{type(exc).__name__}: {exc}"
+            )
         finally:
             session.close()
         store.save_site(domain, status, text, pages, err)
+        if found:
+            store.save_emails(domain, found, source="website")
         with lock:
             counts[status] = counts.get(status, 0) + 1
+            counts["emails"] += int(bool(found))
             done += 1
             if done % 25 == 0 or done == len(domains):
                 sys.stderr.write(
                     f"\r  {done:,}/{len(domains):,} | ok={counts['ok']:,} "
-                    f"err={counts['error']:,} skip={counts['skipped']:,}   "
+                    f"err={counts['error']:,} skip={counts['skipped']:,} "
+                    f"| with email {counts['emails']:,}   "
                 )
                 sys.stderr.flush()
 
