@@ -318,16 +318,23 @@ class Store:
         row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
 
-    def requests_this_month(self) -> int:
-        """Searches billed since the 1st — how much of the plan quota is gone.
+    def requests_since(self, since_iso: str) -> int:
+        """Searches billed since a date — how much of the plan quota is gone.
 
-        Errored jobs count: RapidAPI bills the request, not the useful result.
+        Errored jobs count: the provider bills the request, not the useful
+        result.
         """
         row = self.conn.execute(
             "SELECT COUNT(*) FROM jobs WHERE status IN ('done','error') "
-            "AND updated_at >= date('now','start of month')"
+            "AND updated_at >= ?",
+            (since_iso,),
         ).fetchone()
         return row[0] if row else 0
+
+    def requests_this_cycle(self, reset_day: int = 1) -> int:
+        from .config import cycle_start
+
+        return self.requests_since(cycle_start(reset_day))
 
     # ---------------------------------------------------------------- stats
 

@@ -250,6 +250,10 @@ against your real tier:
 | ultra | $25 | 300,000 | $0.0009 |
 | mega | $250 | 6,000,000 | $0.00005 |
 
+Set `MAPS_QUOTA_RESET_DAY` to the day you subscribed — RapidAPI resets quota
+on the subscription anniversary, not the 1st, and the "quota left" figure is
+wrong by however many days those differ.
+
 With the default 29,673-ZIP list:
 
 | Job | Requests | Cheapest plan | Cost that month |
@@ -409,7 +413,7 @@ they're not the business's own site, so there's nothing on them worth reading.
 ## Tests
 
 ```bash
-pip install pytest && python -m pytest tests/ -q     # 31 tests, no network, no API key
+pip install pytest && python -m pytest tests/ -q     # 34 tests, no network, no API key
 ```
 
 Covers response normalization across differing field names, address parsing,

@@ -415,3 +415,26 @@ def test_cheapest_plan_matches_the_break_even_points():
     assert cheapest_plan(600_000)[0].name == "mega"
     # basic is never chosen -- it cannot serve anything past its hard limit.
     assert cheapest_plan(5_000)[0].name != "basic"
+
+
+def test_cycle_start_follows_the_subscription_anniversary():
+    from datetime import date
+    from gmscraper.config import cycle_start
+
+    # Subscribed on the 30th: on Aug 5 you are inside the cycle that began Jul 30.
+    assert cycle_start(30, date(2026, 8, 5)) == "2026-07-28"   # clamped to 28
+    assert cycle_start(15, date(2026, 8, 5)) == "2026-07-15"
+    assert cycle_start(15, date(2026, 8, 20)) == "2026-08-15"
+    # Default day 1 behaves like the calendar month.
+    assert cycle_start(1, date(2026, 8, 20)) == "2026-08-01"
+    # January rolls back into the previous year.
+    assert cycle_start(15, date(2026, 1, 3)) == "2025-12-15"
+
+
+def test_requests_this_cycle_counts_billed_jobs_only(tmp_path):
+    s = Store(tmp_path / "t.db")
+    s.queue_jobs(["1", "2", "3"], ["gym"])
+    s.finish_job("1", "gym", 20)              # done  -> billed
+    s.finish_job("2", "gym", 0, "boom")       # error -> still billed
+    assert s.requests_since("1970-01-01") == 2
+    assert s.requests_since("2999-01-01") == 0   # nothing in a future cycle

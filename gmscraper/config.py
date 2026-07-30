@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,6 +46,24 @@ PLANS: dict[str, Plan] = {
     "ultra": Plan("ultra", 25.0, 300_000, 0.0009),
     "mega": Plan("mega", 250.0, 6_000_000, 0.00005),
 }
+
+
+def cycle_start(reset_day: int = 1, today: "date | None" = None) -> str:
+    """First day of the current billing cycle, as an ISO date.
+
+    RapidAPI resets quota on the subscription anniversary, not the 1st. If you
+    subscribed on the 30th, then on the 5th of the next month you are five days
+    into a cycle -- counting from the 1st would under-report usage and make an
+    over-quota run look free. Days past 28 are clamped so February behaves.
+    """
+    from datetime import date as _date, timedelta
+
+    today = today or _date.today()
+    day = max(1, min(int(reset_day), 28))
+    if today.day >= day:
+        return today.replace(day=day).isoformat()
+    prev_month_end = today.replace(day=1) - timedelta(days=1)
+    return prev_month_end.replace(day=day).isoformat()
 
 
 def cheapest_plan(requests: int, used_this_month: int = 0) -> tuple[Plan, float]:
@@ -125,11 +144,14 @@ class Settings:
     )
     owj_path: str = field(default_factory=lambda: _env("OPENWEBNINJA_PATH", "/search"))
 
-    maps_plan: str = field(default_factory=lambda: _env("MAPS_PLAN", "pro").lower())
+    maps_plan: str = field(default_factory=lambda: _env("MAPS_PLAN", "ultra").lower())
+    quota_reset_day: int = field(
+        default_factory=lambda: int(_env_float("MAPS_QUOTA_RESET_DAY", 1))
+    )
 
     @property
     def plan(self) -> Plan:
-        return PLANS.get(self.maps_plan, PLANS["pro"])
+        return PLANS.get(self.maps_plan, PLANS["ultra"])
 
     @property
     def price_per_request(self) -> float:

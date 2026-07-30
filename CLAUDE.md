@@ -24,7 +24,7 @@ The flow, every time:
 2. Sanity-check the category list yourself before pricing it. If an obvious
    Maps synonym is missing, add it — a missing category is a missing slice of
    the market, and this is the single biggest driver of list quality.
-3. Show **one line**: `24,908 requests, $0 (inside pro quota), 1,916 zips,
+3. Show **one line**: `24,908 requests, $0 (inside ultra quota), 1,916 zips,
    13 categories`.
 4. Under `AUTO_APPROVE_UNDER`? Just go. Over it? Ask once, then wait.
 5. Run every stage. Report rows, email coverage %, owner coverage %, and ~15
@@ -47,12 +47,13 @@ Billing is a monthly plan + quota, not cents per request — `estimate` and
 month. Read the `est. cost` line they print, not a per-request rate.
 
 1. **Fits inside the monthly quota, or under $5 of overage? Just run it** —
-   show the number, don't wait. That covers any single state on the `pro`
-   plan, which is most requests. **Over that, ask once** with the dollar
+   show the number, don't wait. Josh is on `ultra`: 300,000 requests a month
+   included, which covers every state-level run and ~10 categories
+   nationally at no extra cost. **Over that, ask once** with the dollar
    figure, and wait for a yes. Never pass `--yes` to `run` for an
    over-threshold job he hasn't approved in the conversation.
-   If the estimate says BLOCKED, he is on `basic` (1,000/month hard limit) —
-   tell him to upgrade, don't try to run it.
+   If the estimate ever says BLOCKED, the plan dropped to `basic` —
+   tell him, don't try to run it.
 2. **No region named?** Ask which state(s) before running. Nationwide is
    20–30x the cost of one state — never assume it.
 3. **Run `probe` before the first scrape in a fresh checkout or after any
@@ -97,7 +98,8 @@ without re-scraping).
 | "I need more of them" | add category aliases (the usual cause of a short list), `estimate`, then scrape the new categories — existing ones are already checkpointed and won't re-charge |
 | "no emails in the CSV" | check `stats` for `domains with email`. Maps returns no emails; they come from the website scrape, so coverage is partial by nature. Say so plainly rather than implying it's a bug |
 | "it stopped / I killed it" | just re-run the same command. Every stage resumes from SQLite |
-| "how much have I spent" | `estimate` prints quota used this month; multiply anything past the quota by the plan's overage rate |
+| "how much have I spent" | `estimate` prints quota used this billing cycle and the overage on top |
+| "quota numbers look wrong" | `MAPS_QUOTA_RESET_DAY` in `.env` must be the day he subscribed — RapidAPI resets on the anniversary, not the 1st |
 
 ## Things that will bite you
 
@@ -128,7 +130,7 @@ gmscraper/
   store.py       SQLite: jobs, businesses, sites, emails, verdicts, owners
   export.py      CSV
 config/categories.yml   verticals: icp + category aliases
-tests/                  31 offline tests, no network/API key needed
+tests/                  34 offline tests, no network/API key needed
 ```
 
 Run `python -m pytest tests/ -q` after changing normalization, ranking,

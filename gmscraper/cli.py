@@ -110,7 +110,7 @@ def cmd_estimate(args) -> None:
     _, cats = resolve_categories(args)
     rows = zips.load(args.zips, states=args.states, limit=args.limit)
     n = len(rows) * len(cats)
-    used = make_store(args).requests_this_month()
+    used = make_store(args).requests_this_cycle(settings.quota_reset_day)
     print(f"ZIP codes:   {len(rows):,}")
     print(f"Categories:  {len(cats)}")
     print(f"Requests:    {n:,}")
@@ -251,7 +251,7 @@ def _build_plan(args):
 def cmd_plan(args) -> None:
     plan = _build_plan(args)
     zip_rows = zips.load(args.zips, states=plan.states or None, limit=args.limit)
-    used = make_store(args).requests_this_month()
+    used = make_store(args).requests_this_cycle(settings.quota_reset_day)
     print("PLAN")
     print(plan.describe(len(zip_rows), settings.plan, used))
     if args.save:
@@ -272,7 +272,7 @@ def cmd_run(args) -> None:
 
     store = make_store(args)
     print("PLAN")
-    print(plan.describe(len(zip_rows), settings.plan, store.requests_this_month()))
+    print(plan.describe(len(zip_rows), settings.plan, store.requests_this_cycle(settings.quota_reset_day)))
     if not args.yes:
         try:
             if input("\nProceed? [y/N] ").strip().lower() not in ("y", "yes"):
