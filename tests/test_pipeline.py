@@ -398,3 +398,20 @@ def test_raw_json_survives_for_renormalization(tmp_path):
     s.upsert_businesses([_biz("a", raw={"weird_key": "kept"})])
     row = next(s.iter_businesses())
     assert json.loads(row["raw_json"])["weird_key"] == "kept"
+
+
+def test_cheapest_plan_matches_the_break_even_points():
+    from gmscraper.config import PLANS, cheapest_plan
+
+    # One category nationally (29,673 zips) fits inside pro's 30,000 quota.
+    assert cheapest_plan(29_673)[0].name == "pro"
+    # Pro and ultra tie at exactly 50,000 requests; pro wins below.
+    assert cheapest_plan(49_000)[0].name == "pro"
+    assert round(PLANS["pro"].monthly_usd + PLANS["pro"].cost_for(50_000)[0], 2) == 25.00
+    # A national vertical belongs on ultra, not pro.
+    plan, total = cheapest_plan(356_076)
+    assert plan.name == "ultra" and round(total, 2) == 75.47
+    # Mega takes over past ~550k requests.
+    assert cheapest_plan(600_000)[0].name == "mega"
+    # basic is never chosen -- it cannot serve anything past its hard limit.
+    assert cheapest_plan(5_000)[0].name != "basic"

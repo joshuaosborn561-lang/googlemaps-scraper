@@ -194,6 +194,16 @@ def cost_lines(n: int, plan=None, used_this_month: int = 0) -> list[str]:
             f"({billable:,} x ${plan.overage_usd:g})"
         )
         out.append(f"  month total ${plan.monthly_usd + cost:,.2f} including the plan fee")
+
+    from .config import cheapest_plan
+
+    best, best_total = cheapest_plan(n, used_this_month)
+    mine = plan.monthly_usd + (0.0 if cost == float("inf") else cost)
+    if best.name != plan.name and best_total < mine:
+        out.append(
+            f"  cheaper on  {best.name} — ${best_total:,.2f} this month "
+            f"(saves ${mine - best_total:,.2f})"
+        )
     out.append("  (enrich / classify / owners run locally and are free)")
     return out
 

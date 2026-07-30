@@ -47,6 +47,24 @@ PLANS: dict[str, Plan] = {
 }
 
 
+def cheapest_plan(requests: int, used_this_month: int = 0) -> tuple[Plan, float]:
+    """(plan, month total) for the cheapest tier that can serve this run.
+
+    Overage means a small plan never blocks a big run, it just quietly bills
+    for it -- a national sweep on `pro` costs $331 instead of $75 on `ultra`.
+    Worth surfacing rather than leaving to be discovered on the invoice.
+    """
+    best: tuple[Plan, float] | None = None
+    for plan in PLANS.values():
+        overage, _ = plan.cost_for(requests, used_this_month)
+        if overage == float("inf"):
+            continue                       # hard-limit plan cannot serve it
+        total = plan.monthly_usd + overage
+        if best is None or total < best[1]:
+            best = (plan, total)
+    return best or (PLANS["mega"], PLANS["mega"].monthly_usd)
+
+
 def _load_dotenv() -> None:
     """Load .env if python-dotenv is installed; fall back to a tiny parser."""
     env_path = ROOT / ".env"
