@@ -1,7 +1,7 @@
 # googlemaps-scraper
 
-Build a US local-business lead list off Google Maps, then qualify it with a
-local LLM so you pay nothing for the cleaning step.
+Build a US local-business lead list off Google Maps, then qualify it with an
+LLM that reads each business's own website.
 
 The businesses worth reaching here — funeral homes, HVAC shops, gyms, dentists
 — mostly have no LinkedIn presence, so LinkedIn-derived databases don't have
@@ -10,14 +10,17 @@ them. Google Maps does.
 ```
        "independent HVAC shops in Ohio, 4+ stars, owner name and email"
                               │
-                        plan (local Gemma, free)
+                            plan (LLM)
                               ▼
 zips ──► scrape ──► enrich ──────► classify ──► owners ──► export
  │         │          │              │            │          │
-offline  RapidAPI  html2text      Gemma on     Gemma on    CSV
-         (paid)    + emails       Ollama       Ollama +
-                    (free)        (free)       web (cheap)
+offline  RapidAPI  html2text        LLM         LLM +       CSV
+         ~$25/mo    + emails                   SERP       
+          (paid)     (free)     ~$2 a national vertical
 ```
+
+The LLM runs on `gpt-5-nano` by default (~$2 for a national vertical, ~$0.09
+for one state) or fully locally on Ollama if you'd rather keep it offline.
 
 Every stage checkpoints into one SQLite file. Kill any stage at any point and
 re-run the same command — it picks up exactly where it stopped and never
@@ -102,7 +105,7 @@ Then: *"get me independent HVAC companies in Ohio with owner names and emails."*
 `CLAUDE.md` in this repo tells it which commands to run, to show you the cost
 estimate and wait for approval before anything paid, to pilot one state before
 going national, and to never delete `leads.db`. It runs on your machine, so it
-can reach your Ollama and your RapidAPI key directly.
+reaches your `.env` keys and your local Ollama directly.
 
 ---
 
@@ -113,8 +116,7 @@ python -m gmscraper plan "independent HVAC companies in Ohio and Michigan, \
     4+ stars and at least 20 reviews, I need the owner's name and an email"
 ```
 
-Your local Gemma expands that into a plan and prices it before you spend
-anything:
+That gets expanded into a plan and priced before you spend anything:
 
 ```
 PLAN
@@ -133,7 +135,7 @@ PLAN
   plan        ultra — $25/mo, 300,000 requests included
   quota left  300,000 of 300,000 (0 used this cycle)
   est. cost   $0.00 extra — fits inside this cycle's quota
-  (enrich / classify / owners run locally and are free)
+  (enrich is free; classify + owners are ~$0.09 for a state)
 ```
 
 Happy with it? Run the whole thing — scrape, website fetch, ICP filter, owner
@@ -147,8 +149,8 @@ python -m gmscraper run "independent HVAC companies in Ohio and Michigan, \
 It prints the same plan, asks you to confirm, then drives all five stages.
 `--yes` skips the prompt.
 
-Planning is free and runs entirely on your machine, so iterate on the wording
-until the category list looks right. To hand-edit before running:
+Planning is a single LLM call, so iterate on the wording until the category
+list looks right. To hand-edit before running:
 
 ```bash
 python -m gmscraper plan "..." --save plans/hvac.json
@@ -187,11 +189,11 @@ python -m gmscraper scrape --vertical funeral --workers 8
 # 4. Pull website text (free, no API)
 python -m gmscraper enrich --workers 12
 
-# 5. Local Gemma confirms each business fits the ICP (free)
-python -m gmscraper classify --vertical funeral --workers 1
+# 5. The LLM confirms each business fits the ICP (~$1 nationally)
+python -m gmscraper classify --vertical funeral
 
-# 6. Local Gemma finds the owner's name (free; --fallback adds paid web search)
-python -m gmscraper owners --fallback --workers 1
+# 6. The LLM finds the owner's name (--fallback adds ~$0.0005/lookup web search)
+python -m gmscraper owners --fallback
 
 # 7. CSV out
 python -m gmscraper export --out out/funeral_homes.csv --with-phone
