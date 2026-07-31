@@ -70,6 +70,51 @@ def strictify(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+_PY_TYPES = {
+    "string": str, "number": (int, float), "integer": int,
+    "boolean": bool, "array": list, "object": dict, "null": type(None),
+}
+
+
+def _type_ok(value: Any, spec: dict[str, Any]) -> bool:
+    declared = spec.get("type")
+    if declared is None:
+        return True
+    for name in (declared if isinstance(declared, list) else [declared]):
+        py = _PY_TYPES.get(name)
+        if py is None:
+            return True                      # unknown keyword: do not police it
+        if name in ("number", "integer") and isinstance(value, bool):
+            continue                         # bool is a subclass of int
+        if isinstance(value, py):
+            return True
+    return False
+
+
+def schema_errors(obj: Any, schema: dict[str, Any]) -> list[str]:
+    """Cheap structural check on a parsed response.
+
+    Not a full JSON Schema validator -- just enough to catch a backend that
+    ignored the schema. Necessary because schema enforcement is a guarantee
+    only on some endpoints: OpenRouter routes a model across several
+    providers, and one that lacks native strict mode may silently downgrade
+    to plain JSON mode. Over tens of thousands of unattended calls that shows
+    up as missing CSV rows, not as an error.
+    """
+    if schema.get("type") != "object":
+        return []
+    if not isinstance(obj, dict):
+        return [f"expected an object, got {type(obj).__name__}"]
+    errs = []
+    for key in schema.get("required") or []:
+        if key not in obj:
+            errs.append(f"missing '{key}'")
+    for key, spec in (schema.get("properties") or {}).items():
+        if key in obj and isinstance(spec, dict) and not _type_ok(obj[key], spec):
+            errs.append(f"'{key}' has the wrong type")
+    return errs
+
+
 class _Base:
     """Shared token and cost accounting."""
 
@@ -77,6 +122,7 @@ class _Base:
         self.tokens_in = 0
         self.tokens_out = 0
         self.calls = 0
+        self.repairs = 0             # responses that failed the schema check
         self.price_in = 0.0          # USD per million tokens
         self.price_out = 0.0
         self.last: dict[str, float] = {}
@@ -91,12 +137,13 @@ class _Base:
     def spend_line(self) -> str:
         if not self.calls:
             return ""
+        repair = f", {self.repairs:,} schema repairs" if self.repairs else ""
         if self.price_in or self.price_out:
             return (
                 f"  {self.calls:,} LLM calls, {self.tokens_in:,} in / "
-                f"{self.tokens_out:,} out tokens, ~${self.cost_usd:,.2f}"
+                f"{self.tokens_out:,} out tokens, ~${self.cost_usd:,.2f}{repair}"
             )
-        return f"  {self.calls:,} LLM calls (local, free)"
+        return f"  {self.calls:,} LLM calls (local, free){repair}"
 
 
 class OpenAICompat(_Base):
@@ -159,6 +206,12 @@ class OpenAICompat(_Base):
         if temperature:
             payload["temperature"] = temperature
 
+        # OpenRouter serves one model from several providers and only some
+        # honour json_schema; without this it may route to one that quietly
+        # downgrades to plain JSON mode.
+        if "openrouter" in self.base_url:
+            payload["provider"] = {"require_parameters": True}
+
         last: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -195,7 +248,22 @@ class OpenAICompat(_Base):
                 content = (choice.get("message") or {}).get("content") or ""
                 if not content:
                     raise LLMError(f"empty response: {json.dumps(body)[:200]}")
-                return json.loads(content)
+
+                obj = json.loads(content)
+                errs = schema_errors(obj, schema)
+                if not errs:
+                    return obj
+                # The backend ignored the schema. Say so explicitly and retry
+                # rather than writing a malformed row.
+                self.repairs += 1
+                payload["messages"] = payload["messages"][:2] + [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content":
+                        "That response did not match the required schema: "
+                        + "; ".join(errs)
+                        + ". Reply with ONLY the corrected JSON object."},
+                ]
+                raise LLMError("schema mismatch: " + "; ".join(errs))
             except SystemExit:
                 raise
             except (requests.RequestException, ValueError, LLMError) as exc:

@@ -117,6 +117,12 @@ without re-scraping).
   Apify's *official* actor (15x the price). Don't add it without measuring:
   the overview is synthesised from the same organic snippets we already read,
   and it strips the attribution the extractor uses to avoid guessing.
+- **Watch the `schema repairs` count in the spend line.** Zero is expected.
+  Nonzero means the endpoint is not enforcing the JSON schema and responses
+  are being corrected on a retry — common on OpenRouter, where a model is
+  served by several providers and only some support `json_schema`. It still
+  produces correct rows, but it costs extra calls; switch provider or route
+  if it climbs.
 - **The LLM stages run on `gpt-5-nano` by default, not locally.** A national
   vertical costs about $2 and a state about $0.09 — 2-4% of the Maps scrape,
   so it is not worth optimising. `LLM_PROVIDER=ollama` switches back to local
@@ -169,7 +175,7 @@ gmscraper/
   store.py       SQLite: jobs, businesses, sites, emails, verdicts, owners
   export.py      CSV
 config/categories.yml   verticals: icp + category aliases
-tests/                  51 offline tests, no network/API key needed
+tests/                  55 offline tests, no network/API key needed
 ```
 
 Run `python -m pytest tests/ -q` after changing normalization, ranking,

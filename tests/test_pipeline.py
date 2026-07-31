@@ -641,3 +641,104 @@ def test_worker_defaults_differ_by_backend():
 
     assert default_workers(OpenAICompat(api_key="k")) == 8   # network-bound
     assert default_workers(Ollama()) == 1                    # core contention
+
+
+# -------------------------------------------- schema enforcement fallback
+
+
+def test_schema_errors_catches_a_backend_that_ignored_the_schema():
+    from gmscraper.classify import SCHEMA
+    from gmscraper.llm import schema_errors
+
+    assert schema_errors({"in_icp": True, "confidence": 0.9, "reason": "x"}, SCHEMA) == []
+    # missing field
+    assert schema_errors({"in_icp": True, "confidence": 0.9}, SCHEMA) == ["missing 'reason'"]
+    # wrong type -- a provider that stringified the boolean
+    errs = schema_errors({"in_icp": "yes", "confidence": 0.9, "reason": "x"}, SCHEMA)
+    assert errs == ["'in_icp' has the wrong type"]
+    # not an object at all
+    assert schema_errors(["nope"], SCHEMA) == ["expected an object, got list"]
+
+
+def test_schema_errors_allows_nullable_and_rejects_bool_as_number():
+    from gmscraper.owner import SCHEMA
+    from gmscraper.llm import schema_errors
+
+    assert schema_errors(
+        {"owner_name": None, "owner_title": None, "confidence": 0.0}, SCHEMA) == []
+    assert schema_errors(
+        {"owner_name": "Jane", "owner_title": "Owner", "confidence": 1}, SCHEMA) == []
+    # bool must not satisfy "number"
+    assert schema_errors(
+        {"owner_name": "Jane", "owner_title": "Owner", "confidence": True}, SCHEMA)
+
+
+def test_openrouter_gets_require_parameters(monkeypatch):
+    from gmscraper.llm import OpenAICompat
+
+    seen = {}
+
+    class FakeResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"choices": [{"message": {"content": '{"in_icp":true,'
+                                 '"confidence":0.9,"reason":"ok"}'},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+    def fake_post(url, json=None, timeout=None):
+        seen.update(json)
+        return FakeResp()
+
+    from gmscraper.classify import SCHEMA
+    llm = OpenAICompat(api_key="k", base_url="https://openrouter.ai/api/v1")
+    monkeypatch.setattr(llm.session, "post", fake_post)
+    llm.json_chat("sys", "user", SCHEMA)
+    assert seen["provider"] == {"require_parameters": True}
+    assert seen["response_format"]["json_schema"]["strict"] is True
+
+    # OpenAI direct must NOT get the OpenRouter-only field
+    seen.clear()
+    llm2 = OpenAICompat(api_key="k", base_url="https://api.openai.com/v1")
+    monkeypatch.setattr(llm2.session, "post", fake_post)
+    llm2.json_chat("sys", "user", SCHEMA)
+    assert "provider" not in seen
+
+
+def test_bad_schema_response_is_repaired_not_returned(monkeypatch):
+    from gmscraper.classify import SCHEMA
+    from gmscraper.llm import OpenAICompat
+
+    replies = [
+        '{"in_icp": "yes"}',                                   # provider ignored schema
+        '{"in_icp": true, "confidence": 0.9, "reason": "ok"}',  # after correction
+    ]
+
+    class FakeResp:
+        status_code = 200
+        def __init__(self, body): self.body = body
+        def raise_for_status(self): pass
+        def json(self):
+            return {"choices": [{"message": {"content": self.body},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+    calls = {"n": 0, "last": None}
+
+    def fake_post(url, json=None, timeout=None):
+        calls["n"] += 1
+        calls["last"] = json
+        return FakeResp(replies.pop(0))
+
+    llm = OpenAICompat(api_key="k", max_retries=2)
+    monkeypatch.setattr(llm.session, "post", fake_post)
+    monkeypatch.setattr("gmscraper.llm.time.sleep", lambda *_: None)
+
+    out = llm.json_chat("sys", "user", SCHEMA)
+    assert out == {"in_icp": True, "confidence": 0.9, "reason": "ok"}
+    assert calls["n"] == 2
+    assert llm.repairs == 1
+    # the retry told the model exactly what was wrong
+    assert "did not match the required schema" in calls["last"]["messages"][-1]["content"]
+    assert "schema repairs" in llm.spend_line()
