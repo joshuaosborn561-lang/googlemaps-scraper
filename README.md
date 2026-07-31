@@ -30,9 +30,29 @@ re-spends on work already done.
 **1. Ollama** (you already have it) — pull the model:
 
 ```bash
-ollama pull gemma4:12b     # ~8 GB, needs ~16 GB RAM/VRAM
+ollama pull gemma4:e4b     # ~4.7 GB, runs fine on CPU
 ollama serve               # if it isn't already running
 ```
+
+Which model depends on your hardware, and it matters a lot — measure rather
+than guess:
+
+```bash
+python -m gmscraper bench
+```
+
+It runs the real classify prompt against each candidate and reports prefill
+and generation speed separately, then projects a full run:
+
+| Hardware | Model | Notes |
+|---|---|---|
+| GPU, 12 GB+ VRAM | `gemma4:12b` | best quality |
+| CPU only, 16 GB RAM | `gemma4:e4b` | the edge-sized Gemma, ~4.7 GB |
+| CPU only, slow box | `gemma4:e2b` | ~3.1 GB, fastest |
+| alternatives | `qwen3.5:4b`, `phi4-mini` | |
+
+A 12B on a CPU-only laptop is **minutes** per business, not seconds. Ollama
+does not use the NPU on Copilot+ / Snapdragon machines — it runs on CPU.
 
 **2. This repo:**
 
@@ -164,10 +184,10 @@ python -m gmscraper scrape --vertical funeral --workers 8
 python -m gmscraper enrich --workers 12
 
 # 5. Local Gemma confirms each business fits the ICP (free)
-python -m gmscraper classify --vertical funeral --workers 2
+python -m gmscraper classify --vertical funeral --workers 1
 
 # 6. Local Gemma finds the owner's name (free; --fallback adds paid web search)
-python -m gmscraper owners --fallback --workers 2
+python -m gmscraper owners --fallback --workers 1
 
 # 7. CSV out
 python -m gmscraper export --out out/funeral_homes.csv --with-phone
@@ -417,7 +437,7 @@ they're not the business's own site, so there's nothing on them worth reading.
 ## Tests
 
 ```bash
-pip install pytest && python -m pytest tests/ -q     # 38 tests, no network, no API key
+pip install pytest && python -m pytest tests/ -q     # 44 tests, no network, no API key
 ```
 
 Covers response normalization across differing field names, address parsing,

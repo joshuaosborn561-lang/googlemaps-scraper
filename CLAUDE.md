@@ -77,8 +77,8 @@ python -m gmscraper run "<brief>" --out out/x.csv      # all stages, asks first
 python -m gmscraper estimate --vertical hvac --states OH
 python -m gmscraper scrape --vertical hvac --states OH --workers 8
 python -m gmscraper enrich --workers 12
-python -m gmscraper classify --vertical hvac --workers 2
-python -m gmscraper owners --workers 2 [--fallback]    # --fallback is paid, ~$0.0005/lookup
+python -m gmscraper classify --vertical hvac --workers 1
+python -m gmscraper owners --workers 1 [--fallback]    # --fallback is paid, ~$0.0005/lookup
 python -m gmscraper export --out out/x.csv --with-email --min-rating 4.0
 python -m gmscraper stats
 python -m gmscraper bench                     # measure LLM speed, pick a model
