@@ -128,6 +128,13 @@ without re-scraping).
   `phi4-mini`), (3) `--workers 1`, which is already the default. More workers
   make it *worse* on CPU: threads fight for the same cores. Run
   `python -m gmscraper bench` to measure rather than guess.
+- **If he says the machine is unusable while a stage runs**, that is a
+  different problem from "slow": set `OLLAMA_NUM_THREADS` (or `--threads`) to
+  4-6 so inference leaves cores for his browser. Costs throughput on a job
+  that runs unattended anyway. For RAM pressure, `OLLAMA_KEEP_ALIVE=0`
+  releases the weights when a stage ends, and `gemma4:e2b` is ~1.6 GB
+  smaller than `e4b`. Note an NPU runtime would NOT help RAM — Snapdragon
+  uses unified memory, so the weights sit in system RAM either way.
 - **`.env` is gitignored and holds live API keys.** Never commit it, never
   paste key values into commit messages, PR bodies or comments.
 - **`leads.db` is the state.** Deleting it discards paid work — all scraped

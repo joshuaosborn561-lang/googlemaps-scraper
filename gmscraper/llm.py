@@ -43,14 +43,16 @@ class Ollama:
         host: str = "http://localhost:11434",
         model: str = "gemma4:e4b",
         timeout: int = 600,
-        keep_alive: str = "30m",
+        keep_alive: str = "10m",
         num_ctx: int = 4096,
+        num_threads: int = 0,
     ):
         self.host = host.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.keep_alive = keep_alive
         self.num_ctx = num_ctx
+        self.num_threads = num_threads
         self.session = requests.Session()
         # Populated from the last call: Ollama reports prefill and generation
         # separately, which is the only way to tell a too-big-prompt problem
@@ -82,6 +84,12 @@ class Ollama:
 
     # ----------------------------------------------------------------- chat
 
+    def _options(self, temperature: float) -> dict[str, Any]:
+        opts: dict[str, Any] = {"temperature": temperature, "num_ctx": self.num_ctx}
+        if self.num_threads > 0:
+            opts["num_thread"] = self.num_threads
+        return opts
+
     def json_chat(
         self,
         system: str,
@@ -98,7 +106,7 @@ class Ollama:
             "stream": False,
             "format": schema,
             "keep_alive": self.keep_alive,
-            "options": {"temperature": temperature, "num_ctx": self.num_ctx},
+            "options": self._options(temperature),
         }
         try:
             r = self.session.post(

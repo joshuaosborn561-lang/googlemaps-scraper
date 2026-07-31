@@ -78,6 +78,8 @@ def make_ollama(args) -> Ollama:
         model=args.model or settings.ollama_model,
         num_ctx=args.num_ctx or settings.ollama_num_ctx,
         timeout=settings.ollama_timeout,
+        num_threads=getattr(args, "threads", 0) or settings.ollama_threads,
+        keep_alive=settings.ollama_keep_alive,
     )
     o.check()
     return o
@@ -408,6 +410,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--ollama-host", default="")
         sp.add_argument("--num-ctx", type=int, default=0,
                         help="0 = use OLLAMA_NUM_CTX from .env")
+        sp.add_argument("--threads", type=int, default=0,
+                        help="cap CPU threads so the machine stays usable "
+                             "(0 = OLLAMA_NUM_THREADS from .env)")
 
     sp = sub.add_parser(
         "plan", help='turn a plain-English brief into a run plan (free, no scraping)'

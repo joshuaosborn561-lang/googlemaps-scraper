@@ -560,3 +560,11 @@ def test_metrics_tolerate_missing_fields():
     from gmscraper.llm import _metrics
     m = _metrics({})
     assert m["prefill_tok_s"] == 0.0 and m["gen_tok_s"] == 0.0
+
+
+def test_thread_cap_only_sent_when_set():
+    from gmscraper.llm import Ollama
+
+    assert "num_thread" not in Ollama(num_threads=0)._options(0.0)
+    opts = Ollama(num_threads=4, num_ctx=2048)._options(0.0)
+    assert opts["num_thread"] == 4 and opts["num_ctx"] == 2048

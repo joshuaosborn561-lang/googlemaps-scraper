@@ -143,6 +143,18 @@ class Settings:
     ollama_timeout: int = field(
         default_factory=lambda: int(_env_float("OLLAMA_TIMEOUT", 600))
     )
+    # 0 = let Ollama decide (it grabs most cores). Cap it to keep the machine
+    # usable while a stage runs -- inference is a background job, not the
+    # thing you are looking at.
+    ollama_threads: int = field(
+        default_factory=lambda: int(_env_float("OLLAMA_NUM_THREADS", 0))
+    )
+    # How long Ollama pins the weights in RAM after the last call. Long is
+    # right mid-run (no reload per business); short frees several GB the
+    # moment a stage finishes.
+    ollama_keep_alive: str = field(
+        default_factory=lambda: _env("OLLAMA_KEEP_ALIVE", "10m")
+    )
     # Characters of page text sent to the model. Prefill dominates on CPU, so
     # this is the single biggest lever on runtime.
     max_evidence_chars: int = field(
