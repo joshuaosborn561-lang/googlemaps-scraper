@@ -81,6 +81,7 @@ python -m gmscraper classify --vertical hvac --workers 2
 python -m gmscraper owners --workers 2 [--fallback]    # --fallback is paid, ~$0.0005/lookup
 python -m gmscraper export --out out/x.csv --with-email --min-rating 4.0
 python -m gmscraper stats
+python -m gmscraper bench                     # measure LLM speed, pick a model
 python -m gmscraper renormalize               # re-map stored raw JSON, 0 API calls
 ```
 
@@ -97,6 +98,7 @@ without re-scraping).
 | "that list is too broad / has junk in it" | tighten the `icp:` exclusions, re-run `classify` only. Do **not** re-scrape |
 | "I need more of them" | add category aliases (the usual cause of a short list), `estimate`, then scrape the new categories — existing ones are already checkpointed and won't re-charge |
 | "no emails in the CSV" | check `stats` for `domains with email`. Maps returns no emails; they come from the website scrape, so coverage is partial by nature. Say so plainly rather than implying it's a bug |
+| "classify/owners is too slow" | `bench` first. Then lower `LLM_MAX_EVIDENCE_CHARS` before reaching for a smaller model — a 12k-char prompt is ~3k tokens of prefill and most of it is nav and footer boilerplate |
 | "it stopped / I killed it" | just re-run the same command. Every stage resumes from SQLite |
 | "how much have I spent" | `estimate` prints quota used this billing cycle and the overage on top |
 | "quota numbers look wrong" | `MAPS_QUOTA_RESET_DAY` in `.env` must be the day he subscribed — RapidAPI resets on the anniversary, not the 1st |
@@ -115,8 +117,17 @@ without re-scraping).
   Apify's *official* actor (15x the price). Don't add it without measuring:
   the overview is synthesised from the same organic snippets we already read,
   and it strips the attribution the extractor uses to avoid guessing.
-- **Ollama must be running** (`ollama serve`) with `gemma4:12b` pulled, for
-  `plan`, `classify` and `owners`. Check with `ollama list` before blaming code.
+- **Ollama must be running** (`ollama serve`) with the model in `OLLAMA_MODEL`
+  pulled, for `plan`, `classify` and `owners`. Check `ollama list` before
+  blaming code.
+- **Josh's machine is CPU-only** (Snapdragon X Plus, 16 GB, no GPU — Ollama
+  does not use the NPU). A 12B is minutes per business there; the default is
+  `gemma4:e4b`. If an LLM stage is slow or timing out, the fix order is:
+  (1) lower `LLM_MAX_EVIDENCE_CHARS` — prefill dominates on CPU and it is the
+  biggest lever, (2) a smaller model (`gemma4:e2b`, `qwen3.5:4b`,
+  `phi4-mini`), (3) `--workers 1`, which is already the default. More workers
+  make it *worse* on CPU: threads fight for the same cores. Run
+  `python -m gmscraper bench` to measure rather than guess.
 - **`.env` is gitignored and holds live API keys.** Never commit it, never
   paste key values into commit messages, PR bodies or comments.
 - **`leads.db` is the state.** Deleting it discards paid work — all scraped
@@ -137,13 +148,15 @@ gmscraper/
   scrape.py      (zip x category) fan-out, checkpointed
   enrich_site.py html2text website fetch
   emails.py      email harvest + ranking
+  evidence.py    trim page text to what answers the question (CPU prefill)
+  bench.py       measure prefill/generation speed, project a run
   classify.py    ICP verdict via local Gemma
   owner.py       owner-name extraction (+ web-search fallback)
   websearch.py   SERP backends: ScraperLink/Apify (default), OpenWeb Ninja
   store.py       SQLite: jobs, businesses, sites, emails, verdicts, owners
   export.py      CSV
 config/categories.yml   verticals: icp + category aliases
-tests/                  38 offline tests, no network/API key needed
+tests/                  44 offline tests, no network/API key needed
 ```
 
 Run `python -m pytest tests/ -q` after changing normalization, ranking,

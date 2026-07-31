@@ -132,8 +132,21 @@ class Settings:
     ollama_host: str = field(
         default_factory=lambda: _env("OLLAMA_HOST", "http://localhost:11434")
     )
+    # gemma4:e4b is the edge-sized Gemma: ~4.7 GB, runs on CPU. The 12b needs
+    # a GPU to be practical -- see `bench`.
     ollama_model: str = field(
-        default_factory=lambda: _env("OLLAMA_MODEL", "gemma4:12b")
+        default_factory=lambda: _env("OLLAMA_MODEL", "gemma4:e4b")
+    )
+    ollama_num_ctx: int = field(
+        default_factory=lambda: int(_env_float("OLLAMA_NUM_CTX", 4096))
+    )
+    ollama_timeout: int = field(
+        default_factory=lambda: int(_env_float("OLLAMA_TIMEOUT", 600))
+    )
+    # Characters of page text sent to the model. Prefill dominates on CPU, so
+    # this is the single biggest lever on runtime.
+    max_evidence_chars: int = field(
+        default_factory=lambda: int(_env_float("LLM_MAX_EVIDENCE_CHARS", 2500))
     )
 
     owj_key: str = field(default_factory=lambda: _env("OPENWEBNINJA_KEY"))

@@ -504,3 +504,59 @@ def test_unknown_backend_is_rejected():
 
     with pytest.raises(SystemExit):
         make_backend(Settings(), "serpapi")
+
+
+# ------------------------------------------------------------ evidence
+
+
+def test_condense_keeps_head_and_hint_windows():
+    from gmscraper.evidence import OWNER_HINTS, condense
+
+    noise = "Home Services Contact Hours Directions Privacy " * 200
+    text = "Riverside Funeral Home\n" + noise + \
+           "Our owner Margaret A. Whitfield took over in 2011." + noise
+    out = condense(text, OWNER_HINTS, max_chars=1200)
+    assert len(out) <= 1200
+    assert "Riverside Funeral Home" in out          # head kept
+    assert "Margaret A. Whitfield" in out           # hint window kept
+    assert len(out) < len(text) / 10                # most of it discarded
+
+
+def test_condense_returns_short_text_untouched():
+    from gmscraper.evidence import condense
+
+    short = "Riverside Funeral Home. Owner Margaret Whitfield."
+    assert condense(short, max_chars=2500) == short
+
+
+def test_condense_without_hint_matches_falls_back_to_head():
+    from gmscraper.evidence import condense
+
+    text = "zzz " * 2000
+    out = condense(text, ("nonexistentword",), max_chars=500)
+    assert len(out) <= 500 and out.startswith("zzz")
+
+
+def test_condense_handles_empty():
+    from gmscraper.evidence import condense
+    assert condense("", max_chars=100) == ""
+
+
+def test_metrics_split_prefill_from_generation():
+    from gmscraper.llm import _metrics
+
+    ns = 1_000_000_000
+    m = _metrics({
+        "prompt_eval_count": 3000, "prompt_eval_duration": 100 * ns,
+        "eval_count": 60, "eval_duration": 20 * ns,
+        "total_duration": 121 * ns, "load_duration": 1 * ns,
+    })
+    assert m["prefill_tok_s"] == 30.0     # 3000 tokens in 100s
+    assert m["gen_tok_s"] == 3.0          # 60 tokens in 20s
+    assert m["total_s"] == 121.0
+
+
+def test_metrics_tolerate_missing_fields():
+    from gmscraper.llm import _metrics
+    m = _metrics({})
+    assert m["prefill_tok_s"] == 0.0 and m["gen_tok_s"] == 0.0

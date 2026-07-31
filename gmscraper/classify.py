@@ -15,6 +15,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Sequence
 
+from .config import settings
+from .evidence import ICP_HINTS, condense
 from .llm import Ollama, OllamaError
 from .store import Store
 
@@ -64,10 +66,11 @@ def run(
     store: Store,
     ollama: Ollama,
     icp: str,
-    workers: int = 2,
+    workers: int = 1,
     limit: int | None = None,
     include_no_site: bool = False,
     min_confidence: float = 0.0,
+    max_evidence_chars: int | None = None,
 ) -> dict[str, int]:
     """Classify every business without a verdict yet."""
     where = "b.place_id NOT IN (SELECT place_id FROM verdicts)"
@@ -80,12 +83,16 @@ def run(
     if limit:
         sql += f" LIMIT {int(limit)}"
     rows = list(store.conn.execute(sql))
+    cap = max_evidence_chars or settings.max_evidence_chars
 
     if not rows:
         print("Nothing to classify.")
         return {"done": 0, "in_icp": 0, "errors": 0}
 
-    print(f"Classifying {len(rows):,} businesses with {ollama.model} ({workers} workers)")
+    print(
+        f"Classifying {len(rows):,} businesses with {ollama.model} "
+        f"({workers} worker{'s' if workers != 1 else ''}, {cap:,} chars evidence)"
+    )
     counts = {"done": 0, "in_icp": 0, "errors": 0}
     lock = threading.Lock()
 
@@ -98,7 +105,7 @@ def run(
             types=row["types"] or "[]",
             address=row["address"] or "",
             website=row["website"] or "(none)",
-            text=(text or NO_SITE_NOTE)[:12000],
+            text=condense(text, ICP_HINTS, cap) if text else NO_SITE_NOTE,
         )
         try:
             out = ollama.json_chat(SYSTEM, prompt, SCHEMA)

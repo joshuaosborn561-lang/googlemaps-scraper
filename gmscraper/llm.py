@@ -18,14 +18,33 @@ class OllamaError(RuntimeError):
     pass
 
 
+def _metrics(body: dict[str, Any]) -> dict[str, float]:
+    """Split Ollama's nanosecond timings into prefill vs generation rates."""
+    ns = 1_000_000_000
+
+    def rate(count_key: str, dur_key: str) -> float:
+        n = body.get(count_key) or 0
+        d = body.get(dur_key) or 0
+        return (n / (d / ns)) if n and d else 0.0
+
+    return {
+        "prompt_tokens": float(body.get("prompt_eval_count") or 0),
+        "output_tokens": float(body.get("eval_count") or 0),
+        "prefill_tok_s": rate("prompt_eval_count", "prompt_eval_duration"),
+        "gen_tok_s": rate("eval_count", "eval_duration"),
+        "total_s": (body.get("total_duration") or 0) / ns,
+        "load_s": (body.get("load_duration") or 0) / ns,
+    }
+
+
 class Ollama:
     def __init__(
         self,
         host: str = "http://localhost:11434",
-        model: str = "gemma4:12b",
-        timeout: int = 180,
+        model: str = "gemma4:e4b",
+        timeout: int = 600,
         keep_alive: str = "30m",
-        num_ctx: int = 8192,
+        num_ctx: int = 4096,
     ):
         self.host = host.rstrip("/")
         self.model = model
@@ -33,6 +52,10 @@ class Ollama:
         self.keep_alive = keep_alive
         self.num_ctx = num_ctx
         self.session = requests.Session()
+        # Populated from the last call: Ollama reports prefill and generation
+        # separately, which is the only way to tell a too-big-prompt problem
+        # from a too-big-model problem.
+        self.last: dict[str, float] = {}
 
     # ------------------------------------------------------------ preflight
 
@@ -82,7 +105,15 @@ class Ollama:
                 f"{self.host}/api/chat", json=payload, timeout=self.timeout
             )
             r.raise_for_status()
-            content = r.json().get("message", {}).get("content", "")
+            body = r.json()
+            content = body.get("message", {}).get("content", "")
+            self.last = _metrics(body)
+        except requests.Timeout as exc:
+            raise OllamaError(
+                f"ollama timed out after {self.timeout}s. On CPU-only hardware "
+                f"try a smaller model (gemma4:e4b, qwen3.5:4b, phi4-mini) and "
+                f"a shorter prompt -- run `python -m gmscraper bench`."
+            ) from exc
         except requests.RequestException as exc:
             raise OllamaError(f"ollama request failed: {exc}") from exc
 

@@ -17,6 +17,8 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .config import settings
+from .evidence import OWNER_HINTS, condense
 from .llm import Ollama, OllamaError
 from .store import Store
 
@@ -57,7 +59,7 @@ founder, or principal of THIS business.
 """
 
 
-def _ask(ollama: Ollama, row, evidence: str, source: str):
+def _ask(ollama: Ollama, row, evidence: str, source: str, cap: int = 2500):
     out = ollama.json_chat(
         SYSTEM,
         PROMPT.format(
@@ -66,7 +68,7 @@ def _ask(ollama: Ollama, row, evidence: str, source: str):
             state=row["state"] or "",
             website=row["website"] or "(none)",
             source=source,
-            evidence=evidence[:12000],
+            evidence=condense(evidence, OWNER_HINTS, cap),
         ),
         SCHEMA,
     )
@@ -87,9 +89,10 @@ def run(
     store: Store,
     ollama: Ollama,
     owj=None,
-    workers: int = 2,
+    workers: int = 1,
     limit: int | None = None,
     icp_only: bool = True,
+    max_evidence_chars: int | None = None,
 ) -> dict[str, int]:
     where = "b.place_id NOT IN (SELECT place_id FROM owners)"
     if icp_only:
@@ -101,6 +104,7 @@ def run(
     if limit:
         sql += f" LIMIT {int(limit)}"
     rows = list(store.conn.execute(sql))
+    cap = max_evidence_chars or settings.max_evidence_chars
 
     if not rows:
         print("Nothing to look up. (Run `classify` first, or pass --all.)")
@@ -110,7 +114,7 @@ def run(
     label = type(owj).__name__ if use_web else "off"
     print(
         f"Finding owners for {len(rows):,} businesses with {ollama.model} "
-        f"({workers} workers, web fallback {label})"
+        f"({workers} worker{'s' if workers != 1 else ''}, web fallback {label})"
     )
     counts = {"done": 0, "found": 0, "via_web": 0, "errors": 0}
     lock = threading.Lock()
@@ -124,7 +128,7 @@ def run(
         site_text = store.get_site_text(row["domain"]) if row["domain"] else None
         if site_text:
             try:
-                name, title, conf = _ask(ollama, row, site_text, "the company website")
+                name, title, conf = _ask(ollama, row, site_text, "the company website", cap)
                 if name:
                     source = "website"
             except (OllamaError, ValueError, TypeError):
@@ -136,7 +140,7 @@ def run(
             web_text = owj.search_text(query)  # type: ignore[union-attr]
             if web_text:
                 try:
-                    name, title, conf = _ask(ollama, row, web_text, "a web search")
+                    name, title, conf = _ask(ollama, row, web_text, "a web search", cap)
                     if name:
                         source = "websearch"
                 except (OllamaError, ValueError, TypeError):

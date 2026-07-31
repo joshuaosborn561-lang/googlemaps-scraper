@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import (
     __version__,
+    bench,
     brief as brief_mod,
     classify,
     enrich_site,
@@ -75,7 +76,8 @@ def make_ollama(args) -> Ollama:
     o = Ollama(
         host=args.ollama_host or settings.ollama_host,
         model=args.model or settings.ollama_model,
-        num_ctx=args.num_ctx,
+        num_ctx=args.num_ctx or settings.ollama_num_ctx,
+        timeout=settings.ollama_timeout,
     )
     o.check()
     return o
@@ -204,6 +206,7 @@ def cmd_classify(args) -> None:
         limit=args.limit,
         include_no_site=args.include_no_site,
         min_confidence=args.min_confidence,
+        max_evidence_chars=args.evidence_chars or None,
     )
     print(f"classified={res['done']:,} in-ICP={res['in_icp']:,} errors={res['errors']:,}")
 
@@ -221,6 +224,7 @@ def cmd_owners(args) -> None:
     res = owner.run(
         store, make_ollama(args), owj,
         workers=args.workers, limit=args.limit, icp_only=not args.all,
+        max_evidence_chars=args.evidence_chars or None,
     )
     print(f"done={res['done']:,} found={res['found']:,} via_web={res['via_web']:,}")
 
@@ -325,6 +329,20 @@ def cmd_run(args) -> None:
     cmd_stats(args)
 
 
+def cmd_bench(args) -> None:
+    models = (
+        [m.strip() for m in args.models.split(",") if m.strip()]
+        if args.models else bench.SUGGESTED
+    )
+    bench.run(
+        args.ollama_host or settings.ollama_host,
+        models,
+        evidence_chars=args.evidence_chars,
+        n_businesses=args.rows,
+        runs=args.runs,
+    )
+
+
 def cmd_stats(args) -> None:
     s = make_store(args).stats()
     width = max(len(k) for k in s)
@@ -388,7 +406,8 @@ def build_parser() -> argparse.ArgumentParser:
     def add_llm_args(sp) -> None:
         sp.add_argument("--model", default="", help=f"default: {settings.ollama_model}")
         sp.add_argument("--ollama-host", default="")
-        sp.add_argument("--num-ctx", type=int, default=8192)
+        sp.add_argument("--num-ctx", type=int, default=0,
+                        help="0 = use OLLAMA_NUM_CTX from .env")
 
     sp = sub.add_parser(
         "plan", help='turn a plain-English brief into a run plan (free, no scraping)'
@@ -407,7 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
     sp.add_argument("--workers", type=int, default=8, help="scrape workers")
     sp.add_argument("--site-workers", type=int, default=12)
-    sp.add_argument("--llm-workers", type=int, default=2)
+    sp.add_argument("--llm-workers", type=int, default=1)
     sp.add_argument("--limit-results", type=int, default=20)
     sp.add_argument("--query-template", default="{category} in {zip}")
     sp.add_argument("--min-confidence", type=float, default=0.0)
@@ -469,8 +488,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("classify", help="local LLM confirms the ICP fit")
     add_cat_args(sp, need_icp=True)
     add_llm_args(sp)
-    sp.add_argument("--workers", type=int, default=2)
+    sp.add_argument("--workers", type=int, default=1,
+                    help="1 is right on CPU; raise only with a GPU")
     sp.add_argument("--limit", type=int)
+    sp.add_argument("--evidence-chars", type=int, default=0,
+                    help="0 = use LLM_MAX_EVIDENCE_CHARS from .env")
     sp.add_argument("--min-confidence", type=float, default=0.0)
     sp.add_argument("--include-no-site", action="store_true",
                     help="also judge businesses with no website text")
@@ -478,8 +500,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("owners", help="local LLM finds the owner's name")
     add_llm_args(sp)
-    sp.add_argument("--workers", type=int, default=2)
+    sp.add_argument("--workers", type=int, default=1,
+                    help="1 is right on CPU; raise only with a GPU")
     sp.add_argument("--limit", type=int)
+    sp.add_argument("--evidence-chars", type=int, default=0,
+                    help="0 = use LLM_MAX_EVIDENCE_CHARS from .env")
     sp.add_argument("--fallback", action="store_true", help="also web-search for owners")
     sp.add_argument("--fallback-source", default="",
                     help="apify (default) | openwebninja | none")
@@ -498,6 +523,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-reviews", type=int, default=0)
     sp.add_argument("--states", nargs="*")
     sp.set_defaults(func=cmd_export)
+
+    sp = sub.add_parser(
+        "bench", help="measure LLM speed on this machine and pick a model"
+    )
+    sp.add_argument("--models", default="",
+                    help=f"comma-separated; default: {','.join(bench.SUGGESTED)}")
+    sp.add_argument("--evidence-chars", type=int, default=2500)
+    sp.add_argument("--rows", type=int, default=1500,
+                    help="project total runtime for this many businesses")
+    sp.add_argument("--runs", type=int, default=3)
+    sp.add_argument("--ollama-host", default="")
+    sp.set_defaults(func=cmd_bench)
 
     sp = sub.add_parser("stats", help="what is in the database")
     sp.set_defaults(func=cmd_stats)
