@@ -438,3 +438,69 @@ def test_requests_this_cycle_counts_billed_jobs_only(tmp_path):
     s.finish_job("2", "gym", 0, "boom")       # error -> still billed
     assert s.requests_since("1970-01-01") == 2
     assert s.requests_since("2999-01-01") == 0   # nothing in a future cycle
+
+
+# -------------------------------------------------------------- websearch
+
+
+def test_harvest_text_pulls_scraperlink_shape():
+    from gmscraper.websearch import harvest_text
+
+    # ScraperLink returns organic results only: title + description per row.
+    payload = [{
+        "search_term": 'who owns "Riverside Funeral Home" in Agawam',
+        "results": [
+            {"position": 1, "title": "About Riverside Funeral Home",
+             "url": "https://x.com", "description": "Owner Margaret A. Whitfield"},
+            {"position": 2, "title": "Agawam obituaries", "url": "https://y.com",
+             "description": "services handled by Riverside"},
+        ],
+        "related_keywords": {"keywords": ["riverside funeral"]},
+    }]
+    out: list[str] = []
+    harvest_text(payload, out)
+    joined = "\n".join(out)
+    assert "Margaret A. Whitfield" in joined
+    assert "About Riverside Funeral Home" in joined
+    assert "https://x.com" not in joined          # URLs are not evidence text
+
+
+def test_backend_selection_and_disabled_state():
+    from gmscraper.config import Settings
+    from gmscraper.websearch import ApifySerp, NullSearch, OpenWebNinja, make_backend
+
+    blank = Settings(apify_token="", owj_key="")
+    assert isinstance(make_backend(blank, "apify"), ApifySerp)
+    assert not make_backend(blank, "apify").enabled       # no token -> inert
+    assert make_backend(blank, "apify").search_text("x") == ""
+    assert isinstance(make_backend(blank, "openwebninja"), OpenWebNinja)
+    assert isinstance(make_backend(blank, "none"), NullSearch)
+
+    keyed = Settings(apify_token="tok")
+    assert make_backend(keyed, "apify").enabled
+    # apify is the default when nothing is passed
+    assert isinstance(make_backend(keyed), ApifySerp)
+
+
+def test_apify_url_and_cost():
+    from gmscraper.config import Settings
+    from gmscraper.websearch import ApifySerp
+
+    b = ApifySerp(Settings(apify_token="tok"))
+    assert b.url == (
+        "https://api.apify.com/v2/acts/"
+        "scraperlink~google-search-results-serp-scraper/run-sync-get-dataset-items"
+    )
+    assert b.cost_per_search < OWJ_COST   # cheaper than what it replaced
+
+
+OWJ_COST = 0.0025
+
+
+def test_unknown_backend_is_rejected():
+    import pytest
+    from gmscraper.config import Settings
+    from gmscraper.websearch import make_backend
+
+    with pytest.raises(SystemExit):
+        make_backend(Settings(), "serpapi")

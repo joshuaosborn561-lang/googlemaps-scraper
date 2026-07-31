@@ -4,7 +4,7 @@ Same thing a teammate would do with "here's 100 businesses, find the owner":
 read the company's own site first, and if that comes up empty, Google it.
 
     1. local Gemma reads the website text  -> source "website"  (free)
-    2. if empty and --fallback is on, OpenWeb Ninja searches
+    2. if empty and --fallback is on, a Google SERP backend searches
        "who owns <business> in <city>" and Gemma reads that -> "websearch"
 
 The model is told to return null rather than guess. A wrong first name in a
@@ -18,7 +18,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .llm import Ollama, OllamaError
-from .openwebninja import OpenWebNinja
 from .store import Store
 
 SYSTEM = (
@@ -87,7 +86,7 @@ def _ask(ollama: Ollama, row, evidence: str, source: str):
 def run(
     store: Store,
     ollama: Ollama,
-    owj: OpenWebNinja | None = None,
+    owj=None,
     workers: int = 2,
     limit: int | None = None,
     icp_only: bool = True,
@@ -107,10 +106,11 @@ def run(
         print("Nothing to look up. (Run `classify` first, or pass --all.)")
         return {"done": 0, "found": 0, "via_web": 0}
 
-    use_web = bool(owj and owj.enabled)
+    use_web = bool(owj and getattr(owj, "enabled", False))
+    label = type(owj).__name__ if use_web else "off"
     print(
         f"Finding owners for {len(rows):,} businesses with {ollama.model} "
-        f"({workers} workers, web fallback {'on' if use_web else 'off'})"
+        f"({workers} workers, web fallback {label})"
     )
     counts = {"done": 0, "found": 0, "via_web": 0, "errors": 0}
     lock = threading.Lock()
@@ -167,4 +167,7 @@ def run(
             for f in futures:
                 f.cancel()
     sys.stderr.write("\n")
+    if use_web and owj.request_count:
+        spend = owj.request_count * getattr(owj, "cost_per_search", 0.0)
+        print(f"  web fallback: {owj.request_count:,} searches, ~${spend:,.2f}")
     return counts

@@ -49,9 +49,12 @@ cp .env.example .env
 [Maps Data on RapidAPI](https://rapidapi.com/alexanderxbx/api/maps-data),
 copy your key into `RAPIDAPI_KEY` in `.env`.
 
-**4. (Optional) OpenWeb Ninja key** for the owner-name web fallback →
-`OPENWEBNINJA_KEY`. Leave it blank to skip that step; everything else works
-without it.
+**4. (Optional) Apify token** for the owner-name web fallback →
+`APIFY_TOKEN`, from [Apify console](https://console.apify.com/settings/integrations).
+Leave it blank to skip that step; everything else works without it. It uses
+ScraperLink's Google SERP actor at $0.0005 per lookup, and Apify's free tier
+($5/month of credits) covers about 10,000 — so in practice this stage is free
+at the volumes here.
 
 ---
 
@@ -284,8 +287,9 @@ million requests. Check your actual usage on the RapidAPI dashboard rather
 than trusting that estimate.
 
 Steps 4–6 are free — html2text is open source and Gemma runs on your own
-machine. OpenWeb Ninja in step 6 is the only other paid piece, and only fires
-for businesses where the website came up empty.
+machine. The owner web-search fallback in step 6 is the only other paid piece, at
+$0.0005 per lookup, and only fires for businesses where the website came up
+empty.
 
 ---
 
@@ -413,7 +417,7 @@ they're not the business's own site, so there's nothing on them worth reading.
 ## Tests
 
 ```bash
-pip install pytest && python -m pytest tests/ -q     # 34 tests, no network, no API key
+pip install pytest && python -m pytest tests/ -q     # 38 tests, no network, no API key
 ```
 
 Covers response normalization across differing field names, address parsing,

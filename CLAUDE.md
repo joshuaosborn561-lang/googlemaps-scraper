@@ -78,7 +78,7 @@ python -m gmscraper estimate --vertical hvac --states OH
 python -m gmscraper scrape --vertical hvac --states OH --workers 8
 python -m gmscraper enrich --workers 12
 python -m gmscraper classify --vertical hvac --workers 2
-python -m gmscraper owners --workers 2 [--fallback]    # --fallback is paid
+python -m gmscraper owners --workers 2 [--fallback]    # --fallback is paid, ~$0.0005/lookup
 python -m gmscraper export --out out/x.csv --with-email --min-rating 4.0
 python -m gmscraper stats
 python -m gmscraper renormalize               # re-map stored raw JSON, 0 API calls
@@ -103,6 +103,18 @@ without re-scraping).
 
 ## Things that will bite you
 
+- **The owner fallback is ScraperLink on Apify, not OpenWeb Ninja.** We
+  switched: OpenWeb Ninja charged ~$0.0025 per search *plus $25/month*, and
+  this stage only fires on leftovers (in-ICP businesses whose own site did not
+  name an owner), so a standing monthly fee was the wrong shape. ScraperLink
+  is $0.0005 per search with no floor, and Apify's free tier ($5/mo credit)
+  covers ~10,000 lookups. Needs `APIFY_TOKEN` in `.env`; blank means the
+  stage skips itself and `owners` runs website-only. `--fallback-source
+  openwebninja` still works for anyone already subscribed.
+  Neither backend returns Google's AI Overview — that is a $0.003 add-on on
+  Apify's *official* actor (15x the price). Don't add it without measuring:
+  the overview is synthesised from the same organic snippets we already read,
+  and it strips the attribution the extractor uses to avoid guessing.
 - **Ollama must be running** (`ollama serve`) with `gemma4:12b` pulled, for
   `plan`, `classify` and `owners`. Check with `ollama list` before blaming code.
 - **`.env` is gitignored and holds live API keys.** Never commit it, never
@@ -126,11 +138,12 @@ gmscraper/
   enrich_site.py html2text website fetch
   emails.py      email harvest + ranking
   classify.py    ICP verdict via local Gemma
-  owner.py       owner-name extraction (+ OpenWeb Ninja fallback)
+  owner.py       owner-name extraction (+ web-search fallback)
+  websearch.py   SERP backends: ScraperLink/Apify (default), OpenWeb Ninja
   store.py       SQLite: jobs, businesses, sites, emails, verdicts, owners
   export.py      CSV
 config/categories.yml   verticals: icp + category aliases
-tests/                  34 offline tests, no network/API key needed
+tests/                  38 offline tests, no network/API key needed
 ```
 
 Run `python -m pytest tests/ -q` after changing normalization, ranking,

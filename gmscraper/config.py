@@ -144,6 +144,20 @@ class Settings:
     )
     owj_path: str = field(default_factory=lambda: _env("OPENWEBNINJA_PATH", "/search"))
 
+    # Owner-name fallback: apify (ScraperLink SERP) | openwebninja | none
+    fallback_source: str = field(
+        default_factory=lambda: _env("FALLBACK_SOURCE", "apify").lower()
+    )
+    apify_token: str = field(default_factory=lambda: _env("APIFY_TOKEN"))
+    apify_serp_actor: str = field(
+        default_factory=lambda: _env(
+            "APIFY_SERP_ACTOR", "scraperlink/google-search-results-serp-scraper"
+        )
+    )
+    apify_base_url: str = field(
+        default_factory=lambda: _env("APIFY_BASE_URL", "https://api.apify.com").rstrip("/")
+    )
+
     maps_plan: str = field(default_factory=lambda: _env("MAPS_PLAN", "ultra").lower())
     quota_reset_day: int = field(
         default_factory=lambda: int(_env_float("MAPS_QUOTA_RESET_DAY", 1))

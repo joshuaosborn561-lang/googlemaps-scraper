@@ -22,7 +22,7 @@ from . import (
 from .config import DEFAULT_CATEGORIES, DEFAULT_DB, DEFAULT_ZIPS, settings
 from .llm import Ollama
 from .mapsdata import MapsDataClient
-from .openwebninja import OpenWebNinja
+from .websearch import make_backend
 from .store import Store
 
 
@@ -210,9 +210,14 @@ def cmd_classify(args) -> None:
 
 def cmd_owners(args) -> None:
     store = make_store(args)
-    owj = OpenWebNinja(settings) if args.fallback else None
+    owj = make_backend(settings, args.fallback_source) if args.fallback else None
     if args.fallback and not (owj and owj.enabled):
-        print("--fallback requested but OPENWEBNINJA_KEY is empty; website only.")
+        print(
+            "--fallback requested but no credentials for "
+            f"'{args.fallback_source or settings.fallback_source}'. "
+            "Set APIFY_TOKEN in .env (or FALLBACK_SOURCE=openwebninja). "
+            "Running website-only."
+        )
     res = owner.run(
         store, make_ollama(args), owj,
         workers=args.workers, limit=args.limit, icp_only=not args.all,
@@ -298,7 +303,7 @@ def cmd_run(args) -> None:
 
     if plan.require_owner or args.owners:
         print("\n[4/5] finding owner names")
-        owj = OpenWebNinja(settings) if args.fallback else None
+        owj = make_backend(settings, args.fallback_source) if args.fallback else None
         owner.run(store, ollama, owj, workers=args.llm_workers)
     else:
         print("\n[4/5] skipping owner lookup (not requested; --owners to force)")
@@ -407,7 +412,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--query-template", default="{category} in {zip}")
     sp.add_argument("--min-confidence", type=float, default=0.0)
     sp.add_argument("--owners", action="store_true", help="force the owner stage")
-    sp.add_argument("--fallback", action="store_true", help="OpenWeb Ninja fallback")
+    sp.add_argument("--fallback", action="store_true", help="also web-search for owners")
+    sp.add_argument("--fallback-source", default="",
+                    help="apify (default) | openwebninja | none")
     sp.add_argument("--ignore-robots", action="store_true")
     add_zip_args(sp)
     add_llm_args(sp)
@@ -473,7 +480,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_llm_args(sp)
     sp.add_argument("--workers", type=int, default=2)
     sp.add_argument("--limit", type=int)
-    sp.add_argument("--fallback", action="store_true", help="use OpenWeb Ninja")
+    sp.add_argument("--fallback", action="store_true", help="also web-search for owners")
+    sp.add_argument("--fallback-source", default="",
+                    help="apify (default) | openwebninja | none")
     sp.add_argument("--all", action="store_true", help="not just in-ICP rows")
     sp.set_defaults(func=cmd_owners)
 
