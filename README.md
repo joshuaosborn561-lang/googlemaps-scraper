@@ -27,15 +27,19 @@ re-spends on work already done.
 
 ## Setup
 
-**1. Ollama** (you already have it) — pull the model:
+**1. An LLM** — the pipeline defaults to `gpt-5-nano` via the OpenAI API,
+because a whole national vertical costs about **$2** (a single state, ~$0.09)
+and it keeps ~5 GB out of your RAM. Put your key in `OPENAI_API_KEY`.
+
+Prefer fully local and offline? Set `LLM_PROVIDER=ollama` and pull a model:
 
 ```bash
 ollama pull gemma4:e4b     # ~4.7 GB, runs fine on CPU
 ollama serve               # if it isn't already running
 ```
 
-Which model depends on your hardware, and it matters a lot — measure rather
-than guess:
+Local model choice depends on your hardware and matters a lot — measure
+rather than guess:
 
 ```bash
 python -m gmscraper bench

@@ -568,3 +568,76 @@ def test_thread_cap_only_sent_when_set():
     assert "num_thread" not in Ollama(num_threads=0)._options(0.0)
     opts = Ollama(num_threads=4, num_ctx=2048)._options(0.0)
     assert opts["num_thread"] == 4 and opts["num_ctx"] == 2048
+
+
+# ----------------------------------------------------------- llm backends
+
+
+def test_strictify_meets_openai_structured_output_rules():
+    from gmscraper.classify import SCHEMA as CLASSIFY_SCHEMA
+    from gmscraper.llm import strictify
+
+    s = strictify(CLASSIFY_SCHEMA)
+    assert s["additionalProperties"] is False
+    assert set(s["required"]) == set(s["properties"])
+    # nullable unions must survive untouched
+    from gmscraper.owner import SCHEMA as OWNER_SCHEMA
+    o = strictify(OWNER_SCHEMA)
+    assert o["properties"]["owner_name"]["type"] == ["string", "null"]
+    assert o["additionalProperties"] is False
+    assert set(o["required"]) == {"owner_name", "owner_title", "confidence"}
+    # original must not be mutated
+    assert "additionalProperties" not in CLASSIFY_SCHEMA
+
+
+def test_strictify_recurses_into_nested_objects():
+    from gmscraper.llm import strictify
+
+    s = strictify({
+        "type": "object",
+        "properties": {"inner": {"type": "object", "properties": {"a": {"type": "string"}}}},
+        "required": ["inner"],
+    })
+    assert s["properties"]["inner"]["additionalProperties"] is False
+    assert s["properties"]["inner"]["required"] == ["a"]
+
+
+def test_cost_accounting():
+    from gmscraper.llm import OpenAICompat
+
+    llm = OpenAICompat(api_key="k", price_in=0.05, price_out=0.40)
+    llm.calls, llm.tokens_in, llm.tokens_out = 1000, 1_000_000, 100_000
+    assert round(llm.cost_usd, 3) == round(0.05 + 0.04, 3)
+    assert "$0.09" in llm.spend_line()
+
+
+def test_local_backend_reports_free():
+    from gmscraper.llm import Ollama
+
+    llm = Ollama()
+    llm.calls, llm.tokens_in = 10, 5000
+    assert "free" in llm.spend_line()
+    assert llm.cost_usd == 0.0
+
+
+def test_provider_selection(monkeypatch):
+    import pytest
+    from gmscraper.config import Settings
+    from gmscraper.llm import OpenAICompat, make_llm
+
+    s = Settings(llm_provider="openai", openai_api_key="sk-x")
+    llm = make_llm(s)
+    assert isinstance(llm, OpenAICompat) and llm.model == s.openai_model
+
+    # missing key is a clear exit, not a mid-run failure
+    with pytest.raises(SystemExit):
+        make_llm(Settings(llm_provider="openai", openai_api_key=""))
+    with pytest.raises(SystemExit):
+        make_llm(Settings(llm_provider="anthropic"))
+
+
+def test_worker_defaults_differ_by_backend():
+    from gmscraper.llm import Ollama, OpenAICompat, default_workers
+
+    assert default_workers(OpenAICompat(api_key="k")) == 8   # network-bound
+    assert default_workers(Ollama()) == 1                    # core contention

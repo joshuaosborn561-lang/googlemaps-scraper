@@ -21,7 +21,7 @@ from . import (
     zips,
 )
 from .config import DEFAULT_CATEGORIES, DEFAULT_DB, DEFAULT_ZIPS, settings
-from .llm import Ollama
+from .llm import default_workers, make_llm
 from .mapsdata import MapsDataClient
 from .websearch import make_backend
 from .store import Store
@@ -72,17 +72,20 @@ def make_store(args) -> Store:
     return Store(args.db)
 
 
-def make_ollama(args) -> Ollama:
-    o = Ollama(
-        host=args.ollama_host or settings.ollama_host,
-        model=args.model or settings.ollama_model,
-        num_ctx=args.num_ctx or settings.ollama_num_ctx,
-        timeout=settings.ollama_timeout,
-        num_threads=getattr(args, "threads", 0) or settings.ollama_threads,
-        keep_alive=settings.ollama_keep_alive,
+def make_ollama(args):
+    """Named for history; returns whichever backend is configured."""
+    return make_llm(
+        settings,
+        model=args.model,
+        host=args.ollama_host,
+        num_ctx=getattr(args, "num_ctx", 0),
+        num_threads=getattr(args, "threads", 0),
+        provider=getattr(args, "provider", ""),
     )
-    o.check()
-    return o
+
+
+def _workers(args, llm) -> int:
+    return args.workers or default_workers(llm)
 
 
 # -------------------------------------------------------------- commands
@@ -202,15 +205,18 @@ def cmd_classify(args) -> None:
     if not icp:
         raise SystemExit("No ICP text. Pass --icp or use a --vertical that defines one.")
     store = make_store(args)
+    llm = make_ollama(args)
     res = classify.run(
-        store, make_ollama(args), icp,
-        workers=args.workers,
+        store, llm, icp,
+        workers=_workers(args, llm),
         limit=args.limit,
         include_no_site=args.include_no_site,
         min_confidence=args.min_confidence,
         max_evidence_chars=args.evidence_chars or None,
     )
     print(f"classified={res['done']:,} in-ICP={res['in_icp']:,} errors={res['errors']:,}")
+    if llm.spend_line():
+        print(llm.spend_line())
 
 
 def cmd_owners(args) -> None:
@@ -223,12 +229,15 @@ def cmd_owners(args) -> None:
             "Set APIFY_TOKEN in .env (or FALLBACK_SOURCE=openwebninja). "
             "Running website-only."
         )
+    llm = make_ollama(args)
     res = owner.run(
-        store, make_ollama(args), owj,
-        workers=args.workers, limit=args.limit, icp_only=not args.all,
+        store, llm, owj,
+        workers=_workers(args, llm), limit=args.limit, icp_only=not args.all,
         max_evidence_chars=args.evidence_chars or None,
     )
     print(f"done={res['done']:,} found={res['found']:,} via_web={res['via_web']:,}")
+    if llm.spend_line():
+        print(llm.spend_line())
 
 
 def cmd_export(args) -> None:
@@ -304,13 +313,15 @@ def cmd_run(args) -> None:
                     respect_robots=not args.ignore_robots)
 
     print("\n[3/5] qualifying against the ICP")
-    classify.run(store, ollama, plan.icp, workers=args.llm_workers,
+    classify.run(store, ollama, plan.icp,
+                 workers=args.llm_workers or default_workers(ollama),
                  min_confidence=args.min_confidence)
 
     if plan.require_owner or args.owners:
         print("\n[4/5] finding owner names")
         owj = make_backend(settings, args.fallback_source) if args.fallback else None
-        owner.run(store, ollama, owj, workers=args.llm_workers)
+        owner.run(store, ollama, owj,
+                  workers=args.llm_workers or default_workers(ollama))
     else:
         print("\n[4/5] skipping owner lookup (not requested; --owners to force)")
 
@@ -328,6 +339,8 @@ def cmd_run(args) -> None:
         states=plan.states or None,
     )
     print(f"\nDone. {n:,} leads -> {args.out}")
+    if ollama.spend_line():
+        print(ollama.spend_line())
     cmd_stats(args)
 
 
@@ -406,7 +419,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--limit", type=int, help="use only the first N zips")
 
     def add_llm_args(sp) -> None:
-        sp.add_argument("--model", default="", help=f"default: {settings.ollama_model}")
+        sp.add_argument("--model", default="",
+                        help=f"default: {settings.openai_model} "
+                             f"(or {settings.ollama_model} locally)")
+        sp.add_argument("--provider", default="",
+                        help="openai (default) | ollama")
         sp.add_argument("--ollama-host", default="")
         sp.add_argument("--num-ctx", type=int, default=0,
                         help="0 = use OLLAMA_NUM_CTX from .env")
@@ -431,7 +448,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
     sp.add_argument("--workers", type=int, default=8, help="scrape workers")
     sp.add_argument("--site-workers", type=int, default=12)
-    sp.add_argument("--llm-workers", type=int, default=1)
+    sp.add_argument("--llm-workers", type=int, default=0,
+                    help="0 = 8 for cloud, 1 for local CPU")
     sp.add_argument("--limit-results", type=int, default=20)
     sp.add_argument("--query-template", default="{category} in {zip}")
     sp.add_argument("--min-confidence", type=float, default=0.0)
@@ -493,8 +511,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("classify", help="local LLM confirms the ICP fit")
     add_cat_args(sp, need_icp=True)
     add_llm_args(sp)
-    sp.add_argument("--workers", type=int, default=1,
-                    help="1 is right on CPU; raise only with a GPU")
+    sp.add_argument("--workers", type=int, default=0,
+                    help="0 = 8 for cloud, 1 for local CPU")
     sp.add_argument("--limit", type=int)
     sp.add_argument("--evidence-chars", type=int, default=0,
                     help="0 = use LLM_MAX_EVIDENCE_CHARS from .env")
@@ -505,8 +523,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("owners", help="local LLM finds the owner's name")
     add_llm_args(sp)
-    sp.add_argument("--workers", type=int, default=1,
-                    help="1 is right on CPU; raise only with a GPU")
+    sp.add_argument("--workers", type=int, default=0,
+                    help="0 = 8 for cloud, 1 for local CPU")
     sp.add_argument("--limit", type=int)
     sp.add_argument("--evidence-chars", type=int, default=0,
                     help="0 = use LLM_MAX_EVIDENCE_CHARS from .env")

@@ -98,7 +98,7 @@ without re-scraping).
 | "that list is too broad / has junk in it" | tighten the `icp:` exclusions, re-run `classify` only. Do **not** re-scrape |
 | "I need more of them" | add category aliases (the usual cause of a short list), `estimate`, then scrape the new categories — existing ones are already checkpointed and won't re-charge |
 | "no emails in the CSV" | check `stats` for `domains with email`. Maps returns no emails; they come from the website scrape, so coverage is partial by nature. Say so plainly rather than implying it's a bug |
-| "classify/owners is too slow" | `bench` first. Then lower `LLM_MAX_EVIDENCE_CHARS` before reaching for a smaller model — a 12k-char prompt is ~3k tokens of prefill and most of it is nav and footer boilerplate |
+| "classify/owners is too slow" | on cloud, raise `--workers`; it is network-bound. On local, `bench` first. Then lower `LLM_MAX_EVIDENCE_CHARS` before reaching for a smaller model — a 12k-char prompt is ~3k tokens of prefill and most of it is nav and footer boilerplate |
 | "it stopped / I killed it" | just re-run the same command. Every stage resumes from SQLite |
 | "how much have I spent" | `estimate` prints quota used this billing cycle and the overage on top |
 | "quota numbers look wrong" | `MAPS_QUOTA_RESET_DAY` in `.env` must be the day he subscribed — RapidAPI resets on the anniversary, not the 1st |
@@ -117,12 +117,18 @@ without re-scraping).
   Apify's *official* actor (15x the price). Don't add it without measuring:
   the overview is synthesised from the same organic snippets we already read,
   and it strips the attribution the extractor uses to avoid guessing.
-- **Ollama must be running** (`ollama serve`) with the model in `OLLAMA_MODEL`
-  pulled, for `plan`, `classify` and `owners`. Check `ollama list` before
-  blaming code.
+- **The LLM stages run on `gpt-5-nano` by default, not locally.** A national
+  vertical costs about $2 and a state about $0.09 — 2-4% of the Maps scrape,
+  so it is not worth optimising. `LLM_PROVIDER=ollama` switches back to local
+  (free, offline, but slow on Josh's CPU-only box). Every stage prints its
+  own token spend. Workers default to 8 for cloud and 1 for local.
+- **Only if `LLM_PROVIDER=ollama`:** Ollama must be running (`ollama serve`)
+  with the model in `OLLAMA_MODEL` pulled. Check `ollama list` before blaming
+  code.
 - **Josh's machine is CPU-only** (Snapdragon X Plus, 16 GB, no GPU — Ollama
-  does not use the NPU). A 12B is minutes per business there; the default is
-  `gemma4:e4b`. If an LLM stage is slow or timing out, the fix order is:
+  does not use the NPU). This only matters on `LLM_PROVIDER=ollama`; the
+  default cloud path sidesteps it. A 12B is minutes per business there; the
+  local default is `gemma4:e4b`. If a local stage is slow or timing out:
   (1) lower `LLM_MAX_EVIDENCE_CHARS` — prefill dominates on CPU and it is the
   biggest lever, (2) a smaller model (`gemma4:e2b`, `qwen3.5:4b`,
   `phi4-mini`), (3) `--workers 1`, which is already the default. More workers
@@ -163,7 +169,7 @@ gmscraper/
   store.py       SQLite: jobs, businesses, sites, emails, verdicts, owners
   export.py      CSV
 config/categories.yml   verticals: icp + category aliases
-tests/                  44 offline tests, no network/API key needed
+tests/                  51 offline tests, no network/API key needed
 ```
 
 Run `python -m pytest tests/ -q` after changing normalization, ranking,

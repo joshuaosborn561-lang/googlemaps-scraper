@@ -129,6 +129,26 @@ class Settings:
         default_factory=lambda: _env("MAPS_DATA_PATH", "/searchmaps.php")
     )
 
+    # openai (any OpenAI-shaped endpoint) | ollama (local)
+    llm_provider: str = field(
+        default_factory=lambda: _env("LLM_PROVIDER", "openai").lower()
+    )
+    openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))
+    openai_model: str = field(
+        default_factory=lambda: _env("OPENAI_MODEL", "gpt-5-nano")
+    )
+    openai_base_url: str = field(
+        default_factory=lambda: _env("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    )
+    # USD per million tokens, for the spend line the stages print. Update
+    # these if you change model or provider -- they are reporting only.
+    openai_price_in: float = field(
+        default_factory=lambda: _env_float("OPENAI_PRICE_IN", 0.05)
+    )
+    openai_price_out: float = field(
+        default_factory=lambda: _env_float("OPENAI_PRICE_OUT", 0.40)
+    )
+
     ollama_host: str = field(
         default_factory=lambda: _env("OLLAMA_HOST", "http://localhost:11434")
     )
