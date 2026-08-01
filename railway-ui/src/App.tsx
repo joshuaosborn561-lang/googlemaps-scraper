@@ -52,6 +52,13 @@ function App() {
     },
   ]
 
+  const spendGuardrail = [
+    'No paid call without explicit approval.',
+    'Always estimate cost before execution.',
+    'Applies to Apify and any paid external API.',
+    'If estimate is unclear, call is blocked until clarified.',
+  ]
+
   return (
     <main className="app">
       <header className="hero">
@@ -107,6 +114,20 @@ function App() {
                 <p>
                   <strong>Look for:</strong> {item.expected}
                 </p>
+              </li>
+            ))}
+          </ul>
+        </article>
+
+        <article className="card">
+          <h2>Spend approval gate (required)</h2>
+          <p className="callout">
+            This project enforces a manual gate before any paid API action.
+          </p>
+          <ul className="query-list">
+            {spendGuardrail.map((rule) => (
+              <li key={rule}>
+                <p>{rule}</p>
               </li>
             ))}
           </ul>

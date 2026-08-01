@@ -73,6 +73,15 @@ code {
   font-size: 1rem;
 }
 
+.callout {
+  background: #fef3c7;
+  color: #78350f;
+  border: 1px solid #f59e0b;
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  margin-bottom: 0.85rem;
+}
+
 @media (prefers-color-scheme: dark) {
   .card {
     background: #111827;
@@ -82,5 +91,11 @@ code {
 
   code {
     background: #1f2937;
+  }
+
+  .callout {
+    background: #3f2f12;
+    color: #fde68a;
+    border-color: #d97706;
   }
 }

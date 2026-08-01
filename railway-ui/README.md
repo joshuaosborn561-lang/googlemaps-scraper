@@ -52,6 +52,16 @@ railway deployment list --json
    rg "process\\.env|import\\.meta\\.env" src
    ```
 
+## Spend approval gate (project policy)
+
+Before any paid API call (including Apify), this workflow requires:
+
+1. A written cost estimate
+2. Explicit user approval
+3. Only then execution
+
+No exceptions for "small" calls.
+
 ## Railway start command used by this app
 
 `npm start` runs:
