@@ -1,0 +1,86 @@
+.app {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 3rem 1rem 4rem;
+}
+
+.hero {
+  margin-bottom: 1.5rem;
+}
+
+.eyebrow {
+  color: #a855f7;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.25rem;
+}
+
+.subtitle {
+  max-width: 70ch;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
+}
+
+.card h2 {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+}
+
+.card ol {
+  padding-left: 1.2rem;
+}
+
+.card li {
+  margin-bottom: 0.8rem;
+}
+
+code {
+  display: block;
+  background: #f3f4f6;
+  border-radius: 0.4rem;
+  padding: 0.45rem 0.55rem;
+  margin-top: 0.35rem;
+  font-size: 0.86rem;
+  overflow-x: auto;
+}
+
+.query-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.query-list li + li {
+  border-top: 1px dashed #d1d5db;
+  padding-top: 0.8rem;
+}
+
+.query-list h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .card {
+    background: #111827;
+    border-color: #374151;
+    box-shadow: none;
+  }
+
+  code {
+    background: #1f2937;
+  }
+}
