@@ -1,6 +1,12 @@
 # Google Maps Scraper UI (Railway)
 
-This UI now reflects the repository's real target workflow:
+This UI now reflects the repository's real target workflow and is explicitly built for:
+
+- entering a **natural-language lead-gen prompt**
+- reviewing parsed scrape scope + projected cost
+- approving paid actions before run commands
+
+Core workflow:
 
 1. Plan lead campaign from a brief
 2. Scrape Google Maps listings
@@ -8,8 +14,9 @@ This UI now reflects the repository's real target workflow:
 4. Classify ICP fit and extract owner data
 5. Export qualified CSV leads
 
-Current state: this frontend is deployed and aligned to that flow, but the Python
-`gmscraper` backend is not yet wired into the UI on this branch.
+Current state: this frontend is deployed and aligned to that flow; it now provides
+a prompt-driven planning UX. The Python `gmscraper` backend still needs HTTP wiring
+for one-click execution from the UI.
 
 ## Run locally
 

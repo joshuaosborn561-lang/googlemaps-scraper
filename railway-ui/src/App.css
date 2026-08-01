@@ -1,5 +1,5 @@
 .app {
-  max-width: 1000px;
+  max-width: 1120px;
   margin: 0 auto;
   padding: 3rem 1rem 4rem;
 }
@@ -17,12 +17,12 @@
 }
 
 .subtitle {
-  max-width: 70ch;
+  max-width: 74ch;
 }
 
-.grid {
+.layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
 }
 
@@ -39,12 +39,51 @@
   margin-bottom: 0.75rem;
 }
 
-.card ol {
-  padding-left: 1.2rem;
+.span-2 {
+  grid-column: span 2;
 }
 
-.card li {
-  margin-bottom: 0.8rem;
+label {
+  display: block;
+  font-size: 0.92rem;
+  margin-bottom: 0.45rem;
+  color: #374151;
+}
+
+textarea {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 0.65rem;
+  padding: 0.75rem;
+  font: inherit;
+  background: #fff;
+  color: #111827;
+  resize: vertical;
+}
+
+.actions {
+  margin-top: 0.85rem;
+}
+
+button {
+  border: none;
+  border-radius: 0.55rem;
+  background: #7c3aed;
+  color: #fff;
+  padding: 0.6rem 0.85rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.hint {
+  margin-top: 0.6rem;
+  font-size: 0.88rem;
+  color: #6b7280;
 }
 
 code {
@@ -57,20 +96,60 @@ code {
   overflow-x: auto;
 }
 
-.query-list {
+.kv {
   list-style: none;
   padding: 0;
   margin: 0;
 }
 
-.query-list li + li {
-  border-top: 1px dashed #d1d5db;
-  padding-top: 0.8rem;
+.kv li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px dashed #d1d5db;
+  padding-bottom: 0.45rem;
 }
 
-.query-list h3 {
-  margin: 0 0 0.35rem;
-  font-size: 1rem;
+.kv li span {
+  color: #6b7280;
+}
+
+.kv li strong {
+  text-align: right;
+}
+
+.kv li.total {
+  border-bottom: none;
+  margin-top: 0.4rem;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  color: #111827;
+}
+
+.check input {
+  margin-top: 0.2rem;
+}
+
+.log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.log li {
+  background: #f3f4f6;
+  border-radius: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.9rem;
 }
 
 .callout {
@@ -93,9 +172,43 @@ code {
     background: #1f2937;
   }
 
+  label,
+  .check {
+    color: #e5e7eb;
+  }
+
+  textarea {
+    background: #111827;
+    color: #f3f4f6;
+    border-color: #374151;
+  }
+
+  .hint,
+  .kv li span {
+    color: #9ca3af;
+  }
+
+  .log li {
+    background: #1f2937;
+  }
+
+  .kv li {
+    border-color: #374151;
+  }
+
   .callout {
     background: #3f2f12;
     color: #fde68a;
     border-color: #d97706;
+  }
+}
+
+@media (max-width: 920px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .span-2 {
+    grid-column: span 1;
   }
 }
