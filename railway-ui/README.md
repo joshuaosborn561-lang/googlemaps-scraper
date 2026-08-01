@@ -80,9 +80,9 @@ Before any paid API call (RapidAPI, OpenAI-compatible endpoints, Apify fallback)
 
 No exceptions for "small" calls.
 
-## Supabase integration
+## Supabase integration (primary persistence)
 
-Jobs and leads sync to Supabase through secure RPC ingest:
+Supabase is the source of truth for history and downloads:
 
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
@@ -91,8 +91,12 @@ Jobs and leads sync to Supabase through secure RPC ingest:
 Tables:
 - `scrape_jobs` (job history + tags + spend estimates)
 - `scrape_leads` (lead rows + tags + structured fields)
+- `scrape_exports` (CSV content for re-download)
 
-The backend still keeps local fallback history in `data/jobs.json` and files under `data/outputs/`.
+API behavior:
+- `GET /api/jobs` reads from Supabase (survives Railway restarts/refreshes)
+- `GET /api/jobs/:id/file` streams the CSV from Supabase
+- local disk is only a temporary workspace while a job is running
 
 ## Railway start command used by this app
 

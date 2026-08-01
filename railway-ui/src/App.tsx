@@ -140,23 +140,27 @@ function App() {
 
   async function loadJobs(): Promise<void> {
     try {
-      const response = await fetch('/api/jobs')
-      if (!response.ok) throw new Error(`Failed to load jobs (${response.status})`)
-      const data: JobRecord[] = await response.json()
-      setJobs(data)
       const health = await fetch('/api/health')
       if (health.ok) {
         const payload = await health.json()
         setBackendState(
           payload.supabaseConfigured
-            ? 'Backend + Supabase connected'
-            : 'Backend connected (local history)',
+            ? 'Supabase history connected'
+            : 'Supabase not configured',
         )
-      } else {
-        setBackendState('Backend connected')
       }
-    } catch {
-      setBackendState('Backend unavailable in this session')
+
+      const response = await fetch('/api/jobs')
+      if (!response.ok) {
+        const failed = await response.json().catch(() => ({}))
+        throw new Error(failed.error ?? `Failed to load jobs (${response.status})`)
+      }
+      const data: JobRecord[] = await response.json()
+      setJobs(data)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Backend unavailable'
+      setBackendState(message)
+      // Keep existing jobs visible so a temporary failure never wipes the UI.
     }
   }
 

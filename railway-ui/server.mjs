@@ -10,18 +10,17 @@ const __dirname = path.dirname(__filename)
 const distDir = path.join(__dirname, 'dist')
 const dataDir = path.join(__dirname, 'data')
 const outputDir = path.join(dataDir, 'outputs')
-const jobsPath = path.join(dataDir, 'jobs.json')
 const port = Number(process.env.PORT) || 4173
 
 const app = express()
-app.use(express.json({ limit: '1mb' }))
+app.use(express.json({ limit: '2mb' }))
 
 const supabaseUrl = process.env.SUPABASE_URL
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY
 const supabaseIngestSecret = process.env.SUPABASE_INGEST_SECRET
 
 const supabase =
-  supabaseUrl && supabaseAnonKey
+  supabaseUrl && supabaseAnonKey && supabaseIngestSecret
     ? createClient(supabaseUrl, supabaseAnonKey)
     : null
 
@@ -62,8 +61,9 @@ const CATEGORY_HINTS = [
  * }} JobRecord
  */
 
-/** @type {JobRecord[]} */
-let jobs = []
+/** In-memory overlay for active runs only. Source of truth is Supabase. */
+/** @type {Map<string, JobRecord>} */
+const activeJobs = new Map()
 
 function parsePrompt(prompt) {
   const lower = prompt.toLowerCase()
@@ -115,22 +115,36 @@ function slugId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-async function ensureFiles() {
-  await fs.mkdir(outputDir, { recursive: true })
-  try {
-    await fs.access(jobsPath)
-  } catch {
-    await fs.writeFile(jobsPath, '[]', 'utf8')
+function requireSupabase() {
+  if (!supabase || !supabaseIngestSecret) {
+    const error = new Error('Supabase is not configured on this service.')
+    error.statusCode = 503
+    throw error
   }
 }
 
-async function saveJobs() {
-  await fs.writeFile(jobsPath, JSON.stringify(jobs, null, 2), 'utf8')
-}
-
-async function loadJobs() {
-  const raw = await fs.readFile(jobsPath, 'utf8')
-  jobs = JSON.parse(raw)
+function mapRemoteJob(row) {
+  const hasExport = Boolean(row.has_export)
+  return {
+    id: row.id,
+    prompt: row.prompt || '',
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    status: row.status,
+    createdAt: row.created_at,
+    finishedAt: row.finished_at || null,
+    estimate: {
+      requestEstimate: Number(row.request_estimate || 0),
+      mapsCost: Number(row.estimate_maps || 0),
+      llmCost: Number(row.estimate_llm || 0),
+      apifyCost: Number(row.estimate_apify || 0),
+      total: Number(row.estimate_total || 0),
+    },
+    approvals: { maps: true, llm: true, apify: true },
+    downloadUrl: hasExport || row.status === 'completed' ? `/api/jobs/${row.id}/file` : null,
+    localFilePath: null,
+    error: row.error || null,
+    logs: [],
+  }
 }
 
 function csvToJsonRows(csvContent) {
@@ -147,63 +161,84 @@ function csvToJsonRows(csvContent) {
   })
 }
 
-async function persistToSupabase(job) {
-  if (!supabase || !supabaseIngestSecret) return
+async function upsertJobRemote(job) {
+  requireSupabase()
+  const { error } = await supabase.rpc('ingest_scrape_job', {
+    p_secret: supabaseIngestSecret,
+    p_job: {
+      id: job.id,
+      prompt: job.prompt,
+      tags: job.tags,
+      status: job.status,
+      estimate: job.estimate,
+      downloadUrl: job.downloadUrl,
+      error: job.error,
+      createdAt: job.createdAt,
+      finishedAt: job.finishedAt,
+    },
+  })
+  if (error) throw error
+}
 
-  try {
-    const { error } = await supabase.rpc('ingest_scrape_job', {
-      p_secret: supabaseIngestSecret,
-      p_job: {
-        id: job.id,
-        prompt: job.prompt,
-        tags: job.tags,
-        status: job.status,
-        estimate: job.estimate,
-        downloadUrl: job.downloadUrl,
-        error: job.error,
-        createdAt: job.createdAt,
-        finishedAt: job.finishedAt,
-      },
-    })
-    if (error) throw error
-  } catch (error) {
-    console.error('Supabase job upsert failed:', error)
-  }
+async function upsertExportRemote(jobId, csvContent) {
+  requireSupabase()
+  const { error } = await supabase.rpc('upsert_scrape_export', {
+    p_secret: supabaseIngestSecret,
+    p_job_id: jobId,
+    p_filename: `leads-${jobId}.csv`,
+    p_content: csvContent,
+  })
+  if (error) throw error
+}
 
-  if (!job.localFilePath || job.status !== 'completed') return
+async function ingestLeadsRemote(jobId, tags, rows) {
+  requireSupabase()
+  if (!rows.length) return
+  const { error } = await supabase.rpc('ingest_scrape_leads', {
+    p_secret: supabaseIngestSecret,
+    p_job_id: jobId,
+    p_tags: tags,
+    p_rows: rows.slice(0, 2000),
+  })
+  if (error) throw error
+}
 
-  try {
-    const csvContent = await fs.readFile(job.localFilePath, 'utf8')
-    const rows = csvToJsonRows(csvContent)
-    if (rows.length > 0) {
-      const { error } = await supabase.rpc('ingest_scrape_leads', {
-        p_secret: supabaseIngestSecret,
-        p_job_id: job.id,
-        p_tags: job.tags,
-        p_rows: rows.slice(0, 2000),
-      })
-      if (error) throw error
-    }
-  } catch (error) {
-    console.error('Supabase leads insert failed:', error)
-  }
+async function listJobsRemote() {
+  requireSupabase()
+  const { data, error } = await supabase.rpc('list_scrape_jobs', {
+    p_secret: supabaseIngestSecret,
+  })
+  if (error) throw error
+  const rows = Array.isArray(data) ? data : []
+  return rows.map(mapRemoteJob)
+}
+
+async function getExportRemote(jobId) {
+  requireSupabase()
+  const { data, error } = await supabase.rpc('get_scrape_export', {
+    p_secret: supabaseIngestSecret,
+    p_job_id: jobId,
+  })
+  if (error) throw error
+  return data
+}
+
+async function ensureFiles() {
+  await fs.mkdir(outputDir, { recursive: true })
 }
 
 async function runJob(job) {
   job.status = 'running'
-  job.logs.unshift('Starting gmscraper run...')
-  await saveJobs()
-  await persistToSupabase(job)
+  job.logs.unshift('Starting scrape job...')
+  activeJobs.set(job.id, job)
 
-  const planPath = path.join(dataDir, `${job.id}.plan.json`)
-  const outputPath = path.join(outputDir, `${job.id}.csv`)
-  const planJson = {
-    prompt: job.prompt,
-    tags: job.tags,
-    createdAt: job.createdAt,
+  try {
+    await upsertJobRemote(job)
+  } catch (error) {
+    console.error('Failed to mark running in Supabase:', error)
   }
-  await fs.writeFile(planPath, JSON.stringify(planJson, null, 2), 'utf8')
 
+  const outputPath = path.join(outputDir, `${job.id}.csv`)
   const python = resolvePythonBinary()
   const args = ['-m', 'gmscraper', 'run', job.prompt, '--out', outputPath, '--yes']
   const child = spawn(python, args, { cwd: __dirname, env: process.env })
@@ -211,101 +246,158 @@ async function runJob(job) {
   child.stdout.on('data', (chunk) => {
     job.logs.unshift(chunk.toString().trim())
   })
-
   child.stderr.on('data', (chunk) => {
     job.logs.unshift(chunk.toString().trim())
   })
 
   child.on('close', async (code) => {
-    if (code === 0) {
-      job.status = 'completed'
-      job.finishedAt = new Date().toISOString()
-      job.localFilePath = outputPath
-      job.downloadUrl = `/api/jobs/${job.id}/file`
-      job.error = null
-      job.logs.unshift('Job completed. CSV ready for download.')
-    } else {
+    try {
+      if (code === 0) {
+        const csvContent = await fs.readFile(outputPath, 'utf8')
+        await upsertExportRemote(job.id, csvContent)
+        await ingestLeadsRemote(job.id, job.tags, csvToJsonRows(csvContent))
+
+        job.status = 'completed'
+        job.finishedAt = new Date().toISOString()
+        job.localFilePath = outputPath
+        job.downloadUrl = `/api/jobs/${job.id}/file`
+        job.error = null
+        job.logs.unshift('Job completed and stored in Supabase.')
+      } else {
+        job.status = 'failed'
+        job.finishedAt = new Date().toISOString()
+        job.error =
+          'Job failed. Ensure gmscraper and its Python dependencies are available in this deployment.'
+        job.logs.unshift(job.error)
+      }
+
+      await upsertJobRemote(job)
+    } catch (error) {
       job.status = 'failed'
       job.finishedAt = new Date().toISOString()
-      job.error =
-        'Job failed. Ensure gmscraper and its Python dependencies are available in this deployment.'
+      job.error = error instanceof Error ? error.message : 'Failed to persist results to Supabase.'
       job.logs.unshift(job.error)
+      try {
+        await upsertJobRemote(job)
+      } catch (persistError) {
+        console.error('Failed to persist failed job state:', persistError)
+      }
+    } finally {
+      // Keep completed/failed in memory briefly; list always comes from Supabase.
+      setTimeout(() => activeJobs.delete(job.id), 60_000)
     }
-    await saveJobs()
-    await persistToSupabase(job)
   })
 }
 
 app.get('/api/health', (_request, response) => {
   response.json({
     ok: true,
-    supabaseConfigured: Boolean(supabase && supabaseIngestSecret),
-    historyMode: supabase && supabaseIngestSecret ? 'supabase+local' : 'local',
+    supabaseConfigured: Boolean(supabase),
+    historyMode: supabase ? 'supabase' : 'unavailable',
+    persistence: 'supabase-primary',
   })
 })
 
 app.get('/api/jobs', async (_request, response) => {
-  const ordered = [...jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  response.json(ordered)
+  try {
+    const remoteJobs = await listJobsRemote()
+    const byId = new Map(remoteJobs.map((job) => [job.id, job]))
+
+    for (const active of activeJobs.values()) {
+      byId.set(active.id, {
+        ...active,
+        downloadUrl:
+          active.status === 'completed' ? `/api/jobs/${active.id}/file` : active.downloadUrl,
+      })
+    }
+
+    const ordered = [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    response.json(ordered)
+  } catch (error) {
+    console.error('Failed to load jobs from Supabase:', error)
+    response.status(error.statusCode || 500).json({
+      error: error instanceof Error ? error.message : 'Failed to load jobs from Supabase.',
+    })
+  }
 })
 
 app.post('/api/jobs', async (request, response) => {
-  const prompt = String(request.body?.prompt || '').trim()
-  const tags = Array.isArray(request.body?.tags)
-    ? request.body.tags.map((tag) => String(tag).trim()).filter(Boolean)
-    : []
-  const approvals = request.body?.approvals || {}
+  try {
+    requireSupabase()
 
-  if (prompt.length < 20) {
-    return response.status(400).json({ error: 'Prompt is too short.' })
+    const prompt = String(request.body?.prompt || '').trim()
+    const tags = Array.isArray(request.body?.tags)
+      ? request.body.tags.map((tag) => String(tag).trim()).filter(Boolean)
+      : []
+    const approvals = request.body?.approvals || {}
+
+    if (prompt.length < 20) {
+      return response.status(400).json({ error: 'Prompt is too short.' })
+    }
+
+    const plan = parsePrompt(prompt)
+    const estimate = estimateFromPlan(plan)
+    const requiresApify = plan.usesFallback
+
+    if (!approvals.maps || !approvals.llm || (requiresApify && !approvals.apify)) {
+      return response.status(400).json({ error: 'Missing required paid-action approvals.' })
+    }
+
+    /** @type {JobRecord} */
+    const job = {
+      id: slugId(),
+      prompt,
+      tags,
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      finishedAt: null,
+      estimate,
+      approvals: {
+        maps: Boolean(approvals.maps),
+        llm: Boolean(approvals.llm),
+        apify: Boolean(approvals.apify),
+      },
+      downloadUrl: null,
+      localFilePath: null,
+      error: null,
+      logs: ['Queued by UI'],
+    }
+
+    await upsertJobRemote(job)
+    activeJobs.set(job.id, job)
+    void runJob(job)
+    return response.status(201).json(job)
+  } catch (error) {
+    console.error('Failed to create job:', error)
+    return response.status(error.statusCode || 500).json({
+      error: error instanceof Error ? error.message : 'Failed to create job.',
+    })
   }
-
-  const plan = parsePrompt(prompt)
-  const estimate = estimateFromPlan(plan)
-  const requiresApify = plan.usesFallback
-
-  if (!approvals.maps || !approvals.llm || (requiresApify && !approvals.apify)) {
-    return response.status(400).json({ error: 'Missing required paid-action approvals.' })
-  }
-
-  /** @type {JobRecord} */
-  const job = {
-    id: slugId(),
-    prompt,
-    tags,
-    status: 'queued',
-    createdAt: new Date().toISOString(),
-    finishedAt: null,
-    estimate,
-    approvals: {
-      maps: Boolean(approvals.maps),
-      llm: Boolean(approvals.llm),
-      apify: Boolean(approvals.apify),
-    },
-    downloadUrl: null,
-    localFilePath: null,
-    error: null,
-    logs: ['Queued by UI'],
-  }
-
-  jobs.push(job)
-  await saveJobs()
-  await persistToSupabase(job)
-  void runJob(job)
-  return response.status(201).json(job)
 })
 
 app.get('/api/jobs/:id/file', async (request, response) => {
-  const job = jobs.find((entry) => entry.id === request.params.id)
-  if (!job || !job.localFilePath || job.status !== 'completed') {
-    return response.status(404).json({ error: 'File not found for this job.' })
-  }
-
   try {
-    await fs.access(job.localFilePath)
-    response.download(job.localFilePath, `leads-${job.id}.csv`)
-  } catch {
-    response.status(404).json({ error: 'Local file is missing.' })
+    const exportPayload = await getExportRemote(request.params.id)
+    const filename = exportPayload?.filename || `leads-${request.params.id}.csv`
+    const content = exportPayload?.content || ''
+
+    response.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    response.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    return response.status(200).send(content)
+  } catch (error) {
+    // Temporary local fallback while an active job is finishing write.
+    const active = activeJobs.get(request.params.id)
+    if (active?.localFilePath) {
+      try {
+        await fs.access(active.localFilePath)
+        return response.download(active.localFilePath, `leads-${active.id}.csv`)
+      } catch {
+        // fall through
+      }
+    }
+
+    console.error('Failed to fetch export from Supabase:', error)
+    return response.status(404).json({ error: 'File not found in Supabase for this job.' })
   }
 })
 
@@ -315,8 +407,7 @@ app.use((_request, response) => {
 })
 
 await ensureFiles()
-await loadJobs()
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`Server listening on ${port}`)
+  console.log(`Server listening on ${port} (Supabase primary persistence)`)
 })
