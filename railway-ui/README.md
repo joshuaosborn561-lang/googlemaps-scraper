@@ -1,11 +1,15 @@
-# Railway UI Launchpad
+# Google Maps Scraper UI (Railway)
 
-This project is a minimal React + Vite UI you can deploy to Railway.  
-It also includes a built-in on-screen playbook for:
+This UI now reflects the repository's real target workflow:
 
-- what to query in Railway CLI,
-- where to search when deploys fail,
-- what to verify before sharing your app URL.
+1. Plan lead campaign from a brief
+2. Scrape Google Maps listings
+3. Enrich websites and emails
+4. Classify ICP fit and extract owner data
+5. Export qualified CSV leads
+
+Current state: this frontend is deployed and aligned to that flow, but the Python
+`gmscraper` backend is not yet wired into the UI on this branch.
 
 ## Run locally
 
@@ -24,37 +28,36 @@ railway up
 
 Railway will guide auth/sign-up if needed, create project/service if missing, and deploy.
 
-## What to query (copy/paste commands)
+## Core pipeline commands (copy/paste)
 
 ```bash
-railway whoami --json
-railway status --json
-railway project list --json
-railway logs --service <service-name> --lines 200 --json
-railway deployment list --json
+python -m gmscraper plan "<brief>" --save plans/target.json
+python -m gmscraper scrape --plan plans/target.json
+python -m gmscraper enrich --plan plans/target.json
+python -m gmscraper classify --plan plans/target.json
+python -m gmscraper owners --plan plans/target.json --fallback
+python -m gmscraper export --out out/leads.csv --with-email --with-owner
 ```
 
-## Where to search when blocked
+## Operating queries
 
-1. **Railway docs**
-   - Query: `railway vite react static site deploy`
-   - Use this for start/build command patterns and PORT behavior.
+```bash
+python -m gmscraper estimate --categories "dentist,orthodontist" --states CA --plan ultra
+python -m gmscraper probe --zip 10001 --category "dental clinic"
+python -m gmscraper stats --all
+railway logs --service railway-ui --lines 200 --json
+```
 
-2. **Railway dashboard → Deployments**
-   - Open build/runtime logs from the latest failed deployment.
+## What the audit found
 
-3. **Railway dashboard → Variables**
-   - Confirm every variable required by your UI/backend is set.
+- Project purpose is a **lead-generation pipeline** for US local businesses.
+- Main paid source is **RapidAPI Maps Data**.
+- LLM stages handle planning, ICP classification, and owner extraction.
+- Export output is CSV leads with filters (email/owner/rating/reviews).
 
-4. **Your codebase**
-   - Search env usage:
-   ```bash
-   rg "process\\.env|import\\.meta\\.env" src
-   ```
+## Spend approval gate (required)
 
-## Spend approval gate (project policy)
-
-Before any paid API call (including Apify), this workflow requires:
+Before any paid API call (RapidAPI, OpenAI-compatible endpoints, Apify fallback), this workflow requires:
 
 1. A written cost estimate
 2. Explicit user approval

@@ -1,54 +1,54 @@
 import './App.css'
 
 function App() {
-  const railwayQueries = [
+  const pipelineSteps = [
     {
-      label: 'Check auth + workspace context',
-      command: 'railway whoami --json',
-      reason: 'Confirms you are signed in and shows the active workspace.',
+      stage: '1) Plan',
+      command: 'python -m gmscraper plan "<brief>" --save plans/target.json',
+      purpose: 'Convert a plain-English target brief into categories, ICP, and cost estimate.',
     },
     {
-      label: 'Check linked project/service',
-      command: 'railway status --json',
-      reason: 'Shows which project, environment, and service this directory targets.',
+      stage: '2) Scrape',
+      command: 'python -m gmscraper scrape --plan plans/target.json',
+      purpose: 'Collect Google Maps listings through RapidAPI Maps Data (zip x category grid).',
     },
     {
-      label: 'List projects to find the right one',
-      command: 'railway project list --json',
-      reason: 'Use this when status says the current directory is not linked.',
+      stage: '3) Enrich',
+      command: 'python -m gmscraper enrich --plan plans/target.json',
+      purpose: 'Fetch company websites and extract candidate business emails.',
     },
     {
-      label: 'Inspect recent service logs',
-      command: 'railway logs --service <service-name> --lines 200 --json',
-      reason: 'Use after deploy to diagnose crashes, port issues, or missing vars.',
+      stage: '4) Classify + Owners',
+      command:
+        'python -m gmscraper classify --plan plans/target.json && python -m gmscraper owners --plan plans/target.json --fallback',
+      purpose: 'Score ICP fit with LLM and find owner names (optional web-search fallback).',
     },
     {
-      label: 'Check deployment lifecycle',
-      command: 'railway deployment list --json',
-      reason: 'Verify your latest deployment reached SUCCESS before sharing a URL.',
+      stage: '5) Export',
+      command:
+        'python -m gmscraper export --out out/leads.csv --with-email --with-owner --min-rating 4.0',
+      purpose: 'Produce qualified CSV leads for outreach.',
     },
   ]
 
-  const searchPlaybook = [
+  const projectAudit = [
     {
-      where: 'Railway Docs',
-      query: 'railway vite react static site deploy',
-      expected: 'Build/start patterns, PORT handling, and static deployment guidance.',
+      fact: 'Actual project purpose',
+      detail:
+        'A lead-generation pipeline that scrapes Google Maps listings, enriches websites, classifies ICP fit, and exports CSV.',
     },
     {
-      where: 'Railway Dashboard → Deployments',
-      query: 'Failed deploy + build logs',
-      expected: 'Exact build/runtime error lines to fix before redeploy.',
+      fact: 'Primary data store',
+      detail: 'SQLite checkpoint database (leads.db) with resumable job stages.',
     },
     {
-      where: 'Railway Dashboard → Variables',
-      query: 'PORT and required app env vars',
-      expected: 'Missing configuration causing startup/runtime failures.',
+      fact: 'Main paid input source',
+      detail: 'RapidAPI Maps Data requests for search coverage (zip x category).',
     },
     {
-      where: 'Your codebase',
-      query: 'rg "process\\.env|import\\.meta\\.env" src',
-      expected: 'Every environment variable used by your app, for variable setup.',
+      fact: 'Current gap',
+      detail:
+        'This branch currently hosts only a UI shell; the Python scraper code is not yet wired into this frontend.',
     },
   ]
 
@@ -59,75 +59,105 @@ function App() {
     'If estimate is unclear, call is blocked until clarified.',
   ]
 
+  const runbookQueries = [
+    'python -m gmscraper estimate --categories "dentist,orthodontist" --states CA --plan ultra',
+    'python -m gmscraper probe --zip 10001 --category "dental clinic"',
+    'python -m gmscraper stats --all',
+    'railway logs --service railway-ui --lines 200 --json',
+  ]
+
+  const paidApis = [
+    {
+      name: 'RapidAPI Maps Data',
+      use: 'Google Maps listing fetches during scrape stage.',
+      estimateHint: 'Estimated by total request count from plan/estimate command.',
+    },
+    {
+      name: 'OpenAI-compatible model',
+      use: 'Brief planning + ICP classification + owner extraction.',
+      estimateHint: 'Estimate by model choice and number of records sent to LLM stages.',
+    },
+    {
+      name: 'Apify SERP fallback (optional)',
+      use: 'Owner lookup fallback when website evidence is insufficient.',
+      estimateHint: 'Estimate by fallback search count; only run with explicit approval.',
+    },
+  ]
+
   return (
     <main className="app">
       <header className="hero">
-        <p className="eyebrow">Railway Launchpad</p>
-        <h1>Ship this UI and know exactly what to query next</h1>
+        <p className="eyebrow">Google Maps Scraper Control Panel</p>
+        <h1>UI aligned to the real project: scrape, enrich, qualify, export</h1>
         <p className="subtitle">
-          This screen gives you a practical playbook for deploying to Railway and
-          debugging quickly with the right commands and searches.
+          Repository audit summary: this project is a lead pipeline, not just a
+          static Railway site. The next step is wiring these flows to a backend
+          service that runs gmscraper commands.
         </p>
       </header>
 
       <section className="grid">
         <article className="card">
-          <h2>Deploy checklist</h2>
-          <ol>
-            <li>
-              Create a Railway project and service from this folder:
-              <code>railway up</code>
-            </li>
-            <li>
-              Confirm deployment reached <strong>SUCCESS</strong>:
-              <code>railway deployment list --json</code>
-            </li>
-            <li>
-              Open your service URL and verify the page loads:
-              <code>railway domain</code>
-            </li>
-          </ol>
+          <h2>Audit findings</h2>
+          <ul className="query-list">
+            {projectAudit.map((item) => (
+              <li key={item.fact}>
+                <h3>{item.fact}</h3>
+                <p>{item.detail}</p>
+              </li>
+            ))}
+          </ul>
         </article>
 
         <article className="card">
-          <h2>What to query in Railway CLI</h2>
+          <h2>Pipeline runbook (target UI behavior)</h2>
           <ul className="query-list">
-            {railwayQueries.map((item) => (
-              <li key={item.command}>
-                <h3>{item.label}</h3>
+            {pipelineSteps.map((item) => (
+              <li key={item.stage}>
+                <h3>{item.stage}</h3>
                 <code>{item.command}</code>
-                <p>{item.reason}</p>
+                <p>{item.purpose}</p>
               </li>
             ))}
           </ul>
         </article>
 
         <article className="card">
-          <h2>Where to search when blocked</h2>
+          <h2>What to query while operating</h2>
           <ul className="query-list">
-            {searchPlaybook.map((item) => (
-              <li key={`${item.where}-${item.query}`}>
-                <h3>{item.where}</h3>
-                <p>
-                  <strong>Search/query:</strong> <code>{item.query}</code>
-                </p>
-                <p>
-                  <strong>Look for:</strong> {item.expected}
-                </p>
+            {runbookQueries.map((command) => (
+              <li key={command}>
+                <code>{command}</code>
               </li>
             ))}
           </ul>
         </article>
 
         <article className="card">
-          <h2>Spend approval gate (required)</h2>
+          <h2>Spend approval gate (enforced)</h2>
           <p className="callout">
-            This project enforces a manual gate before any paid API action.
+            Every paid call must show an estimate first and requires explicit
+            user approval.
           </p>
           <ul className="query-list">
             {spendGuardrail.map((rule) => (
               <li key={rule}>
                 <p>{rule}</p>
+              </li>
+            ))}
+          </ul>
+        </article>
+
+        <article className="card">
+          <h2>Paid API touchpoints</h2>
+          <ul className="query-list">
+            {paidApis.map((api) => (
+              <li key={api.name}>
+                <h3>{api.name}</h3>
+                <p>{api.use}</p>
+                <p>
+                  <strong>Cost estimate rule:</strong> {api.estimateHint}
+                </p>
               </li>
             ))}
           </ul>
