@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 type ParsedPlan = {
@@ -10,6 +10,29 @@ type ParsedPlan = {
   needsEmail: boolean
   usesFallback: boolean
   leadTarget: number
+}
+
+type JobRecord = {
+  id: string
+  prompt: string
+  tags: string[]
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  createdAt: string
+  finishedAt: string | null
+  estimate: {
+    requestEstimate: number
+    mapsCost: number
+    llmCost: number
+    apifyCost: number
+    total: number
+  }
+  approvals: {
+    maps: boolean
+    llm: boolean
+    apify: boolean
+  }
+  downloadUrl: string | null
+  error: string | null
 }
 
 const STATE_CODES = [
@@ -65,12 +88,14 @@ function App() {
   const [prompt, setPrompt] = useState(
     'Find 1200 dental and orthodontic clinics in CA and AZ with 4.2+ stars, at least 30 reviews, include owner and email.',
   )
+  const [tagsInput, setTagsInput] = useState('dental, high-value, west-coast')
   const [approvedMaps, setApprovedMaps] = useState(false)
   const [approvedLlm, setApprovedLlm] = useState(false)
   const [approvedApify, setApprovedApify] = useState(false)
-  const [activity, setActivity] = useState<string[]>([
-    'Ready: enter a natural-language scrape brief.',
-  ])
+  const [jobs, setJobs] = useState<JobRecord[]>([])
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [activity, setActivity] = useState<string[]>(['Ready for a new lead-gen prompt.'])
+  const [backendState, setBackendState] = useState('Checking backend...')
 
   const parsed = useMemo(() => parsePrompt(prompt), [prompt])
 
@@ -100,6 +125,14 @@ function App() {
   const commandRun = `python -m gmscraper run --plan ${planFile} --out out/leads.csv --yes`
   const commandExport =
     'python -m gmscraper export --out out/leads.csv --with-email --with-owner --min-rating 4.0'
+  const tags = useMemo(
+    () =>
+      tagsInput
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0),
+    [tagsInput],
+  )
 
   const requiresApifyApproval = parsed.usesFallback
   const canQueue =
@@ -108,7 +141,7 @@ function App() {
     (!requiresApifyApproval || approvedApify) &&
     prompt.trim().length > 20
 
-  function generatePlan() {
+  function generatePlan(): void {
     setActivity((prev) => [
       `Plan generated for ${parsed.categories.join(', ')} in ${parsed.states.join(', ')}.`,
       `Estimated ${estimates.requestEstimate.toLocaleString()} Maps requests (${formatUsd(estimates.mapsCost)}).`,
@@ -116,29 +149,82 @@ function App() {
     ])
   }
 
-  function queueRun() {
-    if (!canQueue) return
-    setActivity((prev) => [
-      `Queued run with approval gate passed. Expected total spend: ${formatUsd(estimates.total)}.`,
-      `Run command: ${commandRun}`,
-      ...prev,
-    ])
+  async function loadJobs(): Promise<void> {
+    try {
+      const response = await fetch('/api/jobs')
+      if (!response.ok) {
+        throw new Error(`Failed to load jobs (${response.status})`)
+      }
+      const data: JobRecord[] = await response.json()
+      setJobs(data)
+      setBackendState('Backend connected')
+    } catch {
+      setBackendState('Backend unavailable in this session')
+    }
   }
+
+  async function queueRun(): Promise<void> {
+    if (!canQueue) return
+    setIsSubmitting(true)
+    try {
+      const response = await fetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          tags,
+          approvals: {
+            maps: approvedMaps,
+            llm: approvedLlm,
+            apify: approvedApify,
+          },
+        }),
+      })
+
+      if (!response.ok) {
+        const failed = await response.json()
+        throw new Error(failed.error ?? `Failed with status ${response.status}`)
+      }
+
+      const created: JobRecord = await response.json()
+      setJobs((prev) => [created, ...prev])
+      setActivity((prev) => [
+        `Job ${created.id} queued. Expected spend ${formatUsd(created.estimate.total)}.`,
+        ...prev,
+      ])
+      setApprovedMaps(false)
+      setApprovedLlm(false)
+      setApprovedApify(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      setActivity((prev) => [`Queue failed: ${message}`, ...prev])
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadJobs()
+    const timer = setInterval(() => {
+      void loadJobs()
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [])
 
   return (
     <main className="app">
       <header className="hero">
         <p className="eyebrow">Google Maps Scraper</p>
-        <h1>From natural-language prompt to scrape run plan</h1>
+        <h1>From natural-language prompt to shipped leads file</h1>
         <p className="subtitle">
-          Describe the lead target in plain English. The UI parses scope, estimates
-          spend, and blocks paid actions until explicit approval is checked.
+          Submit your lead-gen brief, review the parsed plan and cost, approve spend,
+          and let the app run the scrape job and keep downloadable file history.
         </p>
       </header>
 
       <section className="layout">
         <article className="card">
-          <h2>1) Prompt</h2>
+          <h2>1) New scrape job</h2>
           <label htmlFor="brief">What should we scrape?</label>
           <textarea
             id="brief"
@@ -146,12 +232,19 @@ function App() {
             onChange={(event) => setPrompt(event.target.value)}
             rows={6}
           />
+          <label htmlFor="tags">Tags (comma-separated)</label>
+          <input
+            id="tags"
+            value={tagsInput}
+            onChange={(event) => setTagsInput(event.target.value)}
+            placeholder="dental, q3-campaign, california"
+          />
           <div className="actions">
             <button type="button" onClick={generatePlan}>
               Generate plan
             </button>
           </div>
-          <p className="hint">No spend happens in this step.</p>
+          <p className="hint">Backend status: {backendState}</p>
         </article>
 
         <article className="card">
@@ -169,7 +262,7 @@ function App() {
         </article>
 
         <article className="card">
-          <h2>3) Cost estimate</h2>
+          <h2>3) Cost estimate (required before run)</h2>
           <ul className="kv">
             <li><span>ZIPs scanned (est.)</span><strong>{estimates.zipEstimate.toLocaleString()}</strong></li>
             <li><span>Maps requests (est.)</span><strong>{estimates.requestEstimate.toLocaleString()}</strong></li>
@@ -200,19 +293,55 @@ function App() {
             </label>
           )}
           <div className="actions">
-            <button type="button" onClick={queueRun} disabled={!canQueue}>
-              Queue scrape run
+            <button type="button" onClick={() => void queueRun()} disabled={!canQueue || isSubmitting}>
+              {isSubmitting ? 'Submitting...' : 'Run scrape job'}
             </button>
           </div>
         </article>
 
         <article className="card span-2">
-          <h2>5) Run commands</h2>
+          <h2>5) Execution recipe (handled by app backend)</h2>
           <code>{commandRun}</code>
           <code>{commandExport}</code>
-          <p className="hint">
-            Next backend step: wire these actions to an API route that executes gmscraper and streams logs.
-          </p>
+          <p className="hint">You should not need terminal commands for routine runs.</p>
+        </article>
+
+        <article className="card span-2">
+          <h2>Job history + downloads</h2>
+          <table className="history">
+            <thead>
+              <tr>
+                <th>Created</th>
+                <th>Status</th>
+                <th>Tags</th>
+                <th>Est. cost</th>
+                <th>File</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.length === 0 ? (
+                <tr>
+                  <td colSpan={5}>No jobs yet.</td>
+                </tr>
+              ) : (
+                jobs.map((job) => (
+                  <tr key={job.id}>
+                    <td>{new Date(job.createdAt).toLocaleString()}</td>
+                    <td><span className={`status ${job.status}`}>{job.status}</span></td>
+                    <td>{job.tags.join(', ') || '-'}</td>
+                    <td>{formatUsd(job.estimate.total)}</td>
+                    <td>
+                      {job.downloadUrl ? (
+                        <a href={job.downloadUrl}>Download CSV</a>
+                      ) : (
+                        job.error ?? '-'
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </article>
 
         <article className="card span-2">

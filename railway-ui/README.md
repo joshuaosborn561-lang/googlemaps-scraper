@@ -14,9 +14,17 @@ Core workflow:
 4. Classify ICP fit and extract owner data
 5. Export qualified CSV leads
 
-Current state: this frontend is deployed and aligned to that flow; it now provides
-a prompt-driven planning UX. The Python `gmscraper` backend still needs HTTP wiring
-for one-click execution from the UI.
+Current state: this frontend is deployed and aligned to that flow, and includes
+an HTTP backend that can queue and run `gmscraper` jobs from the UI.
+
+## What this UI now does
+
+- Accepts a natural-language scraping brief
+- Parses scope (categories, states, rating/review gates)
+- Estimates paid usage (Maps, LLM, optional Apify fallback)
+- Enforces explicit approval checkboxes before run
+- Queues backend job execution (`gmscraper run`)
+- Persists job history and allows CSV redownload by job
 
 ## Run locally
 
@@ -72,12 +80,24 @@ Before any paid API call (RapidAPI, OpenAI-compatible endpoints, Apify fallback)
 
 No exceptions for "small" calls.
 
+## Supabase integration
+
+If you set these Railway variables, job history and exported files are also synced to Supabase:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_EXPORT_BUCKET` (default `lead_exports`)
+- `SUPABASE_JOBS_TABLE` (default `scrape_jobs`)
+- `SUPABASE_LEADS_TABLE` (default `scrape_leads`)
+
+The backend still keeps local fallback history in `data/jobs.json` and files under `data/outputs/`.
+
 ## Railway start command used by this app
 
 `npm start` runs:
 
 ```bash
-vite preview --host 0.0.0.0 --port ${PORT:-4173}
+node server.mjs
 ```
 
-That matches Railway's runtime requirements (bind to host + provided port).
+This serves the built frontend plus `/api/jobs` endpoints for job execution and file history.
