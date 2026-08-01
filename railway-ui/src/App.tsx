@@ -1,402 +1,589 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import './App.css'
 
-type ParsedPlan = {
-  categories: string[]
-  states: string[]
-  minRating: number
-  minReviews: number
-  needsOwners: boolean
-  needsEmail: boolean
-  usesFallback: boolean
-  leadTarget: number
+type Intent = {
+  city: string
+  niche: string
+  maxLeads: number
+  enrichment: boolean
+  includeOwners: boolean
+  includeClassification: boolean
+}
+
+type CostEstimate = {
+  currency: string
+  estimatedUsd: number
+  breakdown: Array<{ item: string; usd: number }>
+  notes: string[]
 }
 
 type JobRecord = {
   id: string
-  prompt: string
-  tags: string[]
-  status: 'queued' | 'running' | 'completed' | 'failed'
   createdAt: string
-  finishedAt: string | null
-  estimate: {
-    requestEstimate: number
-    mapsCost: number
-    llmCost: number
-    apifyCost: number
-    total: number
-  }
-  approvals: {
-    maps: boolean
-    llm: boolean
-    apify: boolean
-  }
-  downloadUrl: string | null
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  prompt: string
+  intent: Intent
+  costEstimate: CostEstimate
+  approvedSpendUsd: number
+  command: string
+  outputPath: string | null
   error: string | null
+  startedAt: string | null
+  finishedAt: string | null
 }
 
-const STATE_CODES = [
-  'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DC', 'DE', 'FL', 'GA', 'HI', 'IA',
-  'ID', 'IL', 'IN', 'KS', 'KY', 'LA', 'MA', 'MD', 'ME', 'MI', 'MN', 'MO', 'MS',
-  'MT', 'NC', 'ND', 'NE', 'NH', 'NJ', 'NM', 'NV', 'NY', 'OH', 'OK', 'OR', 'PA',
-  'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VA', 'VT', 'WA', 'WI', 'WV', 'WY',
+type HistoryResponse = {
+  jobs: JobRecord[]
+  supabaseConfigured: boolean
+  historyMode: string
+  persistence: string
+}
+
+const EXAMPLES = [
+  'Find med spa leads in Austin with owners and emails, max 25',
+  'Scrape dental clinics in Miami, max 40, no owners',
+  'Get roofing companies in Dallas with enrichment, limit 30',
 ]
 
-const CATEGORY_HINTS: Array<{ token: string; categories: string[] }> = [
-  { token: 'roof', categories: ['roofing contractor', 'roof repair'] },
-  { token: 'hvac', categories: ['hvac contractor', 'air conditioning contractor'] },
-  { token: 'dental', categories: ['dentist', 'dental clinic'] },
-  { token: 'chiro', categories: ['chiropractor'] },
-  { token: 'medspa', categories: ['medical spa'] },
-  { token: 'gym', categories: ['gym', 'fitness center'] },
-  { token: 'plumb', categories: ['plumber'] },
-  { token: 'funeral', categories: ['funeral home', 'cremation service'] },
-  { token: 'lawyer', categories: ['law firm', 'personal injury attorney'] },
-  { token: 'auto', categories: ['auto repair shop'] },
-]
+function parsePrompt(prompt: string): Intent {
+  const text = prompt.trim()
+  const lower = text.toLowerCase()
 
-function parsePrompt(prompt: string): ParsedPlan {
-  const lower = prompt.toLowerCase()
-  const matchedCategories = CATEGORY_HINTS.flatMap((entry) =>
-    lower.includes(entry.token) ? entry.categories : [],
-  )
-  const categories = [...new Set(matchedCategories)].slice(0, 6)
-  const stateMatches = STATE_CODES.filter((code) =>
-    new RegExp(`\\b${code.toLowerCase()}\\b`).test(lower),
-  )
-  const ratingMatch = lower.match(/(\d(?:\.\d)?)\+?\s*star/)
-  const reviewsMatch = lower.match(/(\d+)\+?\s*review/)
-  const leadsMatch = lower.match(/(\d{2,6})\s*(lead|prospect|record)/)
+  const cityMatch =
+    lower.match(/\bin\s+([a-z][a-z\s.'-]{1,40}?)(?:\s+(?:with|and|for|that|who|max|limit|only)\b|[.,]|$)/i) ||
+    lower.match(/\b(?:around|near)\s+([a-z][a-z\s.'-]{1,40}?)(?:\s+(?:with|and|for|that|who|max|limit|only)\b|[.,]|$)/i)
+
+  let city = cityMatch?.[1]?.trim() || 'Austin'
+  city = city.replace(/\b(tx|texas|ca|california|ny|new york|fl|florida)\b/gi, '').trim() || city
+
+  let niche = text
+  if (cityMatch) niche = niche.replace(new RegExp(cityMatch[0], 'i'), ' ')
+  niche = niche
+    .replace(/\b(find|get|scrape|pull|show|list|me|please|leads?|business(?:es)?|companies|owners?|emails?|phones?)\b/gi, ' ')
+    .replace(/\b(with|and|for|that|who|max|limit|only|enriched?|enrichment|classification|owners?)\b/gi, ' ')
+    .replace(/\b\d+\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!niche || niche.length < 3) niche = 'med spas'
+
+  const maxMatch = lower.match(/\b(?:max|limit|only|top)\s+(\d{1,4})\b/) || lower.match(/\b(\d{1,4})\s+leads?\b/)
+  const maxLeads = Math.min(Math.max(Number(maxMatch?.[1] || 25), 1), 500)
 
   return {
-    categories: categories.length > 0 ? categories : ['local business'],
-    states: stateMatches.length > 0 ? stateMatches : ['US'],
-    minRating: ratingMatch ? Number(ratingMatch[1]) : 4.0,
-    minReviews: reviewsMatch ? Number(reviewsMatch[1]) : 15,
-    needsOwners: /(owner|founder|ceo)/.test(lower),
-    needsEmail: /(email|inbox|contact)/.test(lower) || true,
-    usesFallback: /(fallback|web search|apify)/.test(lower) || /(owner)/.test(lower),
-    leadTarget: leadsMatch ? Number(leadsMatch[1]) : 500,
+    city,
+    niche,
+    maxLeads,
+    enrichment: !/\bno enrich/i.test(lower),
+    includeOwners: !/\bno owners?\b/i.test(lower),
+    includeClassification: !/\bno classif/i.test(lower),
   }
 }
 
-function formatUsd(value: number): string {
-  return `$${value.toFixed(2)}`
+function estimateCost(intent: Intent): CostEstimate {
+  const mapsCost = Math.max(0.08, intent.maxLeads * 0.012)
+  const enrichmentCost = intent.enrichment ? intent.maxLeads * 0.01 : 0
+  const classificationCost = intent.includeClassification ? intent.maxLeads * 0.004 : 0
+  const ownerCost = intent.includeOwners ? intent.maxLeads * 0.006 : 0
+  const estimatedUsd = Number((mapsCost + enrichmentCost + classificationCost + ownerCost).toFixed(2))
+
+  return {
+    currency: 'USD',
+    estimatedUsd,
+    breakdown: [
+      { item: 'Google Maps scrape (RapidAPI Maps Data)', usd: Number(mapsCost.toFixed(2)) },
+      { item: 'Website enrichment', usd: Number(enrichmentCost.toFixed(2)) },
+      { item: 'Lead classification', usd: Number(classificationCost.toFixed(2)) },
+      { item: 'Owner discovery', usd: Number(ownerCost.toFixed(2)) },
+    ].filter((row) => row.usd > 0),
+    notes: [
+      'Estimate only. Actual spend depends on API pricing and result volume.',
+      'No paid call is made until you explicitly approve this estimate.',
+    ],
+  }
+}
+
+function statusClass(status: JobRecord['status']) {
+  if (status === 'succeeded') return 'completed'
+  if (status === 'failed') return 'failed'
+  return 'awaiting'
+}
+
+function statusLabel(status: JobRecord['status']) {
+  if (status === 'queued') return 'Queued'
+  if (status === 'running') return 'Running'
+  if (status === 'succeeded') return 'Ready'
+  return 'Failed'
 }
 
 function App() {
-  const [step, setStep] = useState<1 | 2 | 3>(1)
-  const [prompt, setPrompt] = useState(
-    'Find 1200 dental and orthodontic clinics in CA and AZ with 4.2+ stars, at least 30 reviews, include owner and email.',
-  )
-  const [tagsInput, setTagsInput] = useState('dental, high-value, west-coast')
-  const [approvedMaps, setApprovedMaps] = useState(false)
-  const [approvedLlm, setApprovedLlm] = useState(false)
-  const [approvedApify, setApprovedApify] = useState(false)
-  const [confirmedPlan, setConfirmedPlan] = useState(false)
+  const [step, setStep] = useState(1)
+  const [prompt, setPrompt] = useState(EXAMPLES[0])
+  const [approved, setApproved] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<JobRecord[]>([])
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [activity, setActivity] = useState<string[]>(['Ready for a new lead-gen prompt.'])
-  const [backendState, setBackendState] = useState('Checking backend...')
+  const [supabaseConfigured, setSupabaseConfigured] = useState(false)
+  const [historyMode, setHistoryMode] = useState('unknown')
+  const [activeJobId, setActiveJobId] = useState<string | null>(null)
 
-  const parsed = useMemo(() => parsePrompt(prompt), [prompt])
-  const tags = useMemo(
-    () =>
-      tagsInput
-        .split(',')
-        .map((tag) => tag.trim())
-        .filter((tag) => tag.length > 0),
-    [tagsInput],
-  )
+  const intent = useMemo(() => parsePrompt(prompt), [prompt])
+  const estimate = useMemo(() => estimateCost(intent), [intent])
+  const activeJob = jobs.find((job) => job.id === activeJobId) || null
 
-  const estimates = useMemo(() => {
-    const zipEstimate = Math.max(120, parsed.states.length * 340)
-    const requestEstimate = zipEstimate * parsed.categories.length
-    const mapsCost = requestEstimate * 0.0005
-    const llmRecords = Math.min(parsed.leadTarget, requestEstimate * 0.32)
-    const llmCost = llmRecords * 0.002
-    const apifySearches = parsed.usesFallback ? Math.ceil(llmRecords * 0.18) : 0
-    const apifyCost = apifySearches * 0.0005
-
-    return {
-      zipEstimate,
-      requestEstimate,
-      mapsCost,
-      llmRecords,
-      llmCost,
-      apifySearches,
-      apifyCost,
-      total: mapsCost + llmCost + apifyCost,
-    }
-  }, [parsed])
-
-  const requiresApifyApproval = parsed.usesFallback
-  const canQueue =
-    confirmedPlan &&
-    approvedMaps &&
-    approvedLlm &&
-    (!requiresApifyApproval || approvedApify) &&
-    prompt.trim().length > 20
-
-  async function loadJobs(): Promise<void> {
-    try {
-      const health = await fetch('/api/health')
-      if (health.ok) {
-        const payload = await health.json()
-        setBackendState(
-          payload.supabaseConfigured
-            ? 'Supabase history connected'
-            : 'Supabase not configured',
-        )
-      }
-
-      const response = await fetch('/api/jobs')
-      if (!response.ok) {
-        const failed = await response.json().catch(() => ({}))
-        throw new Error(failed.error ?? `Failed to load jobs (${response.status})`)
-      }
-      const data: JobRecord[] = await response.json()
-      setJobs(data)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Backend unavailable'
-      setBackendState(message)
-      // Keep existing jobs visible so a temporary failure never wipes the UI.
-    }
+  async function refreshHistory() {
+    const response = await fetch('/api/jobs')
+    if (!response.ok) throw new Error('Could not load scrape history')
+    const data = (await response.json()) as HistoryResponse
+    setJobs(data.jobs || [])
+    setSupabaseConfigured(Boolean(data.supabaseConfigured))
+    setHistoryMode(data.historyMode || 'unknown')
   }
 
-  async function queueRun(): Promise<void> {
-    if (!canQueue) return
-    setIsSubmitting(true)
+  useEffect(() => {
+    refreshHistory().catch((err: Error) => setError(err.message))
+  }, [])
+
+  useEffect(() => {
+    if (!activeJob) return
+    if (activeJob.status === 'succeeded' || activeJob.status === 'failed') return
+    const timer = window.setInterval(() => {
+      refreshHistory().catch(() => undefined)
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [activeJob?.id, activeJob?.status])
+
+  async function onSubmit(event: FormEvent) {
+    event.preventDefault()
+    setError(null)
+
+    if (!approved) {
+      setError('Approve the estimated spend before starting the scrape.')
+      return
+    }
+
+    setSubmitting(true)
     try {
       const response = await fetch('/api/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
-          tags,
-          approvals: {
-            maps: approvedMaps,
-            llm: approvedLlm,
-            apify: approvedApify,
-          },
+          intent,
+          costEstimate: estimate,
+          approvedSpendUsd: estimate.estimatedUsd,
+          approved: true,
         }),
       })
-
-      if (!response.ok) {
-        const failed = await response.json()
-        throw new Error(failed.error ?? `Failed with status ${response.status}`)
-      }
-
-      const created: JobRecord = await response.json()
-      setJobs((prev) => [created, ...prev])
-      setActivity((prev) => [
-        `Job ${created.id} queued. Expected spend ${formatUsd(created.estimate.total)}.`,
-        ...prev,
-      ])
-      setApprovedMaps(false)
-      setApprovedLlm(false)
-      setApprovedApify(false)
-      setConfirmedPlan(false)
-      setStep(1)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error'
-      setActivity((prev) => [`Queue failed: ${message}`, ...prev])
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Failed to create scrape job')
+      setActiveJobId(data.job.id)
+      await refreshHistory()
+      setStep(3)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unexpected error')
     } finally {
-      setIsSubmitting(false)
+      setSubmitting(false)
     }
   }
 
-  useEffect(() => {
-    void loadJobs()
-    const timer = setInterval(() => {
-      void loadJobs()
-    }, 5000)
-    return () => clearInterval(timer)
-  }, [])
+  const wizardTitle =
+    step === 1 ? 'What leads should we find?' : step === 2 ? 'Review the scrape plan' : 'Scrape status'
 
   return (
-    <main className="shell">
+    <>
       <header className="topbar">
-        <div>
-          <p className="brand">Google Maps Scraper</p>
-          <p className="muted">Natural-language lead generation workflow</p>
-        </div>
-        <p className="status-pill">{backendState}</p>
+        <a className="wordmark" href="/" aria-label="Google Maps Scraper home">
+          <span className="wordmark-mark" aria-hidden="true">
+            G
+          </span>
+          <span>Google Maps Scraper</span>
+        </a>
+        <span className="safety-badge">
+          <i /> Human approval required before spend
+        </span>
       </header>
 
-      <section className="hero-band">
-        <p className="eyebrow">Lead infrastructure setup</p>
-        <h1>From scrape brief to downloadable leads.</h1>
-        <p className="subtitle">
-          A guided workflow for planning Maps scrapes, approving paid usage, running jobs,
-          and re-downloading previous exports anytime.
-        </p>
-      </section>
+      <main className="shell">
+        <section className="hero">
+          <p className="eyebrow">Lead generation console</p>
+          <h1>From a plain-English brief to downloadable leads.</h1>
+          <p>
+            Describe the niche and city, review the paid-API estimate, then approve before anything
+            runs. History and CSV exports stay in Supabase.
+          </p>
+        </section>
 
-      <section className="workflow">
-        <div className="panel">
-          <div className="panel-head">
-            <h2>New scrape job</h2>
-            <p>Step {step} of 3</p>
+        <div className="layout">
+          <div className="primary">
+            <section className="panel wizard-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">New scrape</p>
+                  <h2>{wizardTitle}</h2>
+                </div>
+                <span className="step-count">Step {step} of 3</span>
+              </div>
+
+              <ol className="wizard-progress" aria-label="Scrape setup progress">
+                <li className={step === 1 ? 'active' : step > 1 ? 'complete' : ''}>
+                  <span>{step > 1 ? '✓' : '1'}</span>Brief
+                </li>
+                <li className={step === 2 ? 'active' : step > 2 ? 'complete' : ''}>
+                  <span>{step > 2 ? '✓' : '2'}</span>Plan
+                </li>
+                <li className={step === 3 ? 'active' : ''}>
+                  <span>3</span>Run
+                </li>
+              </ol>
+
+              {step === 1 ? (
+                <div className="wizard-step">
+                  <div className="field">
+                    <label htmlFor="lead-prompt">
+                      Lead request <b>Required</b>
+                    </label>
+                    <textarea
+                      id="lead-prompt"
+                      value={prompt}
+                      onChange={(event) => {
+                        setPrompt(event.target.value)
+                        setApproved(false)
+                      }}
+                      rows={5}
+                      placeholder="Find HVAC companies in Denver with owner emails, max 40"
+                    />
+                    <small>Include niche, city, and optional lead count. We parse the rest.</small>
+                  </div>
+
+                  <div className="example-row">
+                    {EXAMPLES.map((example) => (
+                      <button
+                        key={example}
+                        type="button"
+                        className="example-chip"
+                        onClick={() => {
+                          setPrompt(example)
+                          setApproved(false)
+                        }}
+                      >
+                        {example}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="wizard-actions single">
+                    <span />
+                    <button type="button" onClick={() => setStep(2)}>
+                      Continue to plan
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {step === 2 ? (
+                <form className="wizard-step" onSubmit={onSubmit}>
+                  <div className="plan-preview" aria-live="polite">
+                    <div>
+                      <span>{intent.maxLeads}</span>
+                      <small>max leads</small>
+                    </div>
+                    <div>
+                      <span>${estimate.estimatedUsd.toFixed(2)}</span>
+                      <small>est. spend</small>
+                    </div>
+                    <div>
+                      <span>{intent.enrichment ? 'On' : 'Off'}</span>
+                      <small>enrichment</small>
+                    </div>
+                  </div>
+
+                  <div className="review-card">
+                    <div className="review-row">
+                      <span>City</span>
+                      <strong>{intent.city}</strong>
+                    </div>
+                    <div className="review-row">
+                      <span>Niche</span>
+                      <strong>{intent.niche}</strong>
+                    </div>
+                    <div className="review-row">
+                      <span>Owners</span>
+                      <strong>{intent.includeOwners ? 'Include' : 'Skip'}</strong>
+                    </div>
+                    <div className="review-row">
+                      <span>Classification</span>
+                      <strong>{intent.includeClassification ? 'Include' : 'Skip'}</strong>
+                    </div>
+                    <div className="review-row">
+                      <span>Request</span>
+                      <strong>{prompt}</strong>
+                    </div>
+                  </div>
+
+                  <div className="approval-callout">
+                    <span className="lock">$</span>
+                    <div>
+                      <strong>
+                        Estimated spend: ${estimate.estimatedUsd.toFixed(2)} {estimate.currency}
+                      </strong>
+                      <p>
+                        {estimate.breakdown.map((row) => `${row.item}: $${row.usd.toFixed(2)}`).join(' · ')}
+                      </p>
+                    </div>
+                  </div>
+
+                  <label className="choice-row confirmation">
+                    <input
+                      type="checkbox"
+                      checked={approved}
+                      onChange={(event) => setApproved(event.target.checked)}
+                    />
+                    <span>
+                      <strong>I approve this paid-API estimate</strong>
+                      <small>
+                        Nothing is charged until you check this box and start the scrape. Cap:{' '}
+                        ${estimate.estimatedUsd.toFixed(2)}.
+                      </small>
+                    </span>
+                  </label>
+
+                  {error ? <p className="form-message">{error}</p> : null}
+
+                  <div className="wizard-actions">
+                    <button type="button" className="button secondary" onClick={() => setStep(1)}>
+                      Back
+                    </button>
+                    <span />
+                    <button type="submit" disabled={!approved || submitting}>
+                      {submitting ? 'Starting…' : 'Approve & start scrape'}
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+
+              {step === 3 ? (
+                <div className="wizard-step">
+                  {activeJob ? (
+                    <>
+                      <div className="job-head">
+                        <div>
+                          <p className="eyebrow">Active job</p>
+                          <h2>
+                            {activeJob.intent.niche} · {activeJob.intent.city}
+                          </h2>
+                        </div>
+                        <span className={`status ${statusClass(activeJob.status)}`}>
+                          {statusLabel(activeJob.status)}
+                        </span>
+                      </div>
+
+                      <div className="review-card">
+                        <div className="review-row">
+                          <span>Job ID</span>
+                          <strong>
+                            <code>{activeJob.id}</code>
+                          </strong>
+                        </div>
+                        <div className="review-row">
+                          <span>Approved</span>
+                          <strong>${activeJob.approvedSpendUsd.toFixed(2)}</strong>
+                        </div>
+                        <div className="review-row">
+                          <span>Request</span>
+                          <strong>{activeJob.prompt}</strong>
+                        </div>
+                      </div>
+
+                      {activeJob.error ? <p className="form-message">{activeJob.error}</p> : null}
+
+                      {activeJob.status === 'succeeded' ? (
+                        <div className="info-callout" style={{ marginTop: '1.25rem' }}>
+                          <span>✓</span>
+                          <p>CSV is ready. Download stays available from Supabase history.</p>
+                        </div>
+                      ) : null}
+
+                      <div className="wizard-actions">
+                        <button
+                          type="button"
+                          className="button secondary"
+                          onClick={() => {
+                            setApproved(false)
+                            setActiveJobId(null)
+                            setError(null)
+                            setStep(1)
+                          }}
+                        >
+                          New scrape
+                        </button>
+                        <span />
+                        {activeJob.status === 'succeeded' ? (
+                          <a className="button" href={`/api/jobs/${activeJob.id}/file`}>
+                            Download CSV
+                          </a>
+                        ) : (
+                          <button type="button" className="button secondary" onClick={() => refreshHistory()}>
+                            Refresh status
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="empty-state">No active job yet. Approve a plan to start one.</p>
+                      <div className="wizard-actions single">
+                        <span />
+                        <button type="button" onClick={() => setStep(1)}>
+                          Start a scrape
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
+            </section>
+
+            <section className="panel">
+              <div className="jobs-head">
+                <div>
+                  <p className="eyebrow">Durable history</p>
+                  <h2>All scrape jobs</h2>
+                </div>
+                <span className="step-count">{jobs.length} stored</span>
+              </div>
+
+              {jobs.length === 0 ? (
+                <p className="empty-state">Approved scrapes appear here with download links.</p>
+              ) : (
+                <div className="table-wrap">
+                  <table className="history-table">
+                    <thead>
+                      <tr>
+                        <th>When</th>
+                        <th>Request</th>
+                        <th>Status</th>
+                        <th>Est.</th>
+                        <th>File</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobs.map((job) => (
+                        <tr key={job.id}>
+                          <td>{new Date(job.createdAt).toLocaleString()}</td>
+                          <td>
+                            <strong>
+                              {job.intent.niche} · {job.intent.city}
+                            </strong>
+                            <small>{job.prompt}</small>
+                          </td>
+                          <td>
+                            <span className={`status ${statusClass(job.status)}`}>
+                              {statusLabel(job.status)}
+                            </span>
+                          </td>
+                          <td>${job.approvedSpendUsd.toFixed(2)}</td>
+                          <td>
+                            {job.status === 'succeeded' ? (
+                              <a href={`/api/jobs/${job.id}/file`}>Download</a>
+                            ) : (
+                              '—'
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
           </div>
 
-          <ol className="steps">
-            <li className={step === 1 ? 'active' : ''}>1 Prompt</li>
-            <li className={step === 2 ? 'active' : ''}>2 Plan</li>
-            <li className={step === 3 ? 'active' : ''}>3 Review</li>
-          </ol>
-
-          {step === 1 && (
-            <div className="form-block">
-              <label htmlFor="brief">What should we scrape? Required</label>
-              <textarea
-                id="brief"
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                rows={7}
-              />
-              <label htmlFor="tags">Tags</label>
-              <input
-                id="tags"
-                value={tagsInput}
-                onChange={(event) => setTagsInput(event.target.value)}
-                placeholder="dental, q3-campaign, california"
-              />
-              <p className="hint">No spend happens in this step.</p>
-              <div className="actions">
-                <button type="button" onClick={() => setStep(2)} disabled={prompt.trim().length < 20}>
-                  Continue
+          <aside className="sidebar">
+            <section className="panel compact-panel">
+              <div className="jobs-head">
+                <h2>Live summary</h2>
+                <button type="button" className="text-button" onClick={() => refreshHistory()}>
+                  Refresh
                 </button>
               </div>
-            </div>
-          )}
-
-          {step === 2 && (
-            <div className="form-block">
-              <ul className="kv">
-                <li><span>Categories</span><strong>{parsed.categories.join(', ')}</strong></li>
-                <li><span>States</span><strong>{parsed.states.join(', ')}</strong></li>
-                <li><span>Min rating</span><strong>{parsed.minRating.toFixed(1)}+</strong></li>
-                <li><span>Min reviews</span><strong>{parsed.minReviews}+</strong></li>
-                <li><span>Lead target</span><strong>{parsed.leadTarget.toLocaleString()}</strong></li>
-                <li><span>Owner / email</span><strong>{parsed.needsOwners ? 'Yes' : 'Optional'} / {parsed.needsEmail ? 'Yes' : 'No'}</strong></li>
-              </ul>
-              <div className="actions split">
-                <button type="button" className="ghost" onClick={() => setStep(1)}>Back</button>
-                <button type="button" onClick={() => setStep(3)}>Continue</button>
+              <div className="review-card">
+                <div className="review-row">
+                  <span>City</span>
+                  <strong>{intent.city}</strong>
+                </div>
+                <div className="review-row">
+                  <span>Niche</span>
+                  <strong>{intent.niche}</strong>
+                </div>
+                <div className="review-row">
+                  <span>Max leads</span>
+                  <strong>{intent.maxLeads}</strong>
+                </div>
+                <div className="review-row">
+                  <span>Est. spend</span>
+                  <strong>${estimate.estimatedUsd.toFixed(2)}</strong>
+                </div>
+                <div className="review-row">
+                  <span>Storage</span>
+                  <strong>{supabaseConfigured ? historyMode : 'local'}</strong>
+                </div>
               </div>
-            </div>
-          )}
+            </section>
 
-          {step === 3 && (
-            <div className="form-block">
-              <p className="callout">
-                Creating this job does not spend money until you approve the paid actions below.
-              </p>
-              <ul className="kv">
-                <li><span>Maps requests (est.)</span><strong>{estimates.requestEstimate.toLocaleString()}</strong></li>
-                <li><span>RapidAPI Maps</span><strong>{formatUsd(estimates.mapsCost)}</strong></li>
-                <li><span>LLM cost</span><strong>{formatUsd(estimates.llmCost)}</strong></li>
-                <li><span>Apify fallback</span><strong>{formatUsd(estimates.apifyCost)}</strong></li>
-                <li className="total"><span>Total projected</span><strong>{formatUsd(estimates.total)}</strong></li>
-              </ul>
-
-              <label className="check">
-                <input type="checkbox" checked={confirmedPlan} onChange={(e) => setConfirmedPlan(e.target.checked)} />
-                The scrape details and cost estimate look correct
-              </label>
-              <label className="check">
-                <input type="checkbox" checked={approvedMaps} onChange={(e) => setApprovedMaps(e.target.checked)} />
-                Approve RapidAPI Maps spend ({formatUsd(estimates.mapsCost)})
-              </label>
-              <label className="check">
-                <input type="checkbox" checked={approvedLlm} onChange={(e) => setApprovedLlm(e.target.checked)} />
-                Approve LLM spend ({formatUsd(estimates.llmCost)})
-              </label>
-              {requiresApifyApproval && (
-                <label className="check">
-                  <input type="checkbox" checked={approvedApify} onChange={(e) => setApprovedApify(e.target.checked)} />
-                  Approve Apify fallback spend ({formatUsd(estimates.apifyCost)})
-                </label>
+            <section className="panel compact-panel">
+              <div className="jobs-head">
+                <h2>Recent jobs</h2>
+              </div>
+              {jobs.length === 0 ? (
+                <p className="empty-state">No jobs yet.</p>
+              ) : (
+                <ul className="jobs">
+                  {jobs.slice(0, 8).map((job) => (
+                    <li key={job.id}>
+                      <button
+                        type="button"
+                        className={`job-link${activeJobId === job.id ? ' active' : ''}`}
+                        onClick={() => {
+                          setActiveJobId(job.id)
+                          setStep(3)
+                        }}
+                      >
+                        <span>
+                          <strong>
+                            {job.intent.niche} · {job.intent.city}
+                          </strong>
+                          <small>{new Date(job.createdAt).toLocaleString()}</small>
+                        </span>
+                        <em className={job.status === 'succeeded' ? 'good' : job.status === 'failed' ? 'bad' : ''}>
+                          {statusLabel(job.status)}
+                        </em>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               )}
+            </section>
 
-              <div className="actions split">
-                <button type="button" className="ghost" onClick={() => setStep(2)}>Back</button>
-                <button type="button" onClick={() => void queueRun()} disabled={!canQueue || isSubmitting}>
-                  {isSubmitting ? 'Starting…' : 'Create scrape job'}
-                </button>
-              </div>
-            </div>
-          )}
+            <section className="panel compact-panel guardrails">
+              <h2>Guardrails</h2>
+              <ul>
+                <li>
+                  <span>✓</span> Cost estimate shown before run
+                </li>
+                <li>
+                  <span>✓</span> Explicit approval required
+                </li>
+                <li>
+                  <span>✓</span> Jobs + CSVs stored in Supabase
+                </li>
+              </ul>
+            </section>
+          </aside>
         </div>
-
-        <aside className="summary">
-          <h3>Live summary</h3>
-          <ul className="kv">
-            <li><span>Prompt</span><strong>{prompt.slice(0, 48)}{prompt.length > 48 ? '…' : ''}</strong></li>
-            <li><span>Tags</span><strong>{tags.join(', ') || '—'}</strong></li>
-            <li><span>Categories</span><strong>{parsed.categories.join(', ')}</strong></li>
-            <li><span>States</span><strong>{parsed.states.join(', ')}</strong></li>
-            <li><span>Projected spend</span><strong>{formatUsd(estimates.total)}</strong></li>
-          </ul>
-          <p className="hint">
-            The workflow pauses before paid APIs run. Nothing is charged until you explicitly approve.
-          </p>
-        </aside>
-      </section>
-
-      <section className="panel history-panel">
-        <div className="panel-head">
-          <h2>Job history + downloads</h2>
-          <p>Re-download completed CSV exports anytime</p>
-        </div>
-        <table className="history">
-          <thead>
-            <tr>
-              <th>Created</th>
-              <th>Status</th>
-              <th>Tags</th>
-              <th>Est. cost</th>
-              <th>File</th>
-            </tr>
-          </thead>
-          <tbody>
-            {jobs.length === 0 ? (
-              <tr>
-                <td colSpan={5}>No jobs yet.</td>
-              </tr>
-            ) : (
-              jobs.map((job) => (
-                <tr key={job.id}>
-                  <td>{new Date(job.createdAt).toLocaleString()}</td>
-                  <td><span className={`status ${job.status}`}>{job.status}</span></td>
-                  <td>{job.tags.join(', ') || '-'}</td>
-                  <td>{formatUsd(job.estimate.total)}</td>
-                  <td>
-                    {job.downloadUrl ? (
-                      <a href={job.downloadUrl}>Download CSV</a>
-                    ) : (
-                      job.error ?? '-'
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </section>
-
-      <section className="panel">
-        <div className="panel-head">
-          <h2>Activity log</h2>
-        </div>
-        <ul className="log">
-          {activity.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-      </section>
-    </main>
+      </main>
+    </>
   )
 }
 
