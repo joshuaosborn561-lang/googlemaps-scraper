@@ -17,14 +17,12 @@ const app = express()
 app.use(express.json({ limit: '1mb' }))
 
 const supabaseUrl = process.env.SUPABASE_URL
-const supabaseServiceRole = process.env.SUPABASE_SERVICE_ROLE_KEY
-const supabaseBucket = process.env.SUPABASE_EXPORT_BUCKET || 'lead_exports'
-const supabaseJobsTable = process.env.SUPABASE_JOBS_TABLE || 'scrape_jobs'
-const supabaseLeadsTable = process.env.SUPABASE_LEADS_TABLE || 'scrape_leads'
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY
+const supabaseIngestSecret = process.env.SUPABASE_INGEST_SECRET
 
 const supabase =
-  supabaseUrl && supabaseServiceRole
-    ? createClient(supabaseUrl, supabaseServiceRole)
+  supabaseUrl && supabaseAnonKey
+    ? createClient(supabaseUrl, supabaseAnonKey)
     : null
 
 const STATE_CODES = [
@@ -150,23 +148,24 @@ function csvToJsonRows(csvContent) {
 }
 
 async function persistToSupabase(job) {
-  if (!supabase) return
+  if (!supabase || !supabaseIngestSecret) return
 
   try {
-    await supabase.from(supabaseJobsTable).upsert(
-      {
+    const { error } = await supabase.rpc('ingest_scrape_job', {
+      p_secret: supabaseIngestSecret,
+      p_job: {
         id: job.id,
         prompt: job.prompt,
         tags: job.tags,
         status: job.status,
-        estimate_total: job.estimate.total,
-        download_url: job.downloadUrl,
+        estimate: job.estimate,
+        downloadUrl: job.downloadUrl,
         error: job.error,
-        created_at: job.createdAt,
-        finished_at: job.finishedAt,
+        createdAt: job.createdAt,
+        finishedAt: job.finishedAt,
       },
-      { onConflict: 'id' },
-    )
+    })
+    if (error) throw error
   } catch (error) {
     console.error('Supabase job upsert failed:', error)
   }
@@ -174,30 +173,16 @@ async function persistToSupabase(job) {
   if (!job.localFilePath || job.status !== 'completed') return
 
   try {
-    const fileBuffer = await fs.readFile(job.localFilePath)
-    const storagePath = `${job.id}.csv`
-    const upload = await supabase.storage.from(supabaseBucket).upload(storagePath, fileBuffer, {
-      contentType: 'text/csv',
-      upsert: true,
-    })
-    if (!upload.error) {
-      const { data } = supabase.storage.from(supabaseBucket).getPublicUrl(storagePath)
-      job.downloadUrl = data.publicUrl
-    }
-  } catch (error) {
-    console.error('Supabase storage upload failed:', error)
-  }
-
-  try {
     const csvContent = await fs.readFile(job.localFilePath, 'utf8')
     const rows = csvToJsonRows(csvContent)
     if (rows.length > 0) {
-      const leadPayload = rows.slice(0, 2000).map((row) => ({
-        job_id: job.id,
-        tags: job.tags,
-        raw: row,
-      }))
-      await supabase.from(supabaseLeadsTable).insert(leadPayload)
+      const { error } = await supabase.rpc('ingest_scrape_leads', {
+        p_secret: supabaseIngestSecret,
+        p_job_id: job.id,
+        p_tags: job.tags,
+        p_rows: rows.slice(0, 2000),
+      })
+      if (error) throw error
     }
   } catch (error) {
     console.error('Supabase leads insert failed:', error)
@@ -254,8 +239,8 @@ async function runJob(job) {
 app.get('/api/health', (_request, response) => {
   response.json({
     ok: true,
-    supabaseConfigured: Boolean(supabase),
-    historyMode: supabase ? 'supabase+local' : 'local',
+    supabaseConfigured: Boolean(supabase && supabaseIngestSecret),
+    historyMode: supabase && supabaseIngestSecret ? 'supabase+local' : 'local',
   })
 })
 

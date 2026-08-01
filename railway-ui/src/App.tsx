@@ -85,6 +85,7 @@ function formatUsd(value: number): string {
 }
 
 function App() {
+  const [step, setStep] = useState<1 | 2 | 3>(1)
   const [prompt, setPrompt] = useState(
     'Find 1200 dental and orthodontic clinics in CA and AZ with 4.2+ stars, at least 30 reviews, include owner and email.',
   )
@@ -92,12 +93,21 @@ function App() {
   const [approvedMaps, setApprovedMaps] = useState(false)
   const [approvedLlm, setApprovedLlm] = useState(false)
   const [approvedApify, setApprovedApify] = useState(false)
+  const [confirmedPlan, setConfirmedPlan] = useState(false)
   const [jobs, setJobs] = useState<JobRecord[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activity, setActivity] = useState<string[]>(['Ready for a new lead-gen prompt.'])
   const [backendState, setBackendState] = useState('Checking backend...')
 
   const parsed = useMemo(() => parsePrompt(prompt), [prompt])
+  const tags = useMemo(
+    () =>
+      tagsInput
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0),
+    [tagsInput],
+  )
 
   const estimates = useMemo(() => {
     const zipEstimate = Math.max(120, parsed.states.length * 340)
@@ -120,44 +130,31 @@ function App() {
     }
   }, [parsed])
 
-  const planFile = 'plans/ui-generated.json'
-  const commandPlan = `python -m gmscraper plan "${prompt.replace(/"/g, "'")}" --save ${planFile}`
-  const commandRun = `python -m gmscraper run --plan ${planFile} --out out/leads.csv --yes`
-  const commandExport =
-    'python -m gmscraper export --out out/leads.csv --with-email --with-owner --min-rating 4.0'
-  const tags = useMemo(
-    () =>
-      tagsInput
-        .split(',')
-        .map((tag) => tag.trim())
-        .filter((tag) => tag.length > 0),
-    [tagsInput],
-  )
-
   const requiresApifyApproval = parsed.usesFallback
   const canQueue =
+    confirmedPlan &&
     approvedMaps &&
     approvedLlm &&
     (!requiresApifyApproval || approvedApify) &&
     prompt.trim().length > 20
 
-  function generatePlan(): void {
-    setActivity((prev) => [
-      `Plan generated for ${parsed.categories.join(', ')} in ${parsed.states.join(', ')}.`,
-      `Estimated ${estimates.requestEstimate.toLocaleString()} Maps requests (${formatUsd(estimates.mapsCost)}).`,
-      ...prev,
-    ])
-  }
-
   async function loadJobs(): Promise<void> {
     try {
       const response = await fetch('/api/jobs')
-      if (!response.ok) {
-        throw new Error(`Failed to load jobs (${response.status})`)
-      }
+      if (!response.ok) throw new Error(`Failed to load jobs (${response.status})`)
       const data: JobRecord[] = await response.json()
       setJobs(data)
-      setBackendState('Backend connected')
+      const health = await fetch('/api/health')
+      if (health.ok) {
+        const payload = await health.json()
+        setBackendState(
+          payload.supabaseConfigured
+            ? 'Backend + Supabase connected'
+            : 'Backend connected (local history)',
+        )
+      } else {
+        setBackendState('Backend connected')
+      }
     } catch {
       setBackendState('Backend unavailable in this session')
     }
@@ -195,6 +192,8 @@ function App() {
       setApprovedMaps(false)
       setApprovedLlm(false)
       setApprovedApify(false)
+      setConfirmedPlan(false)
+      setStep(1)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
       setActivity((prev) => [`Queue failed: ${message}`, ...prev])
@@ -212,146 +211,186 @@ function App() {
   }, [])
 
   return (
-    <main className="app">
-      <header className="hero">
-        <p className="eyebrow">Google Maps Scraper</p>
-        <h1>From natural-language prompt to shipped leads file</h1>
-        <p className="subtitle">
-          Submit your lead-gen brief, review the parsed plan and cost, approve spend,
-          and let the app run the scrape job and keep downloadable file history.
-        </p>
+    <main className="shell">
+      <header className="topbar">
+        <div>
+          <p className="brand">Google Maps Scraper</p>
+          <p className="muted">Natural-language lead generation workflow</p>
+        </div>
+        <p className="status-pill">{backendState}</p>
       </header>
 
-      <section className="layout">
-        <article className="card">
-          <h2>1) New scrape job</h2>
-          <label htmlFor="brief">What should we scrape?</label>
-          <textarea
-            id="brief"
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            rows={6}
-          />
-          <label htmlFor="tags">Tags (comma-separated)</label>
-          <input
-            id="tags"
-            value={tagsInput}
-            onChange={(event) => setTagsInput(event.target.value)}
-            placeholder="dental, q3-campaign, california"
-          />
-          <div className="actions">
-            <button type="button" onClick={generatePlan}>
-              Generate plan
-            </button>
-          </div>
-          <p className="hint">Backend status: {backendState}</p>
-        </article>
+      <section className="hero-band">
+        <p className="eyebrow">Lead infrastructure setup</p>
+        <h1>From scrape brief to downloadable leads.</h1>
+        <p className="subtitle">
+          A guided workflow for planning Maps scrapes, approving paid usage, running jobs,
+          and re-downloading previous exports anytime.
+        </p>
+      </section>
 
-        <article className="card">
-          <h2>2) Parsed plan</h2>
+      <section className="workflow">
+        <div className="panel">
+          <div className="panel-head">
+            <h2>New scrape job</h2>
+            <p>Step {step} of 3</p>
+          </div>
+
+          <ol className="steps">
+            <li className={step === 1 ? 'active' : ''}>1 Prompt</li>
+            <li className={step === 2 ? 'active' : ''}>2 Plan</li>
+            <li className={step === 3 ? 'active' : ''}>3 Review</li>
+          </ol>
+
+          {step === 1 && (
+            <div className="form-block">
+              <label htmlFor="brief">What should we scrape? Required</label>
+              <textarea
+                id="brief"
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                rows={7}
+              />
+              <label htmlFor="tags">Tags</label>
+              <input
+                id="tags"
+                value={tagsInput}
+                onChange={(event) => setTagsInput(event.target.value)}
+                placeholder="dental, q3-campaign, california"
+              />
+              <p className="hint">No spend happens in this step.</p>
+              <div className="actions">
+                <button type="button" onClick={() => setStep(2)} disabled={prompt.trim().length < 20}>
+                  Continue
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="form-block">
+              <ul className="kv">
+                <li><span>Categories</span><strong>{parsed.categories.join(', ')}</strong></li>
+                <li><span>States</span><strong>{parsed.states.join(', ')}</strong></li>
+                <li><span>Min rating</span><strong>{parsed.minRating.toFixed(1)}+</strong></li>
+                <li><span>Min reviews</span><strong>{parsed.minReviews}+</strong></li>
+                <li><span>Lead target</span><strong>{parsed.leadTarget.toLocaleString()}</strong></li>
+                <li><span>Owner / email</span><strong>{parsed.needsOwners ? 'Yes' : 'Optional'} / {parsed.needsEmail ? 'Yes' : 'No'}</strong></li>
+              </ul>
+              <div className="actions split">
+                <button type="button" className="ghost" onClick={() => setStep(1)}>Back</button>
+                <button type="button" onClick={() => setStep(3)}>Continue</button>
+              </div>
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="form-block">
+              <p className="callout">
+                Creating this job does not spend money until you approve the paid actions below.
+              </p>
+              <ul className="kv">
+                <li><span>Maps requests (est.)</span><strong>{estimates.requestEstimate.toLocaleString()}</strong></li>
+                <li><span>RapidAPI Maps</span><strong>{formatUsd(estimates.mapsCost)}</strong></li>
+                <li><span>LLM cost</span><strong>{formatUsd(estimates.llmCost)}</strong></li>
+                <li><span>Apify fallback</span><strong>{formatUsd(estimates.apifyCost)}</strong></li>
+                <li className="total"><span>Total projected</span><strong>{formatUsd(estimates.total)}</strong></li>
+              </ul>
+
+              <label className="check">
+                <input type="checkbox" checked={confirmedPlan} onChange={(e) => setConfirmedPlan(e.target.checked)} />
+                The scrape details and cost estimate look correct
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={approvedMaps} onChange={(e) => setApprovedMaps(e.target.checked)} />
+                Approve RapidAPI Maps spend ({formatUsd(estimates.mapsCost)})
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={approvedLlm} onChange={(e) => setApprovedLlm(e.target.checked)} />
+                Approve LLM spend ({formatUsd(estimates.llmCost)})
+              </label>
+              {requiresApifyApproval && (
+                <label className="check">
+                  <input type="checkbox" checked={approvedApify} onChange={(e) => setApprovedApify(e.target.checked)} />
+                  Approve Apify fallback spend ({formatUsd(estimates.apifyCost)})
+                </label>
+              )}
+
+              <div className="actions split">
+                <button type="button" className="ghost" onClick={() => setStep(2)}>Back</button>
+                <button type="button" onClick={() => void queueRun()} disabled={!canQueue || isSubmitting}>
+                  {isSubmitting ? 'Starting…' : 'Create scrape job'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <aside className="summary">
+          <h3>Live summary</h3>
           <ul className="kv">
+            <li><span>Prompt</span><strong>{prompt.slice(0, 48)}{prompt.length > 48 ? '…' : ''}</strong></li>
+            <li><span>Tags</span><strong>{tags.join(', ') || '—'}</strong></li>
             <li><span>Categories</span><strong>{parsed.categories.join(', ')}</strong></li>
             <li><span>States</span><strong>{parsed.states.join(', ')}</strong></li>
-            <li><span>Min rating</span><strong>{parsed.minRating.toFixed(1)}+</strong></li>
-            <li><span>Min reviews</span><strong>{parsed.minReviews}+</strong></li>
-            <li><span>Lead target</span><strong>{parsed.leadTarget.toLocaleString()}</strong></li>
-            <li><span>Owner required</span><strong>{parsed.needsOwners ? 'Yes' : 'No'}</strong></li>
-            <li><span>Email required</span><strong>{parsed.needsEmail ? 'Yes' : 'No'}</strong></li>
+            <li><span>Projected spend</span><strong>{formatUsd(estimates.total)}</strong></li>
           </ul>
-          <code>{commandPlan}</code>
-        </article>
+          <p className="hint">
+            The workflow pauses before paid APIs run. Nothing is charged until you explicitly approve.
+          </p>
+        </aside>
+      </section>
 
-        <article className="card">
-          <h2>3) Cost estimate (required before run)</h2>
-          <ul className="kv">
-            <li><span>ZIPs scanned (est.)</span><strong>{estimates.zipEstimate.toLocaleString()}</strong></li>
-            <li><span>Maps requests (est.)</span><strong>{estimates.requestEstimate.toLocaleString()}</strong></li>
-            <li><span>RapidAPI Maps (est.)</span><strong>{formatUsd(estimates.mapsCost)}</strong></li>
-            <li><span>LLM records (est.)</span><strong>{Math.round(estimates.llmRecords).toLocaleString()}</strong></li>
-            <li><span>LLM cost (est.)</span><strong>{formatUsd(estimates.llmCost)}</strong></li>
-            <li><span>Apify fallback searches</span><strong>{estimates.apifySearches.toLocaleString()}</strong></li>
-            <li><span>Apify cost (est.)</span><strong>{formatUsd(estimates.apifyCost)}</strong></li>
-            <li className="total"><span>Total projected spend</span><strong>{formatUsd(estimates.total)}</strong></li>
-          </ul>
-        </article>
-
-        <article className="card">
-          <h2>4) Approval gate</h2>
-          <p className="callout">Paid actions remain blocked until each required approval is checked.</p>
-          <label className="check">
-            <input type="checkbox" checked={approvedMaps} onChange={(e) => setApprovedMaps(e.target.checked)} />
-            Approve RapidAPI Maps spend ({formatUsd(estimates.mapsCost)})
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={approvedLlm} onChange={(e) => setApprovedLlm(e.target.checked)} />
-            Approve LLM spend ({formatUsd(estimates.llmCost)})
-          </label>
-          {requiresApifyApproval && (
-            <label className="check">
-              <input type="checkbox" checked={approvedApify} onChange={(e) => setApprovedApify(e.target.checked)} />
-              Approve Apify fallback spend ({formatUsd(estimates.apifyCost)})
-            </label>
-          )}
-          <div className="actions">
-            <button type="button" onClick={() => void queueRun()} disabled={!canQueue || isSubmitting}>
-              {isSubmitting ? 'Submitting...' : 'Run scrape job'}
-            </button>
-          </div>
-        </article>
-
-        <article className="card span-2">
-          <h2>5) Execution recipe (handled by app backend)</h2>
-          <code>{commandRun}</code>
-          <code>{commandExport}</code>
-          <p className="hint">You should not need terminal commands for routine runs.</p>
-        </article>
-
-        <article className="card span-2">
+      <section className="panel history-panel">
+        <div className="panel-head">
           <h2>Job history + downloads</h2>
-          <table className="history">
-            <thead>
+          <p>Re-download completed CSV exports anytime</p>
+        </div>
+        <table className="history">
+          <thead>
+            <tr>
+              <th>Created</th>
+              <th>Status</th>
+              <th>Tags</th>
+              <th>Est. cost</th>
+              <th>File</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobs.length === 0 ? (
               <tr>
-                <th>Created</th>
-                <th>Status</th>
-                <th>Tags</th>
-                <th>Est. cost</th>
-                <th>File</th>
+                <td colSpan={5}>No jobs yet.</td>
               </tr>
-            </thead>
-            <tbody>
-              {jobs.length === 0 ? (
-                <tr>
-                  <td colSpan={5}>No jobs yet.</td>
+            ) : (
+              jobs.map((job) => (
+                <tr key={job.id}>
+                  <td>{new Date(job.createdAt).toLocaleString()}</td>
+                  <td><span className={`status ${job.status}`}>{job.status}</span></td>
+                  <td>{job.tags.join(', ') || '-'}</td>
+                  <td>{formatUsd(job.estimate.total)}</td>
+                  <td>
+                    {job.downloadUrl ? (
+                      <a href={job.downloadUrl}>Download CSV</a>
+                    ) : (
+                      job.error ?? '-'
+                    )}
+                  </td>
                 </tr>
-              ) : (
-                jobs.map((job) => (
-                  <tr key={job.id}>
-                    <td>{new Date(job.createdAt).toLocaleString()}</td>
-                    <td><span className={`status ${job.status}`}>{job.status}</span></td>
-                    <td>{job.tags.join(', ') || '-'}</td>
-                    <td>{formatUsd(job.estimate.total)}</td>
-                    <td>
-                      {job.downloadUrl ? (
-                        <a href={job.downloadUrl}>Download CSV</a>
-                      ) : (
-                        job.error ?? '-'
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </article>
+              ))
+            )}
+          </tbody>
+        </table>
+      </section>
 
-        <article className="card span-2">
+      <section className="panel">
+        <div className="panel-head">
           <h2>Activity log</h2>
-          <ul className="log">
-            {activity.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        </article>
+        </div>
+        <ul className="log">
+          {activity.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
       </section>
     </main>
   )

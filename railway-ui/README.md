@@ -82,13 +82,15 @@ No exceptions for "small" calls.
 
 ## Supabase integration
 
-If you set these Railway variables, job history and exported files are also synced to Supabase:
+Jobs and leads sync to Supabase through secure RPC ingest:
 
 - `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_EXPORT_BUCKET` (default `lead_exports`)
-- `SUPABASE_JOBS_TABLE` (default `scrape_jobs`)
-- `SUPABASE_LEADS_TABLE` (default `scrape_leads`)
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_INGEST_SECRET`
+
+Tables:
+- `scrape_jobs` (job history + tags + spend estimates)
+- `scrape_leads` (lead rows + tags + structured fields)
 
 The backend still keeps local fallback history in `data/jobs.json` and files under `data/outputs/`.
 
