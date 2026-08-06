@@ -893,89 +893,64 @@ def download_remote_csv(job_id: str, out_path: str = "") -> str:
     return _json({"job_id": job_id, "bytes": len(content), "csv": str(out)})
 
 
-def _build_http_app():
-    """Starlette app: Streamable HTTP at /mcp + health for Railway/Claude web."""
-    from mcp.server.transport_security import TransportSecuritySettings
-    from starlette.applications import Starlette
-    from starlette.middleware import Middleware
-    from starlette.middleware.cors import CORSMiddleware
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse, PlainTextResponse
-    from starlette.routing import Mount, Route
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse
 
-    async def health_live(_request: Request) -> JSONResponse:
-        return JSONResponse(
-            {
-                "ok": True,
-                "service": "google-maps-scraper-mcp",
-                "transport": "streamable-http",
-                "mcp_path": "/mcp",
-                "claude_web": (
-                    "Add this connector URL in Claude → Settings → Connectors: "
-                    "https://<your-host>/mcp"
-                ),
-            }
-        )
 
-    async def root(_request: Request) -> PlainTextResponse:
-        return PlainTextResponse(
-            "Google Maps Scraper MCP\n"
-            "Claude web connector URL: /mcp\n"
-            "Health: /health\n"
-        )
-
-    # Claude.ai reaches this from Anthropic's cloud; disable host pinning so
-    # Railway's rotating public domain + Claude origins both work.
-    mcp_app = mcp.streamable_http_app(
-        streamable_http_path="/mcp",
-        stateless_http=True,
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=False
-        ),
-        host="0.0.0.0",
+@mcp.custom_route("/", methods=["GET"])
+async def root_page(_request: Request) -> PlainTextResponse:
+    return PlainTextResponse(
+        "Google Maps Scraper MCP\n"
+        "Claude web connector URL: /mcp\n"
+        "Health: /health\n"
     )
 
-    middleware = [
-        Middleware(
-            CORSMiddleware,
-            allow_origins=[
-                "https://claude.ai",
-                "https://www.claude.ai",
-                "https://claude.com",
-                "https://www.claude.com",
-            ],
-            allow_origin_regex=r"https://.*\.claude\.(ai|com)",
-            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-            allow_headers=["*"],
-            expose_headers=["mcp-session-id", "mcp-protocol-version"],
-            allow_credentials=True,
-        )
-    ]
 
-    return Starlette(
-        routes=[
-            Route("/", root),
-            Route("/health", health_live),
-            Mount("/", app=mcp_app),
-        ],
-        middleware=middleware,
+@mcp.custom_route("/health", methods=["GET"])
+async def health_live(_request: Request) -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": "google-maps-scraper-mcp",
+            "transport": "streamable-http",
+            "mcp_path": "/mcp",
+            "claude_web": (
+                "Add this connector URL in Claude → Settings → Connectors: "
+                "https://<your-host>/mcp"
+            ),
+        }
     )
 
 
 def main() -> None:
+    """stdio for local Claude Desktop; streamable-http for Railway / Claude web."""
     _ensure_repo_cwd()
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
-    if transport in ("streamable-http", "http", "sse"):
-        import uvicorn
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8000"))
 
-        host = os.environ.get("HOST", "0.0.0.0")
-        port = int(os.environ.get("PORT", "8000"))
-        if transport == "sse":
-            mcp.run(transport="sse", host=host, port=port)
-            return
-        app = _build_http_app()
-        uvicorn.run(app, host=host, port=port, log_level="info")
+    if transport in ("streamable-http", "http"):
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        # Must use mcp.run() so StreamableHTTP session manager lifespan starts.
+        # Claude web connects from Anthropic's cloud (not the browser), so CORS
+        # is not required — only a public HTTPS /mcp endpoint.
+        mcp.run(
+            transport="streamable-http",
+            host=host,
+            port=port,
+            streamable_http_path="/mcp",
+            stateless_http=True,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            ),
+        )
         return
+
+    if transport == "sse":
+        mcp.run(transport="sse", host=host, port=port)
+        return
+
     mcp.run(transport="stdio")
 
 
