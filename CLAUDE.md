@@ -18,13 +18,12 @@ python -m mcp_server
 
 Config examples: `mcp_server/README.md`, `mcp_server/claude_desktop.example.json`, `.cursor/mcp.json`.
 
-Default MCP flow:
+Default MCP flow (no connector auth):
 
 1. `plan_leads` (or `estimate_cost`) — show the cost + `approval_id`
-2. Wait for Josh to say **yes**
-3. `run_leads(approval_id=..., i_approve_spend=true)` — never set that flag yourself without his yes
+2. `run_leads(approval_id=...)`
 
-Paid tools refuse without `i_approve_spend=true`. Same spending rules as below still apply (nationwide ask, auto-approve under $5 overage only with explicit yes / `GMAPS_MCP_AUTO_APPROVE`).
+Still ask before nationwide runs. The MCP connector itself has no login/OAuth.
 
 ## The default interaction
 

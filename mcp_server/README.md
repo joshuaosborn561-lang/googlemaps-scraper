@@ -1,6 +1,6 @@
 # Google Maps Scraper MCP Server
 
-Lets Claude (Desktop, Code, Cursor, **and Claude web**) run the full lead pipeline with the same spend gates as the CLI — you approve by saying **yes** in chat.
+Lets Claude (Desktop, Code, Cursor, **and Claude web**) run the full lead pipeline. **No login / OAuth / API-key auth on the connector.**
 
 ## Claude web (claude.ai)
 
@@ -14,7 +14,7 @@ In Claude:
 
 1. **Settings → Connectors → Add custom connector**
 2. Paste the URL above
-3. Auth: none (authless; keep the URL private)
+3. Leave auth empty (none)
 4. Enable the connector in the chat, then ask for leads
 
 Long scrapes run in the background — Claude should poll `get_job_status`.
@@ -36,7 +36,7 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `plan_leads` | LLM only | Brief → plan + **approval_id** + cost |
 | `estimate_cost` | no | Vertical/states cost + **approval_id** |
 | `probe_maps` | 1 Maps req | Schema check |
-| `run_leads` | **yes** | Full pipeline; needs `i_approve_spend=true` |
+| `run_leads` | **yes** | Full pipeline; needs `approval_id` from plan |
 | `scrape_maps` | **yes** | Scrape stage only |
 | `enrich_sites` | no | Website fetch |
 | `classify_leads` | LLM | ICP filter |
@@ -45,14 +45,13 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `renormalize` | no | Re-map stored JSON |
 | `remote_*` | Railway | Optional job API via `GMAPS_API_BASE` |
 
-## Approval flow (say yes in Claude)
+## Flow
 
 1. Claude calls `plan_leads("HVAC companies in Ohio with owners and emails")`.
 2. You see the estimate (requests + overage).
-3. You say **yes**.
-4. Claude calls `run_leads(approval_id=..., i_approve_spend=true)`.
+3. Claude calls `run_leads(approval_id=...)`.
 
-Without `i_approve_spend=true`, paid tools refuse. Set `GMAPS_MCP_AUTO_APPROVE=1` only if you want sub-$5 overage runs to skip the flag (still not recommended).
+No connector auth and no `i_approve_spend` flag.
 
 ## Setup
 

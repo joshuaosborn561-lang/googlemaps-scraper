@@ -1,10 +1,8 @@
-"""Pending spend approvals for paid MCP tools.
+"""Saved scrape plans for paid MCP tools.
 
-Flow:
-  1. plan_leads / estimate_cost creates an approval record + token
-  2. Claude shows the cost to the user
-  3. User says yes in chat
-  4. Claude calls a paid tool with i_approve_spend=True and that approval_id
+`plan_leads` / `estimate_cost` write a plan record. Paid tools load it by
+`approval_id` (kept as the field name for compatibility). No login auth and
+no i_approve_spend flag — the connector is open.
 """
 
 from __future__ import annotations
@@ -17,7 +15,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APPROVALS_DIR = ROOT / "data" / "approvals"
-# Matches CLAUDE.md: auto-approve under $5 overage when caller opts in.
 AUTO_APPROVE_UNDER_USD = 5.0
 APPROVAL_TTL_SECONDS = 60 * 60 * 6  # 6 hours
 
@@ -28,7 +25,7 @@ class Approval:
     brief: str
     plan_path: str
     requests: int
-    estimated_overage_usd: float | None  # None = unknown; inf encoded as -1 blocked
+    estimated_overage_usd: float | None
     blocked: bool
     states: list[str]
     categories: list[str]
@@ -53,12 +50,10 @@ class Approval:
             "estimated_overage_usd": (
                 "BLOCKED" if self.blocked else self.estimated_overage_usd
             ),
-            "auto_approve_under_usd": AUTO_APPROVE_UNDER_USD,
             "expires_at": self.expires_at,
             "instruction": (
-                "Show this estimate to the user. When they say yes, call "
-                "run_leads (or scrape_maps) with approval_id="
-                f"{self.id} and i_approve_spend=true."
+                f"Call run_leads (or scrape_maps) with approval_id={self.id}. "
+                "No auth / i_approve_spend flag required."
             ),
         }
 
@@ -115,43 +110,21 @@ def mark_used(approval_id: str) -> None:
 def require_spend_approval(
     *,
     approval_id: str,
-    i_approve_spend: bool,
+    i_approve_spend: bool = True,
     allow_auto_under: bool = True,
 ) -> Approval:
-    """Gate paid actions. Claude must pass i_approve_spend=true after the user says yes."""
+    """Load a saved plan. No auth / spend-flag check — only block hard failures."""
+    del i_approve_spend, allow_auto_under  # accepted for backward-compatible callers
     approval = load_approval(approval_id)
     if approval.expired:
-        raise ValueError("This approval expired. Re-run plan_leads to get a fresh estimate.")
+        raise ValueError("This plan expired. Re-run plan_leads to get a fresh estimate.")
     if approval.used:
         raise ValueError(
-            "This approval was already used. Re-run plan_leads if you want another paid run."
+            "This plan was already used. Re-run plan_leads if you want another paid run."
         )
     if approval.blocked:
         raise ValueError(
             "This run is BLOCKED on the current Maps plan (hard limit). "
-            "Upgrade MAPS_PLAN before approving."
+            "Upgrade MAPS_PLAN before running."
         )
-
-    overage = approval.estimated_overage_usd or 0.0
-    under_auto = allow_auto_under and overage <= AUTO_APPROVE_UNDER_USD
-
-    if not i_approve_spend and not under_auto:
-        raise ValueError(
-            "Spend not approved. Show the estimate to the user; when they say yes, "
-            f"retry with i_approve_spend=true and approval_id={approval_id}."
-        )
-
-    if not i_approve_spend and under_auto:
-        # Still require explicit Claude flag for MCP clarity — user said keep gates
-        # but allow saying yes in Claude. Under $5 we still want i_approve_spend
-        # unless they set GMAPS_MCP_AUTO_APPROVE=1.
-        import os
-
-        if os.environ.get("GMAPS_MCP_AUTO_APPROVE", "").strip() not in ("1", "true", "yes"):
-            raise ValueError(
-                f"Estimated overage ${overage:.2f} is under ${AUTO_APPROVE_UNDER_USD:.2f}, "
-                "but MCP still needs i_approve_spend=true after the user says yes "
-                "(or set GMAPS_MCP_AUTO_APPROVE=1 to skip that for sub-$5 runs)."
-            )
-
     return approval

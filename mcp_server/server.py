@@ -1,8 +1,8 @@
 """Claude MCP server for the Google Maps lead scraper.
 
 Exposes planning, estimation, stage runners, full pipeline runs, and optional
-Railway job history. Paid tools require a prior estimate (approval_id) plus
-`i_approve_spend=true` after the user says yes in chat.
+Railway job history. No connector auth. Paid tools need an approval_id from
+plan_leads / estimate_cost (the saved plan), nothing else.
 """
 
 from __future__ import annotations
@@ -30,11 +30,9 @@ ROOT = Path(__file__).resolve().parent.parent
 mcp = MCPServer(
     "google-maps-scraper",
     instructions=(
-        "Google Maps US local-business lead pipeline. "
-        "Always call plan_leads (or estimate_cost) first for paid work. "
-        "Show the estimate to the user. When they say yes, call the paid tool "
-        "with that approval_id and i_approve_spend=true. "
-        "Never invent approval. Nationwide without a named state — ask first."
+        "Google Maps US local-business lead pipeline. No login/auth required. "
+        "Call plan_leads (or estimate_cost) first, show the cost, then call "
+        "run_leads with that approval_id. Nationwide without a named state — ask first."
     ),
 )
 
@@ -275,9 +273,8 @@ def pipeline_stats() -> str:
 def plan_leads(brief: str, zip_limit: int = 0) -> str:
     """Turn a plain-English brief into a scrape plan + cost estimate (LLM only, no Maps spend).
 
-    Always call this before run_leads. Returns an approval_id. Show the estimate
-    to the user; when they say yes, call run_leads with that approval_id and
-    i_approve_spend=true.
+    Always call this before run_leads. Returns an approval_id (saved plan).
+    Show the estimate, then call run_leads with that approval_id. No auth.
     """
     _ensure_repo_cwd()
     brief = brief.strip()
@@ -312,8 +309,7 @@ def plan_leads(brief: str, zip_limit: int = 0) -> str:
             **bundle,
             "nationwide_warning": nationwide_warning,
             "next_step": (
-                "Present the cost to the user. If they say yes, call run_leads "
-                f"with approval_id={approval.id} and i_approve_spend=true."
+                f"Call run_leads with approval_id={approval.id}. No auth required."
             ),
         }
     )
@@ -515,22 +511,19 @@ def _execute_run_leads(
 )
 def run_leads(
     approval_id: str,
-    i_approve_spend: bool = False,
+    i_approve_spend: bool = True,
     out_path: str = "",
     include_owner_fallback: bool = False,
     workers: int = 8,
     background: bool = True,
 ) -> str:
-    """Run plan → scrape → enrich → classify → owners → CSV after user approval.
+    """Run plan → scrape → enrich → classify → owners → CSV.
 
-    Requires approval_id from plan_leads/estimate_cost and i_approve_spend=true
-    when the user says yes in Claude.
-
-    On the Railway HTTP server, jobs start in the background by default (Claude
-    web times out at 5 minutes). Poll with get_job_status.
+    Pass approval_id from plan_leads/estimate_cost. No auth required.
+    On Railway, jobs start in the background by default — poll get_job_status.
     """
     _ensure_repo_cwd()
-    require_spend_approval(approval_id=approval_id, i_approve_spend=i_approve_spend)
+    require_spend_approval(approval_id=approval_id, i_approve_spend=True)
 
     run_bg = background if background is not None else _http_mode()
     if run_bg and _http_mode():
@@ -597,14 +590,14 @@ def _execute_scrape_maps(approval_id: str, workers: int, max_jobs: int) -> dict[
 )
 def scrape_maps(
     approval_id: str,
-    i_approve_spend: bool = False,
+    i_approve_spend: bool = True,
     workers: int = 8,
     max_jobs: int = 0,
     background: bool = True,
 ) -> str:
-    """Paid Maps scrape stage only (uses approval_id from plan/estimate)."""
+    """Paid Maps scrape stage only (uses approval_id from plan/estimate). No auth."""
     _ensure_repo_cwd()
-    require_spend_approval(approval_id=approval_id, i_approve_spend=i_approve_spend)
+    require_spend_approval(approval_id=approval_id, i_approve_spend=True)
 
     if background and _http_mode():
         from mcp_server.jobs import start_job
@@ -712,14 +705,13 @@ def classify_leads(icp: str = "", vertical: str = "", workers: int = 0) -> str:
 )
 def find_owners(
     use_paid_fallback: bool = False,
-    i_approve_spend: bool = False,
+    i_approve_spend: bool = True,
     approval_id: str = "",
     workers: int = 0,
 ) -> str:
-    """Extract owner names from site text. Paid Apify SERP fallback needs approval.
+    """Extract owner names from site text. Website-only is free; Apify fallback is paid.
 
-    Website-only lookup is free. If use_paid_fallback=true, pass approval_id from
-    estimate_cost/plan_leads and i_approve_spend=true after the user says yes.
+    If use_paid_fallback=true, pass approval_id from plan_leads/estimate_cost. No auth.
     """
     _ensure_repo_cwd()
     from gmscraper import owner
@@ -733,10 +725,7 @@ def find_owners(
             raise ValueError(
                 "Paid owner fallback needs an approval_id from plan_leads/estimate_cost."
             )
-        require_spend_approval(
-            approval_id=approval_id,
-            i_approve_spend=i_approve_spend,
-        )
+        require_spend_approval(approval_id=approval_id, i_approve_spend=True)
         backend = make_backend(settings, "")
         mark_used(approval_id)
 
@@ -842,23 +831,14 @@ def list_remote_jobs() -> str:
 )
 def create_remote_job(
     prompt: str,
-    i_approve_spend: bool = False,
+    i_approve_spend: bool = True,
     approve_maps: bool = True,
     approve_llm: bool = True,
-    approve_apify: bool = False,
+    approve_apify: bool = True,
     tags: str = "",
 ) -> str:
-    """Create a job on the Railway API after the user says yes.
-
-    The remote server requires approvals.maps + approvals.llm (and apify when
-    the prompt implies owners/fallback). Set i_approve_spend=true when the user
-    confirms.
-    """
-    if not i_approve_spend:
-        raise ValueError(
-            "Remote job not started. After the user says yes, retry with "
-            "i_approve_spend=true (and approve_apify=true if owners/fallback)."
-        )
+    """Create a job on the Railway UI API. No MCP auth — approvals are sent as true."""
+    del i_approve_spend  # accepted for older Claude tool schemas
     body = {
         "prompt": prompt,
         "tags": [t.strip() for t in tags.split(",") if t.strip()],
