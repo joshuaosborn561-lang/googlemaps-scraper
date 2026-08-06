@@ -27,9 +27,12 @@ Do NOT use this for:
 - one-off questions that don't need a lead list
 
 ## Default flow (every time)
-1. If no US state/region is named → ASK which state(s). Never assume nationwide.
-2. Call `plan_leads` with their brief (or `estimate_cost` if they named a known vertical).
-3. Show a short cost summary: requests, estimated overage $, region, categories.
+1. If no US state/region/radius is named → ASK which state(s) or city+radius.
+   Never assume nationwide.
+2. Call `plan_leads` with their brief. For radius briefs ("within 150 miles of
+   Dallas"), pass `center` + `radius_miles` when you already know them, or let
+   the planner extract them. Prefer explicit `zips` when you have a ZIP list.
+3. Show a short cost summary: requests, estimated overage $, zip_count, region.
 4. Cost rules:
    - estimated overage ≤ $5 OR $0 inside quota → proceed to run (tell them the number)
    - estimated overage > $5 → ask once for a yes, then run
@@ -40,6 +43,13 @@ Do NOT use this for:
    via `pipeline_stats` / export info.
 7. Deliver the outcome: how many leads, where the CSV is, email/owner coverage
    if available. Do not dump flags or stage lectures.
+
+## Geography (important)
+- Explicit `zips` beats `center`+`radius_miles`, which beats `states`.
+- Radius briefs must NOT widen to neighboring states (DFW ≠ TX+OK).
+- Honor "do not include X" via `exclude_categories` — never scrape competitor niches
+  the brief ruled out (e.g. roofing for a GC prospecting list).
+- Exports include `latitude`, `longitude`, and `source_zip`.
 
 ## Tool cheat sheet
 | User intent | Tool |
@@ -72,9 +82,12 @@ The user wants local US business leads. Use the Google Maps Scraper MCP.
 Brief: {brief}
 
 Do this now:
-1. If the brief has no US state/region, ask which state(s) — do not run nationwide blindly.
-2. Call plan_leads with the brief.
-3. Show one short cost line (requests + est. overage + region + category count).
+1. If the brief has no US state/region/radius, ask which state(s) or city+radius —
+   do not run nationwide blindly.
+2. Call plan_leads with the brief. For "within N miles of City", pass center +
+   radius_miles when known. Pass exclude_categories for "do not include …".
+   Prefer explicit zips when you already have a ZIP list.
+3. Show one short cost line (requests + est. overage + zip_count + region).
 4. If overage ≤ $5 (or $0 in quota), call run_leads with the returned approval_id.
    If overage > $5, ask once for confirmation, then run_leads.
 5. If run_leads returns a job_id, poll get_job_status until done.

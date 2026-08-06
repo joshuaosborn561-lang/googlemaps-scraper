@@ -136,17 +136,92 @@ def _parse_overage(cost_text_lines: list[str]) -> tuple[float | None, bool]:
     return overage, blocked
 
 
-def _plan_cost_bundle(plan, zip_limit: int | None = None) -> dict[str, Any]:
+def _apply_geo_overrides(
+    plan,
+    *,
+    zips: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    exclude_categories: str = "",
+) -> dict[str, Any]:
+    """Apply MCP overrides onto a Plan and resolve ZIP rows.
+
+    Precedence: explicit zips > center+radius > states.
+    Persists the resolved ZIP list onto plan.zips so run_leads uses it verbatim.
+    """
     from gmscraper import brief as brief_mod
-    from gmscraper import zips
+    from gmscraper import zips as zips_mod
+
+    extras = brief_mod._parse_exclude_list(exclude_categories)
+    plan.apply_exclusions(extras)
+
+    if zips.strip():
+        plan.zips = zips_mod.parse_zip_list(zips)
+        # Explicit list wins — clear radius so resolve uses zips.
+        # Keep center/radius on the plan only as metadata if caller also sent them.
+    elif center.strip() and radius_miles > 0:
+        plan.center = center.strip()
+        plan.radius_miles = float(radius_miles)
+    elif plan.center and plan.radius_miles > 0:
+        pass  # from LLM planner
+    else:
+        plan.radius_miles = float(plan.radius_miles or 0) or 0.0
+
+    # Resolve center coordinates when we have a radius brief/override.
+    if not plan.zips and plan.center and plan.radius_miles > 0:
+        lat, lng, label = zips_mod.parse_center(plan.center)
+        plan.center = label
+        plan.center_lat = lat
+        plan.center_lng = lng
+
+    zip_path = str(_ensure_zips_file())
+    zip_rows, geo_meta = zips_mod.resolve_zip_rows(
+        zip_path,
+        zips=plan.zips or None,
+        center=plan.center or None,
+        radius_miles=plan.radius_miles or None,
+        center_lat=plan.center_lat,
+        center_lng=plan.center_lng,
+        states=plan.states or None,
+    )
+
+    # Persist the exact ZIP list so run_leads scrapes only these.
+    plan.zips = [r["zip"] for r in zip_rows]
+    if geo_meta.get("center_lat") is not None:
+        plan.center_lat = geo_meta["center_lat"]
+        plan.center_lng = geo_meta["center_lng"]
+    if geo_meta.get("center"):
+        plan.center = geo_meta["center"]
+    if geo_meta.get("radius_miles"):
+        plan.radius_miles = float(geo_meta["radius_miles"])
+
+    return {"zip_rows": zip_rows, "geo_meta": geo_meta}
+
+
+def _plan_cost_bundle(
+    plan,
+    zip_limit: int | None = None,
+    *,
+    zips: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    exclude_categories: str = "",
+) -> dict[str, Any]:
+    from gmscraper import brief as brief_mod
     from gmscraper.config import settings
 
-    _ensure_zips_file()
-    zip_rows = zips.load(
-        str(_ensure_zips_file()),
-        states=plan.states or None,
-        limit=zip_limit,
+    resolved = _apply_geo_overrides(
+        plan,
+        zips=zips,
+        center=center,
+        radius_miles=radius_miles,
+        exclude_categories=exclude_categories,
     )
+    zip_rows = resolved["zip_rows"]
+    if zip_limit:
+        zip_rows = zip_rows[:zip_limit]
+        plan.zips = [r["zip"] for r in zip_rows]
+
     store = _store()
     used = store.requests_this_cycle(settings.quota_reset_day)
     requests = len(zip_rows) * len(plan.categories)
@@ -164,6 +239,13 @@ def _plan_cost_bundle(plan, zip_limit: int | None = None) -> dict[str, Any]:
         "auto_approve_under_usd": AUTO_APPROVE_UNDER_USD,
         "maps_plan": settings.maps_plan,
         "quota_used": used,
+        "geo": resolved["geo_meta"],
+        "center": plan.center,
+        "center_lat": plan.center_lat,
+        "center_lng": plan.center_lng,
+        "radius_miles": plan.radius_miles,
+        "exclude_categories": plan.exclude_categories,
+        "sample_zips": plan.zips[:12],
     }
 
 
@@ -178,6 +260,23 @@ def _save_plan(plan, brief: str) -> Path:
     # stash brief alongside for auditing
     path.with_suffix(".brief.txt").write_text(brief, encoding="utf-8")
     return path
+
+
+def _zip_rows_for_plan(plan) -> list[dict[str, str]]:
+    """Load ZIP rows for a saved plan (explicit list wins)."""
+    from gmscraper import zips as zips_mod
+
+    zip_path = str(_ensure_zips_file())
+    rows, _ = zips_mod.resolve_zip_rows(
+        zip_path,
+        zips=plan.zips or None,
+        center=plan.center or None,
+        radius_miles=plan.radius_miles or None,
+        center_lat=plan.center_lat,
+        center_lng=plan.center_lng,
+        states=plan.states or None,
+    )
+    return rows
 
 
 def _remote_base() -> str:
@@ -311,11 +410,25 @@ def pipeline_stats() -> str:
         openWorldHint=True,
     )
 )
-def plan_leads(brief: str, zip_limit: int = 0) -> str:
+def plan_leads(
+    brief: str,
+    zip_limit: int = 0,
+    zips: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    exclude_categories: str = "",
+) -> str:
     """REQUIRED first step for any new lead request.
 
-    Turns a plain-English brief into categories, states, ICP, and a cost estimate
-    (LLM only — no Google Maps spend yet). Returns approval_id for run_leads.
+    Turns a plain-English brief into categories, geography, ICP, and a cost
+    estimate (LLM only — no Google Maps spend yet). Returns approval_id for
+    run_leads.
+
+    Geography overrides (precedence: zips > center+radius_miles > states):
+      zips              comma-separated 5-digit ZIPs (supports 1000+). Wins outright.
+      center            "Dallas, TX" or "32.7767,-97.0000"
+      radius_miles      miles from center (haversine over ZIP centroids)
+      exclude_categories  comma-separated Maps categories to never scrape
 
     Always show the user the cost summary from this result before running.
     """
@@ -325,16 +438,31 @@ def plan_leads(brief: str, zip_limit: int = 0) -> str:
         raise ValueError("brief is too short — describe niche + region.")
 
     plan = __import__("gmscraper.brief", fromlist=["make_plan"]).make_plan(_llm(), brief)
-    if not plan.states:
-        # Nationwide is expensive — surface a warning but still return the plan
+
+    # Parameter overrides beat the LLM when provided.
+    if center.strip() and radius_miles > 0:
+        plan.center = center.strip()
+        plan.radius_miles = float(radius_miles)
+    if exclude_categories.strip():
+        pass  # applied inside _plan_cost_bundle
+
+    has_geo = bool(zips.strip()) or (plan.center and plan.radius_miles > 0) or bool(plan.states)
+    if not has_geo:
         nationwide_warning = (
-            "No US state was detected. Nationwide is 20–30x a single-state run. "
-            "Ask the user which state(s) before approving spend."
+            "No US state / radius / ZIP list was detected. Nationwide is 20–30x "
+            "a single-state run. Ask the user which state(s) or pass zips/center."
         )
     else:
         nationwide_warning = None
 
-    bundle = _plan_cost_bundle(plan, zip_limit=zip_limit or None)
+    bundle = _plan_cost_bundle(
+        plan,
+        zip_limit=zip_limit or None,
+        zips=zips,
+        center=center,
+        radius_miles=radius_miles,
+        exclude_categories=exclude_categories,
+    )
     plan_path = _save_plan(plan, brief)
     approval = create_approval(
         brief=brief,
@@ -371,11 +499,15 @@ def estimate_cost(
     categories: str = "",
     zip_limit: int = 0,
     brief: str = "",
+    zips: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    exclude_categories: str = "",
 ) -> str:
     """Price a scrape without running it. Use for "how much would this cost?"
 
-    Prefer plan_leads for open-ended briefs. Use this when the user already
-    named a known vertical (from list_categories) and state codes.
+    Prefer plan_leads for open-ended briefs. Geography overrides match plan_leads:
+    zips > center+radius_miles > states. exclude_categories drops scrape categories.
     """
     _ensure_repo_cwd()
     from gmscraper import brief as brief_mod
@@ -402,10 +534,23 @@ def estimate_cost(
             categories=cats,
             icp=icp,
             states=state_list,
+            center=center.strip(),
+            radius_miles=float(radius_miles or 0),
         )
-        used_brief = brief or f"{vert} in {', '.join(state_list) or 'US'}"
+        used_brief = brief or f"{vert} in {', '.join(state_list) or center or 'US'}"
 
-    bundle = _plan_cost_bundle(plan, zip_limit=zip_limit or None)
+    if center.strip() and radius_miles > 0:
+        plan.center = center.strip()
+        plan.radius_miles = float(radius_miles)
+
+    bundle = _plan_cost_bundle(
+        plan,
+        zip_limit=zip_limit or None,
+        zips=zips,
+        center=center,
+        radius_miles=radius_miles,
+        exclude_categories=exclude_categories,
+    )
     plan_path = _save_plan(plan, used_brief)
     approval = create_approval(
         brief=used_brief,
@@ -480,7 +625,7 @@ def _execute_run_leads(
     workers: int,
 ) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
-    from gmscraper import classify, enrich_site, export, owner, scrape, zips
+    from gmscraper import classify, enrich_site, export, owner, scrape
     from gmscraper.config import settings
     from gmscraper.llm import default_workers
     from gmscraper.mapsdata import MapsDataClient
@@ -493,7 +638,7 @@ def _execute_run_leads(
     settings.require_rapidapi()
     plan = brief_mod.load(approval.plan_path)
     _ensure_zips_file()
-    zip_rows = zips.load(str(_ensure_zips_file()), states=plan.states or None)
+    zip_rows = _zip_rows_for_plan(plan)
     store = _store()
     llm = _llm()
     client = MapsDataClient(settings)
@@ -532,6 +677,10 @@ def _execute_run_leads(
         min_rating=plan.min_rating,
         min_reviews=plan.min_reviews,
         states=plan.states or None,
+        center=plan.center or None,
+        radius_miles=plan.radius_miles or None,
+        center_lat=plan.center_lat,
+        center_lng=plan.center_lng,
     )
     mark_used(approval_id)
     return {
@@ -598,7 +747,7 @@ def run_leads(
 
 def _execute_scrape_maps(approval_id: str, workers: int, max_jobs: int) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
-    from gmscraper import scrape, zips
+    from gmscraper import scrape
     from gmscraper.config import settings
     from gmscraper.mapsdata import MapsDataClient
 
@@ -608,7 +757,7 @@ def _execute_scrape_maps(approval_id: str, workers: int, max_jobs: int) -> dict[
     )
     settings.require_rapidapi()
     plan = brief_mod.load(approval.plan_path)
-    zip_rows = zips.load(str(_ensure_zips_file()), states=plan.states or None)
+    zip_rows = _zip_rows_for_plan(plan)
     store = _store()
     client = MapsDataClient(settings)
     res = scrape.run(
@@ -621,7 +770,13 @@ def _execute_scrape_maps(approval_id: str, workers: int, max_jobs: int) -> dict[
         max_jobs=max_jobs or None,
     )
     mark_used(approval_id)
-    return {"status": "completed", "result": res, "stats": store.stats()}
+    return {
+        "status": "completed",
+        "result": res,
+        "stats": store.stats(),
+        "zip_count": len(zip_rows),
+        "sample_source_zips": [r["zip"] for r in zip_rows[:20]],
+    }
 
 
 @mcp.tool(
@@ -794,8 +949,14 @@ def export_csv(
     min_reviews: int = 0,
     states: str = "",
     icp_only: bool = True,
+    center: str = "",
+    radius_miles: float = 0.0,
 ) -> str:
-    """Write the current DB leads to a CSV (free)."""
+    """Write the current DB leads to a CSV (free).
+
+    Includes latitude, longitude, and source_zip. Optional center + radius_miles
+    filters rows post-hoc by business coordinates without re-scraping.
+    """
     _ensure_repo_cwd()
     from gmscraper import export
 
@@ -811,8 +972,10 @@ def export_csv(
         min_rating=min_rating,
         min_reviews=min_reviews,
         states=state_list,
+        center=center or None,
+        radius_miles=radius_miles or None,
     )
-    return _json({"leads": n, "csv": str(out)})
+    return _json({"leads": n, "csv": str(out), "columns": export.COLUMNS})
 
 
 @mcp.tool(
