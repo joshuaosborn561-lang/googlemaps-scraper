@@ -4,14 +4,26 @@ Lets Claude (Desktop, Code, Cursor, **and Claude web**) run the full lead pipeli
 
 ## Claude web (claude.ai)
 
-Deployed on Railway as Streamable HTTP. In Claude:
+Live Railway URL (Streamable HTTP):
+
+```
+https://google-maps-mcp-production-88a3.up.railway.app/mcp
+```
+
+In Claude:
 
 1. **Settings → Connectors → Add custom connector**
-2. Paste: `https://<your-mcp-host>.up.railway.app/mcp`
-3. Auth: none (server is authless; protect by keeping the URL private)
-4. Enable the connector in the chat
+2. Paste the URL above
+3. Auth: none (authless; keep the URL private)
+4. Enable the connector in the chat, then ask for leads
 
 Long scrapes run in the background — Claude should poll `get_job_status`.
+
+Set these Railway env vars on service `google-maps-mcp` for paid runs:
+
+- `RAPIDAPI_KEY`
+- `OPENAI_API_KEY` (or `LLM_PROVIDER=ollama` + reachable Ollama)
+- optional: `APIFY_TOKEN`, `MAPS_PLAN`, `MAPS_QUOTA_RESET_DAY`
 
 ## Tools
 

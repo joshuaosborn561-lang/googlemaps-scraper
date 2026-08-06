@@ -4,8 +4,9 @@ US local-business lead pipeline: plan → scrape Google Maps → enrich → clas
 
 ## Ways to use it
 
-1. **Claude MCP** (recommended in chat) — say what you want; approve spend with “yes”  
-   See [`mcp_server/README.md`](mcp_server/README.md)
+1. **Claude web MCP** (recommended) — Settings → Connectors →  
+   `https://google-maps-mcp-production-88a3.up.railway.app/mcp`  
+   Say what you want; approve spend with “yes”. Details: [`mcp_server/README.md`](mcp_server/README.md)
 2. **CLI** — `python -m gmscraper plan "…"` then `run`  
    See [`CLAUDE.md`](CLAUDE.md)
 3. **Railway UI** — browser wizard with the same approval gate  
