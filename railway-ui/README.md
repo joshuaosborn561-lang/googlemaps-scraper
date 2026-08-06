@@ -1,5 +1,8 @@
 # Google Maps Scraper UI (Railway)
 
+For Claude chat access to the same pipeline (with “yes” spend approval), use the
+MCP server at [`../mcp_server/README.md`](../mcp_server/README.md).
+
 This UI now reflects the repository's real target workflow and is explicitly built for:
 
 - entering a **natural-language lead-gen prompt**

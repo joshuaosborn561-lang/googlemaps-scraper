@@ -1,0 +1,16 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+data/*.csv
+data/approvals/
+data/plans/
+data/outputs/
+out/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+railway-ui/node_modules/
+railway-ui/dist/
