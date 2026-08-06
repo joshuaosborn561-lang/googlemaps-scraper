@@ -2,6 +2,8 @@
 
 Lets Claude (Desktop, Code, Cursor, **and Claude web**) run the full lead pipeline. **No login / OAuth / API-key auth on the connector.**
 
+Claude receives a built-in playbook via server `instructions`, resource `gmscraper://playbook`, and prompts `find_leads` / `when_to_use` so it knows when to use this MCP and the exact plan → run flow.
+
 ## Claude web (claude.ai)
 
 Live Railway URL (Streamable HTTP):

@@ -18,12 +18,12 @@ python -m mcp_server
 
 Config examples: `mcp_server/README.md`, `mcp_server/claude_desktop.example.json`, `.cursor/mcp.json`.
 
-Default MCP flow (no connector auth):
+The MCP server ships a playbook Claude reads automatically (`instructions` +
+`gmscraper://playbook` + prompts `find_leads` / `when_to_use`):
 
-1. `plan_leads` (or `estimate_cost`) — show the cost + `approval_id`
-2. `run_leads(approval_id=...)`
-
-Still ask before nationwide runs. The MCP connector itself has no login/OAuth.
+1. Use this MCP for US local-business lead lists (niche + state/city)
+2. `plan_leads` → show cost → `run_leads(approval_id=...)`
+3. Ask before nationwide; no connector login/OAuth
 
 ## The default interaction
 

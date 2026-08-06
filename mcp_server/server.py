@@ -24,17 +24,53 @@ from mcp_server.approvals import (
     mark_used,
     require_spend_approval,
 )
+from mcp_server.playbook import FIND_LEADS_PROMPT, INSTRUCTIONS, WHEN_TO_USE_PROMPT
 
 ROOT = Path(__file__).resolve().parent.parent
 
 mcp = MCPServer(
-    "google-maps-scraper",
-    instructions=(
-        "Google Maps US local-business lead pipeline. No login/auth required. "
-        "Call plan_leads (or estimate_cost) first, show the cost, then call "
-        "run_leads with that approval_id. Nationwide without a named state — ask first."
+    name="google-maps-scraper",
+    title="Google Maps Scraper",
+    description=(
+        "Build US local-business lead CSVs from Google Maps. "
+        "Use when the user asks for niche + city/state leads, owners, or emails."
+    ),
+    instructions=INSTRUCTIONS,
+    website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
+    version="1.1.0",
+)
+
+
+@mcp.resource(
+    "gmscraper://playbook",
+    name="playbook",
+    title="How to use Google Maps Scraper",
+    description="When to use this MCP and the exact plan → run workflow.",
+    mime_type="text/markdown",
+)
+def playbook_resource() -> str:
+    return INSTRUCTIONS
+
+
+@mcp.prompt(
+    name="find_leads",
+    title="Find local business leads",
+    description=(
+        "Run the full Google Maps lead flow for a plain-English brief "
+        "(plan → cost → run → CSV)."
     ),
 )
+def find_leads_prompt(brief: str = "local businesses in a US state") -> str:
+    return FIND_LEADS_PROMPT.format(brief=brief.strip() or "local businesses in a US state")
+
+
+@mcp.prompt(
+    name="when_to_use",
+    title="When to use this scraper",
+    description="Decide whether the Google Maps Scraper MCP applies to the user's request.",
+)
+def when_to_use_prompt() -> str:
+    return WHEN_TO_USE_PROMPT
 
 
 def _json(data: Any) -> str:
@@ -183,7 +219,10 @@ def _remote_json(method: str, path: str, body: dict | None = None) -> Any:
     )
 )
 def health() -> str:
-    """Check scraper config: Maps plan, whether API keys are set, zip/db paths."""
+    """Check whether this lead-scraper MCP is ready (Maps plan, API keys, paths).
+
+    Call first if a paid run fails or you're unsure keys are configured.
+    """
     _ensure_repo_cwd()
     settings = _settings()
     from gmscraper.config import DEFAULT_CATEGORIES, DEFAULT_DB, DEFAULT_ZIPS
@@ -201,8 +240,7 @@ def health() -> str:
             "zips_ready": Path(DEFAULT_ZIPS).exists(),
             "categories_file": str(DEFAULT_CATEGORIES),
             "remote_api": _remote_base() or None,
-            "auto_approve_under_usd": AUTO_APPROVE_UNDER_USD,
-            "mcp_auto_approve_env": os.environ.get("GMAPS_MCP_AUTO_APPROVE", ""),
+            "auth": "none",
         }
     )
 
@@ -215,7 +253,10 @@ def health() -> str:
     )
 )
 def list_categories() -> str:
-    """List built-in verticals and their Google Maps category lists."""
+    """List built-in industry verticals (hvac, dental, funeral, …) and Maps categories.
+
+    Use when the user asks what niches are supported, or before estimate_cost(vertical=…).
+    """
     _ensure_repo_cwd()
     data = _load_verticals()
     out = []
@@ -271,10 +312,12 @@ def pipeline_stats() -> str:
     )
 )
 def plan_leads(brief: str, zip_limit: int = 0) -> str:
-    """Turn a plain-English brief into a scrape plan + cost estimate (LLM only, no Maps spend).
+    """REQUIRED first step for any new lead request.
 
-    Always call this before run_leads. Returns an approval_id (saved plan).
-    Show the estimate, then call run_leads with that approval_id. No auth.
+    Turns a plain-English brief into categories, states, ICP, and a cost estimate
+    (LLM only — no Google Maps spend yet). Returns approval_id for run_leads.
+
+    Always show the user the cost summary from this result before running.
     """
     _ensure_repo_cwd()
     brief = brief.strip()
@@ -329,10 +372,10 @@ def estimate_cost(
     zip_limit: int = 0,
     brief: str = "",
 ) -> str:
-    """Estimate Maps request count and overage without scraping.
+    """Price a scrape without running it. Use for "how much would this cost?"
 
-    Provide either vertical (from list_categories) or comma-separated categories,
-    plus optional comma-separated state codes. Or pass brief to LLM-plan first.
+    Prefer plan_leads for open-ended briefs. Use this when the user already
+    named a known vertical (from list_categories) and state codes.
     """
     _ensure_repo_cwd()
     from gmscraper import brief as brief_mod
@@ -517,10 +560,11 @@ def run_leads(
     workers: int = 8,
     background: bool = True,
 ) -> str:
-    """Run plan → scrape → enrich → classify → owners → CSV.
+    """Execute the full lead pipeline after plan_leads. This is the main "go" tool.
 
-    Pass approval_id from plan_leads/estimate_cost. No auth required.
-    On Railway, jobs start in the background by default — poll get_job_status.
+    Pass approval_id from plan_leads/estimate_cost. On Railway/HTTP this starts a
+    background job — poll get_job_status with the returned job_id until completed.
+    Then tell the user the lead count and CSV path.
     """
     _ensure_repo_cwd()
     require_spend_approval(approval_id=approval_id, i_approve_spend=True)
@@ -626,7 +670,7 @@ def scrape_maps(
     )
 )
 def get_job_status(job_id: str) -> str:
-    """Poll a background run_leads / scrape_maps job started on the HTTP server."""
+    """Poll a background run_leads / scrape_maps job. Use after run_leads returns job_id."""
     from mcp_server.jobs import get_job
 
     return _json(get_job(job_id).to_public())
