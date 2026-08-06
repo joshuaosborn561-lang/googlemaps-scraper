@@ -6,6 +6,8 @@ data/*.csv
 data/approvals/
 data/plans/
 data/outputs/
+data/jobs/
+data/us_zipcodes.csv
 out/
 __pycache__/
 *.pyc

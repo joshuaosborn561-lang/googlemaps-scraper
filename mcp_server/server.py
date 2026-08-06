@@ -426,27 +426,20 @@ def probe_maps(zip_code: str = "10001", category: str = "hvac contractor") -> st
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        title="Run full lead pipeline",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=True,
+def _http_mode() -> bool:
+    return os.environ.get("MCP_TRANSPORT", "stdio").lower() in (
+        "streamable-http",
+        "http",
+        "sse",
     )
-)
-def run_leads(
-    approval_id: str,
-    i_approve_spend: bool = False,
-    out_path: str = "",
-    include_owner_fallback: bool = False,
-    workers: int = 8,
-) -> str:
-    """Run plan → scrape → enrich → classify → owners → CSV after user approval.
 
-    Requires approval_id from plan_leads/estimate_cost and i_approve_spend=true
-    when the user says yes in Claude.
-    """
-    _ensure_repo_cwd()
+
+def _execute_run_leads(
+    approval_id: str,
+    out_path: str,
+    include_owner_fallback: bool,
+    workers: int,
+) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
     from gmscraper import classify, enrich_site, export, owner, scrape, zips
     from gmscraper.config import settings
@@ -456,7 +449,7 @@ def run_leads(
 
     approval = require_spend_approval(
         approval_id=approval_id,
-        i_approve_spend=i_approve_spend,
+        i_approve_spend=True,  # already gated by caller
     )
     settings.require_rapidapi()
     plan = brief_mod.load(approval.plan_path)
@@ -502,35 +495,71 @@ def run_leads(
         states=plan.states or None,
     )
     mark_used(approval_id)
-    stats = store.stats()
-    return _json(
-        {
-            "status": "completed",
-            "leads": n,
-            "csv": str(out),
-            "approval_id": approval_id,
-            "stats": stats,
-            "llm_spend": llm.spend_line() if hasattr(llm, "spend_line") else None,
-        }
-    )
+    return {
+        "status": "completed",
+        "leads": n,
+        "csv": str(out),
+        "approval_id": approval_id,
+        "stats": store.stats(),
+        "llm_spend": llm.spend_line() if hasattr(llm, "spend_line") else None,
+    }
 
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Scrape Google Maps only",
+        title="Run full lead pipeline",
         readOnlyHint=False,
         openWorldHint=True,
         destructiveHint=True,
     )
 )
-def scrape_maps(
+def run_leads(
     approval_id: str,
     i_approve_spend: bool = False,
+    out_path: str = "",
+    include_owner_fallback: bool = False,
     workers: int = 8,
-    max_jobs: int = 0,
+    background: bool = True,
 ) -> str:
-    """Paid Maps scrape stage only (uses approval_id from plan/estimate)."""
+    """Run plan → scrape → enrich → classify → owners → CSV after user approval.
+
+    Requires approval_id from plan_leads/estimate_cost and i_approve_spend=true
+    when the user says yes in Claude.
+
+    On the Railway HTTP server, jobs start in the background by default (Claude
+    web times out at 5 minutes). Poll with get_job_status.
+    """
     _ensure_repo_cwd()
+    require_spend_approval(approval_id=approval_id, i_approve_spend=i_approve_spend)
+
+    run_bg = background if background is not None else _http_mode()
+    if run_bg and _http_mode():
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "run_leads",
+            lambda: _execute_run_leads(
+                approval_id, out_path, include_owner_fallback, workers
+            ),
+            meta={"approval_id": approval_id},
+        )
+        return _json(
+            {
+                "status": "started",
+                "job_id": job.id,
+                "message": (
+                    "Pipeline started in the background. Poll get_job_status "
+                    f"with job_id={job.id} until status is completed/failed."
+                ),
+            }
+        )
+
+    return _json(
+        _execute_run_leads(approval_id, out_path, include_owner_fallback, workers)
+    )
+
+
+def _execute_scrape_maps(approval_id: str, workers: int, max_jobs: int) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
     from gmscraper import scrape, zips
     from gmscraper.config import settings
@@ -538,7 +567,7 @@ def scrape_maps(
 
     approval = require_spend_approval(
         approval_id=approval_id,
-        i_approve_spend=i_approve_spend,
+        i_approve_spend=True,
     )
     settings.require_rapidapi()
     plan = brief_mod.load(approval.plan_path)
@@ -555,7 +584,73 @@ def scrape_maps(
         max_jobs=max_jobs or None,
     )
     mark_used(approval_id)
-    return _json({"status": "completed", "result": res, "stats": store.stats()})
+    return {"status": "completed", "result": res, "stats": store.stats()}
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Scrape Google Maps only",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def scrape_maps(
+    approval_id: str,
+    i_approve_spend: bool = False,
+    workers: int = 8,
+    max_jobs: int = 0,
+    background: bool = True,
+) -> str:
+    """Paid Maps scrape stage only (uses approval_id from plan/estimate)."""
+    _ensure_repo_cwd()
+    require_spend_approval(approval_id=approval_id, i_approve_spend=i_approve_spend)
+
+    if background and _http_mode():
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "scrape_maps",
+            lambda: _execute_scrape_maps(approval_id, workers, max_jobs),
+            meta={"approval_id": approval_id},
+        )
+        return _json(
+            {
+                "status": "started",
+                "job_id": job.id,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+
+    return _json(_execute_scrape_maps(approval_id, workers, max_jobs))
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get background job status",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def get_job_status(job_id: str) -> str:
+    """Poll a background run_leads / scrape_maps job started on the HTTP server."""
+    from mcp_server.jobs import get_job
+
+    return _json(get_job(job_id).to_public())
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List background jobs",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def list_background_jobs(limit: int = 20) -> str:
+    """List recent background pipeline jobs on this MCP server."""
+    from mcp_server.jobs import list_jobs
+
+    return _json([j.to_public() for j in list_jobs(limit=limit)])
 
 
 @mcp.tool(
@@ -798,9 +893,90 @@ def download_remote_csv(job_id: str, out_path: str = "") -> str:
     return _json({"job_id": job_id, "bytes": len(content), "csv": str(out)})
 
 
+def _build_http_app():
+    """Starlette app: Streamable HTTP at /mcp + health for Railway/Claude web."""
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, PlainTextResponse
+    from starlette.routing import Mount, Route
+
+    async def health_live(_request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "ok": True,
+                "service": "google-maps-scraper-mcp",
+                "transport": "streamable-http",
+                "mcp_path": "/mcp",
+                "claude_web": (
+                    "Add this connector URL in Claude → Settings → Connectors: "
+                    "https://<your-host>/mcp"
+                ),
+            }
+        )
+
+    async def root(_request: Request) -> PlainTextResponse:
+        return PlainTextResponse(
+            "Google Maps Scraper MCP\n"
+            "Claude web connector URL: /mcp\n"
+            "Health: /health\n"
+        )
+
+    # Claude.ai reaches this from Anthropic's cloud; disable host pinning so
+    # Railway's rotating public domain + Claude origins both work.
+    mcp_app = mcp.streamable_http_app(
+        streamable_http_path="/mcp",
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        ),
+        host="0.0.0.0",
+    )
+
+    middleware = [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "https://claude.ai",
+                "https://www.claude.ai",
+                "https://claude.com",
+                "https://www.claude.com",
+            ],
+            allow_origin_regex=r"https://.*\.claude\.(ai|com)",
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["mcp-session-id", "mcp-protocol-version"],
+            allow_credentials=True,
+        )
+    ]
+
+    return Starlette(
+        routes=[
+            Route("/", root),
+            Route("/health", health_live),
+            Mount("/", app=mcp_app),
+        ],
+        middleware=middleware,
+    )
+
+
 def main() -> None:
     _ensure_repo_cwd()
-    mcp.run()
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+    if transport in ("streamable-http", "http", "sse"):
+        import uvicorn
+
+        host = os.environ.get("HOST", "0.0.0.0")
+        port = int(os.environ.get("PORT", "8000"))
+        if transport == "sse":
+            mcp.run(transport="sse", host=host, port=port)
+            return
+        app = _build_http_app()
+        uvicorn.run(app, host=host, port=port, log_level="info")
+        return
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

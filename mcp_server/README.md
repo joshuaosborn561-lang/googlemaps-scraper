@@ -1,6 +1,17 @@
 # Google Maps Scraper MCP Server
 
-Lets Claude (Desktop, Code, or Cursor) run the full lead pipeline with the same spend gates as the CLI — you approve by saying **yes** in chat.
+Lets Claude (Desktop, Code, Cursor, **and Claude web**) run the full lead pipeline with the same spend gates as the CLI — you approve by saying **yes** in chat.
+
+## Claude web (claude.ai)
+
+Deployed on Railway as Streamable HTTP. In Claude:
+
+1. **Settings → Connectors → Add custom connector**
+2. Paste: `https://<your-mcp-host>.up.railway.app/mcp`
+3. Auth: none (server is authless; protect by keeping the URL private)
+4. Enable the connector in the chat
+
+Long scrapes run in the background — Claude should poll `get_job_status`.
 
 ## Tools
 
