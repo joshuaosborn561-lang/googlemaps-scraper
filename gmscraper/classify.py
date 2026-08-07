@@ -87,7 +87,39 @@ def run(
 
     if not rows:
         print("Nothing to classify.")
-        return {"done": 0, "in_icp": 0, "errors": 0}
+        stats = store.stats()
+        pending_eligible = store.conn.execute(
+            """SELECT COUNT(*) FROM businesses b
+               WHERE b.place_id NOT IN (SELECT place_id FROM verdicts)
+                 AND b.domain IS NOT NULL AND b.domain != ''
+                 AND EXISTS (
+                   SELECT 1 FROM sites s
+                   WHERE s.domain = b.domain AND s.status = 'ok'
+                 )"""
+        ).fetchone()[0]
+        already = int(stats.get("classified") or 0)
+        no_site = int(stats.get("unclassifiable_no_site") or 0)
+        if already and not pending_eligible:
+            reason = (
+                f"nothing eligible: all classifiable businesses already have verdicts "
+                f"({already:,} classified; {no_site:,} businesses have no site text)"
+            )
+        elif no_site and not include_no_site:
+            reason = (
+                f"nothing eligible: {no_site:,} businesses have no site text"
+                + (f"; {already:,} already classified" if already else "")
+            )
+        else:
+            reason = "nothing eligible: no businesses match the classify filters"
+        return {
+            "done": 0,
+            "in_icp": 0,
+            "errors": 0,
+            "reason": reason,
+            "unclassifiable_no_site": no_site,
+            "classified": already,
+            "classifiable_with_site": int(stats.get("classifiable_with_site") or 0),
+        }
 
     print(
         f"Classifying {len(rows):,} businesses with {ollama.model} "

@@ -340,12 +340,25 @@ class Store:
 
     def stats(self) -> dict[str, Any]:
         q = lambda sql: self.conn.execute(sql).fetchone()[0]  # noqa: E731
+        businesses = q("SELECT COUNT(*) FROM businesses")
+        # Eligible for classify: has a domain with successfully fetched site text.
+        eligible = q(
+            """SELECT COUNT(*) FROM businesses b
+               WHERE b.domain IS NOT NULL AND b.domain != ''
+                 AND EXISTS (
+                   SELECT 1 FROM sites s
+                   WHERE s.domain = b.domain AND s.status = 'ok'
+                 )"""
+        )
+        classified = q("SELECT COUNT(*) FROM verdicts")
+        unclassifiable = max(0, businesses - eligible)
+        pct = round((classified / eligible) * 100.0, 1) if eligible else 0.0
         return {
             "jobs_total": q("SELECT COUNT(*) FROM jobs"),
             "jobs_done": q("SELECT COUNT(*) FROM jobs WHERE status='done'"),
             "jobs_error": q("SELECT COUNT(*) FROM jobs WHERE status='error'"),
             "jobs_pending": q("SELECT COUNT(*) FROM jobs WHERE status='pending'"),
-            "businesses": q("SELECT COUNT(*) FROM businesses"),
+            "businesses": businesses,
             "with_website": q(
                 "SELECT COUNT(*) FROM businesses WHERE domain IS NOT NULL AND domain!=''"
             ),
@@ -357,7 +370,10 @@ class Store:
             "sites_pending": q("SELECT COUNT(*) FROM sites WHERE status='pending'"),
             "emails": q("SELECT COUNT(*) FROM emails"),
             "domains_with_email": q("SELECT COUNT(DISTINCT domain) FROM emails"),
-            "classified": q("SELECT COUNT(*) FROM verdicts"),
+            "classified": classified,
+            "classifiable_with_site": eligible,
+            "unclassifiable_no_site": unclassifiable,
+            "classified_pct_of_eligible": pct,
             "in_icp": q("SELECT COUNT(*) FROM verdicts WHERE in_icp=1"),
             "owners_found": q(
                 "SELECT COUNT(*) FROM owners WHERE owner_name IS NOT NULL AND owner_name!=''"

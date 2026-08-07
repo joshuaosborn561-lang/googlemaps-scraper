@@ -8,7 +8,6 @@ from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DB = ROOT / "leads.db"
 DEFAULT_ZIPS = ROOT / "data" / "us_zipcodes.csv"
 DEFAULT_CATEGORIES = ROOT / "config" / "categories.yml"
 
@@ -117,6 +116,22 @@ def _env_float(name: str, default: float) -> float:
         return float(raw) if raw else default
     except ValueError:
         return default
+
+
+# Prefer data/ so a Railway volume at /app/data keeps the DB across deploys.
+# Fall back to repo-root leads.db when that legacy path already exists.
+def _default_db() -> Path:
+    override = _env("LEADS_DB")
+    if override:
+        return Path(override)
+    data_db = ROOT / "data" / "leads.db"
+    legacy = ROOT / "leads.db"
+    if data_db.exists() or not legacy.exists():
+        return data_db
+    return legacy
+
+
+DEFAULT_DB = _default_db()
 
 
 @dataclass

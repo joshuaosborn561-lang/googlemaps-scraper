@@ -39,10 +39,10 @@ Do NOT use this for:
    - BLOCKED → stop; tell them to upgrade MAPS_PLAN
 5. Call `run_leads(approval_id=...)` with the id from step 2.
 6. On the Railway/HTTP server, runs are background jobs. Poll `get_job_status`
-   until completed/failed. Then report lead count, CSV path, and a small sample
-   via `pipeline_stats` / export info.
-7. Deliver the outcome: how many leads, where the CSV is, email/owner coverage
-   if available. Do not dump flags or stage lectures.
+   until completed/failed. Then QA with `sample_leads`, and sync with
+   `sync_to_supabase(run_label=...)` so results are queryable in SQL.
+7. Deliver the outcome: how many leads, sample quality notes, Supabase table /
+   run_label, email/owner coverage. Do not dump flags or stage lectures.
 
 ## Geography (important)
 - Explicit `zips` beats `center`+`radius_miles`, which beats `states`.
@@ -62,6 +62,8 @@ Do NOT use this for:
 | "pull emails from sites" | `enrich_sites` |
 | "find owners" | `find_owners` (Apify fallback only if they want paid web lookup) |
 | "export what we have" | `export_csv` |
+| "show me some rows" / QA | `sample_leads` (random sample; never rely on CSV path alone) |
+| "put results in Supabase / SQL" | `sync_to_supabase` (counts only; use run_label) |
 | "job status?" | `get_job_status` / `list_background_jobs` |
 | "history on the website?" | `list_remote_jobs` / `download_remote_csv` |
 | config check | `health` |

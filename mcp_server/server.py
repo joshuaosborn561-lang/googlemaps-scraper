@@ -37,7 +37,7 @@ mcp = MCPServer(
     ),
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
-    version="1.1.0",
+    version="1.3.0",
 )
 
 
@@ -326,6 +326,11 @@ def health() -> str:
     settings = _settings()
     from gmscraper.config import DEFAULT_CATEGORIES, DEFAULT_DB, DEFAULT_ZIPS
 
+    supabase_url = (os.environ.get("SUPABASE_URL") or "").strip()
+    supabase_key = bool(
+        (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+        or (os.environ.get("SUPABASE_ANON_KEY") or "").strip()
+    )
     return _json(
         {
             "ok": True,
@@ -334,6 +339,8 @@ def health() -> str:
             "llm_provider": settings.llm_provider,
             "openai_configured": bool(settings.openai_api_key),
             "apify_configured": bool(settings.apify_token),
+            "supabase_configured": bool(supabase_url and supabase_key),
+            "supabase_url": supabase_url or None,
             "db": str(DEFAULT_DB),
             "zips": str(DEFAULT_ZIPS),
             "zips_ready": Path(DEFAULT_ZIPS).exists(),
@@ -872,7 +879,11 @@ def enrich_sites(limit: int = 0, workers: int = 12) -> str:
     )
 )
 def classify_leads(icp: str = "", vertical: str = "", workers: int = 0) -> str:
-    """LLM-classify businesses against an ICP (LLM cost only; not Maps)."""
+    """LLM-classify businesses against an ICP (LLM cost only; not Maps).
+
+    Only businesses with fetched website text are eligible. When nothing is
+    left to classify, result.reason explains why (already done vs no site text).
+    """
     _ensure_repo_cwd()
     from gmscraper import classify
     from gmscraper.cli import pick_vertical
@@ -891,7 +902,14 @@ def classify_leads(icp: str = "", vertical: str = "", workers: int = 0) -> str:
         icp,
         workers=workers or default_workers(llm),
     )
-    return _json({"result": res, "stats": store.stats(), "llm_spend": llm.spend_line()})
+    out: dict[str, Any] = {
+        "result": res,
+        "stats": store.stats(),
+        "llm_spend": llm.spend_line(),
+    }
+    if res.get("reason"):
+        out["reason"] = res["reason"]
+    return _json(out)
 
 
 @mcp.tool(
@@ -976,6 +994,85 @@ def export_csv(
         radius_miles=radius_miles or None,
     )
     return _json({"leads": n, "csv": str(out), "columns": export.COLUMNS})
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Sample leads for QA",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def sample_leads(
+    limit: int = 20,
+    icp_only: bool = False,
+    with_email: bool = False,
+    city: str = "",
+    order: str = "random",
+) -> str:
+    """Return a small inline sample of lead rows for quality checks.
+
+    Prefer order=random (default) so you do not only see the first few ZIPs.
+    Caps at 100 rows. Useful subset only — not a full export.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import export
+
+    ord_norm = (order or "random").strip().lower()
+    if ord_norm not in ("random", "recent"):
+        raise ValueError("order must be 'random' or 'recent'")
+    rows = export.sample_leads(
+        _store(),
+        limit=limit,
+        icp_only=icp_only,
+        with_email=with_email,
+        city=city,
+        order=ord_norm,  # type: ignore[arg-type]
+    )
+    return _json(
+        {
+            "count": len(rows),
+            "order": ord_norm,
+            "icp_only": icp_only,
+            "with_email": with_email,
+            "rows": rows,
+        }
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Sync leads to Supabase",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def sync_to_supabase(
+    table: str = "maps_leads",
+    icp_only: bool = False,
+    with_email: bool = False,
+    truncate: bool = False,
+    run_label: str = "",
+) -> str:
+    """Batch-upsert the lead table into Supabase for SQL / downstream joins.
+
+    Credentials come from SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (or
+    SUPABASE_ANON_KEY). Upserts on (place_id, run_label). Returns counts only —
+    never echoes rows. Use run_label so multiple scrapes can coexist.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import supabase_sync
+
+    result = supabase_sync.sync_to_supabase(
+        _store(),
+        table=table or "maps_leads",
+        icp_only=icp_only,
+        with_email=with_email,
+        truncate=truncate,
+        run_label=run_label,
+    )
+    return _json(result)
 
 
 @mcp.tool(

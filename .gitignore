@@ -16,3 +16,4 @@ venv/
 .pytest_cache/
 railway-ui/node_modules/
 railway-ui/dist/
+data/backups/
