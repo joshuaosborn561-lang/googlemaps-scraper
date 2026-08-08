@@ -59,8 +59,8 @@ CREATE TABLE IF NOT EXISTS businesses (
 );
 CREATE INDEX IF NOT EXISTS idx_biz_domain ON businesses(domain);
 CREATE INDEX IF NOT EXISTS idx_biz_state  ON businesses(state);
-CREATE INDEX IF NOT EXISTS idx_biz_source ON businesses(source);
-CREATE INDEX IF NOT EXISTS idx_biz_external_id ON businesses(external_id);
+-- Indexes on source/external_id are created in Store._migrate so older DBs
+-- that predate those columns can ALTER TABLE first.
 
 -- One row per domain, not per business: franchises and multi-location shops
 -- share a website and there is no reason to fetch or read it twice.
