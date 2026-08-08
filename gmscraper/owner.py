@@ -93,7 +93,22 @@ def run(
     limit: int | None = None,
     icp_only: bool = True,
     max_evidence_chars: int | None = None,
+    extract_team: bool = True,
 ) -> dict[str, int]:
+    # Free signal: pull person+title pairs from team/about pages into contacts
+    # (and fill empty owners) before the single-owner LLM pass.
+    team_counts: dict[str, int] = {}
+    if extract_team:
+        from . import team_contacts
+
+        team_counts = team_contacts.run(
+            store,
+            limit=limit,
+            workers=max(1, workers),
+            icp_only=icp_only,
+            use_llm=False,
+        )
+
     where = "b.place_id NOT IN (SELECT place_id FROM owners)"
     if icp_only:
         where += (
@@ -108,7 +123,13 @@ def run(
 
     if not rows:
         print("Nothing to look up. (Run `classify` first, or pass --all.)")
-        return {"done": 0, "found": 0, "via_web": 0}
+        return {
+            "done": 0,
+            "found": 0,
+            "via_web": 0,
+            "team_contacts": team_counts.get("contacts", 0),
+            "team_owners": team_counts.get("owners_updated", 0),
+        }
 
     use_web = bool(owj and getattr(owj, "enabled", False))
     label = type(owj).__name__ if use_web else "off"
@@ -174,4 +195,6 @@ def run(
     if use_web and owj.request_count:
         spend = owj.request_count * getattr(owj, "cost_per_search", 0.0)
         print(f"  web fallback: {owj.request_count:,} searches, ~${spend:,.2f}")
+    counts["team_contacts"] = team_counts.get("contacts", 0)
+    counts["team_owners"] = team_counts.get("owners_updated", 0)
     return counts

@@ -223,6 +223,16 @@ class Settings:
         default_factory=lambda: int(_env_float("MAPS_QUOTA_RESET_DAY", 1))
     )
 
+    # Contact enrichment waterfall (getleads → AI Ark → LeadMagic → FullEnrich)
+    getleads_api_key: str = field(default_factory=lambda: _env("GETLEADS_API_KEY"))
+    ai_ark_api_key: str = field(
+        default_factory=lambda: _env("AI_ARK_API_KEY") or _env("AIARK_API_KEY")
+    )
+    leadmagic_api_key: str = field(
+        default_factory=lambda: _env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY")
+    )
+    fullenrich_api_key: str = field(default_factory=lambda: _env("FULLENRICH_API_KEY"))
+
     @property
     def plan(self) -> Plan:
         return PLANS.get(self.maps_plan, PLANS["ultra"])

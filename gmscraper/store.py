@@ -89,11 +89,44 @@ CREATE TABLE IF NOT EXISTS owners (
     place_id     TEXT PRIMARY KEY,
     owner_name   TEXT,
     owner_title  TEXT,
-    source       TEXT,           -- website|websearch|none
+    source       TEXT,           -- website|websearch|team_page|none
     confidence   REAL,
     model        TEXT,
     updated_at   TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Multiple people per company (team-page crawl, waterfall DMs, etc.).
+CREATE TABLE IF NOT EXISTS contacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    place_id    TEXT,
+    domain      TEXT,
+    name        TEXT NOT NULL,
+    title       TEXT,
+    email       TEXT,
+    source      TEXT,            -- team_page|getleads|ai_ark|leadmagic|fullenrich
+    source_tier TEXT,
+    confidence  REAL,
+    source_url  TEXT,
+    dedupe_key  TEXT NOT NULL,
+    updated_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_domain ON contacts(domain);
+CREATE INDEX IF NOT EXISTS idx_contacts_place ON contacts(place_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_source ON contacts(source);
+
+-- Per-page website text tagged by page_type (home/about/team/…).
+CREATE TABLE IF NOT EXISTS site_pages (
+    domain      TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    page_type   TEXT NOT NULL,   -- home|about|team|other
+    text        TEXT,
+    n_chars     INTEGER DEFAULT 0,
+    fetched_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (domain, url)
+);
+CREATE INDEX IF NOT EXISTS idx_site_pages_domain ON site_pages(domain);
+CREATE INDEX IF NOT EXISTS idx_site_pages_type ON site_pages(page_type);
 
 -- Keyed by domain like `sites`, so multi-location businesses share them.
 CREATE TABLE IF NOT EXISTS emails (
@@ -158,6 +191,40 @@ class Store:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_biz_external_id ON businesses(external_id)"
+        )
+        # Ensure tables added after the first schema ship exist on old volumes.
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS contacts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                place_id    TEXT,
+                domain      TEXT,
+                name        TEXT NOT NULL,
+                title       TEXT,
+                email       TEXT,
+                source      TEXT,
+                source_tier TEXT,
+                confidence  REAL,
+                source_url  TEXT,
+                dedupe_key  TEXT NOT NULL,
+                updated_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (dedupe_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_contacts_domain ON contacts(domain);
+            CREATE INDEX IF NOT EXISTS idx_contacts_place ON contacts(place_id);
+            CREATE INDEX IF NOT EXISTS idx_contacts_source ON contacts(source);
+            CREATE TABLE IF NOT EXISTS site_pages (
+                domain      TEXT NOT NULL,
+                url         TEXT NOT NULL,
+                page_type   TEXT NOT NULL,
+                text        TEXT,
+                n_chars     INTEGER DEFAULT 0,
+                fetched_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (domain, url)
+            );
+            CREATE INDEX IF NOT EXISTS idx_site_pages_domain ON site_pages(domain);
+            CREATE INDEX IF NOT EXISTS idx_site_pages_type ON site_pages(page_type);
+            """
         )
 
     # ---------------------------------------------------------------- jobs
@@ -373,21 +440,104 @@ class Store:
         domain: str,
         status: str,
         text: str = "",
-        pages: Sequence[str] = (),
+        pages: Sequence[Any] = (),
         error: str | None = None,
     ) -> None:
+        # pages may be URL strings or {url, page_type} dicts.
+        page_urls: list[str] = []
+        for p in pages:
+            if isinstance(p, dict):
+                page_urls.append(str(p.get("url") or ""))
+            else:
+                page_urls.append(str(p))
+        page_urls = [u for u in page_urls if u]
         with self.conn as c:
             c.execute(
                 """UPDATE sites SET status=?, text=?, pages=?, n_chars=?, error=?,
                    fetched_at=datetime('now') WHERE domain=?""",
-                (status, text, json.dumps(list(pages)), len(text), error, domain),
+                (status, text, json.dumps(page_urls), len(text), error, domain),
             )
+
+    def save_site_pages(
+        self,
+        domain: str,
+        pages: Sequence[dict[str, Any]],
+    ) -> int:
+        """Upsert per-page text tagged by page_type."""
+        rows = []
+        for p in pages:
+            url = (p.get("url") or "").strip()
+            if not url:
+                continue
+            text = p.get("text") or ""
+            rows.append(
+                (
+                    domain,
+                    url,
+                    (p.get("page_type") or "other").strip() or "other",
+                    text,
+                    len(text),
+                )
+            )
+        if not rows:
+            return 0
+        with self.conn as c:
+            c.executemany(
+                """INSERT INTO site_pages (domain, url, page_type, text, n_chars, fetched_at)
+                   VALUES (?,?,?,?,?,datetime('now'))
+                   ON CONFLICT(domain, url) DO UPDATE SET
+                     page_type=excluded.page_type, text=excluded.text,
+                     n_chars=excluded.n_chars, fetched_at=excluded.fetched_at""",
+                rows,
+            )
+        return len(rows)
 
     def get_site_text(self, domain: str) -> str | None:
         row = self.conn.execute(
             "SELECT text FROM sites WHERE domain=? AND status='ok'", (domain,)
         ).fetchone()
         return row["text"] if row else None
+
+    def get_site_pages(
+        self,
+        domain: str,
+        page_types: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if page_types:
+            placeholders = ",".join("?" * len(page_types))
+            sql = (
+                f"SELECT domain, url, page_type, text, n_chars FROM site_pages "
+                f"WHERE domain=? AND page_type IN ({placeholders}) ORDER BY page_type, url"
+            )
+            args: list[Any] = [domain, *page_types]
+        else:
+            sql = (
+                "SELECT domain, url, page_type, text, n_chars FROM site_pages "
+                "WHERE domain=? ORDER BY page_type, url"
+            )
+            args = [domain]
+        return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def domains_with_ok_sites(self, limit: int | None = None) -> list[str]:
+        sql = "SELECT domain FROM sites WHERE status='ok' ORDER BY domain"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        return [r["domain"] for r in self.conn.execute(sql)]
+
+    def domains_needing_team_crawl(self, limit: int | None = None) -> list[str]:
+        """OK sites that have no team/about page rows yet."""
+        sql = """
+            SELECT s.domain FROM sites s
+            WHERE s.status = 'ok'
+              AND NOT EXISTS (
+                SELECT 1 FROM site_pages p
+                WHERE p.domain = s.domain AND p.page_type IN ('team', 'about')
+              )
+            ORDER BY s.domain
+        """
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        return [r["domain"] for r in self.conn.execute(sql)]
 
     # --------------------------------------------------------------- emails
 
@@ -456,6 +606,98 @@ class Store:
                      model=excluded.model, updated_at=excluded.updated_at""",
                 (place_id, name, title, source, confidence, model),
             )
+
+    @staticmethod
+    def _contact_dedupe_key(
+        domain: str, name: str, title: str = "", source_url: str = ""
+    ) -> str:
+        return "|".join(
+            [
+                (domain or "").strip().lower(),
+                (name or "").strip().lower(),
+                (title or "").strip().lower(),
+                (source_url or "").strip().lower(),
+            ]
+        )
+
+    def save_contact(
+        self,
+        *,
+        name: str,
+        domain: str = "",
+        place_id: str = "",
+        title: str = "",
+        email: str = "",
+        source: str = "team_page",
+        source_tier: str = "",
+        confidence: float = 0.0,
+        source_url: str = "",
+    ) -> bool:
+        """Upsert one contact. Returns True when a new row was inserted."""
+        name = (name or "").strip()
+        if not name:
+            return False
+        domain = (domain or "").strip().lower()
+        title = (title or "").strip()
+        email = (email or "").strip().lower()
+        source_url = (source_url or "").strip()
+        key = self._contact_dedupe_key(domain, name, title, source_url)
+        with self.conn as c:
+            cur = c.execute(
+                """INSERT INTO contacts
+                   (place_id, domain, name, title, email, source, source_tier,
+                    confidence, source_url, dedupe_key, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                   ON CONFLICT(dedupe_key) DO UPDATE SET
+                     place_id=COALESCE(NULLIF(excluded.place_id,''), contacts.place_id),
+                     email=COALESCE(NULLIF(excluded.email,''), contacts.email),
+                     source=excluded.source,
+                     source_tier=COALESCE(NULLIF(excluded.source_tier,''), contacts.source_tier),
+                     confidence=MAX(contacts.confidence, excluded.confidence),
+                     updated_at=excluded.updated_at""",
+                (
+                    place_id or None,
+                    domain or None,
+                    name,
+                    title or None,
+                    email or None,
+                    source,
+                    source_tier or source,
+                    float(confidence or 0.0),
+                    source_url or None,
+                    key,
+                ),
+            )
+            return bool(cur.rowcount)
+
+    def save_contacts(self, rows: Iterable[dict[str, Any]]) -> int:
+        n = 0
+        for r in rows:
+            name = (r.get("name") or "").strip()
+            if not name:
+                continue
+            if self.save_contact(
+                name=name,
+                domain=r.get("domain") or "",
+                place_id=r.get("place_id") or "",
+                title=r.get("title") or "",
+                email=r.get("email") or "",
+                source=r.get("source") or "team_page",
+                source_tier=r.get("source_tier") or "",
+                confidence=float(r.get("confidence") or 0.0),
+                source_url=r.get("source_url") or "",
+            ):
+                n += 1
+        return n
+
+    def contacts_for_domain(self, domain: str) -> list[dict[str, Any]]:
+        return [
+            dict(r)
+            for r in self.conn.execute(
+                "SELECT * FROM contacts WHERE domain=? ORDER BY confidence DESC, name",
+                ((domain or "").strip().lower(),),
+            )
+        ]
 
     # ----------------------------------------------------------------- meta
 
@@ -538,6 +780,16 @@ class Store:
             "in_icp": q("SELECT COUNT(*) FROM verdicts WHERE in_icp=1"),
             "owners_found": q(
                 "SELECT COUNT(*) FROM owners WHERE owner_name IS NOT NULL AND owner_name!=''"
+            ),
+            "contacts_found": q(
+                "SELECT COUNT(*) FROM contacts WHERE name IS NOT NULL AND name!=''"
+            ),
+            "contacts_team_page": q(
+                "SELECT COUNT(*) FROM contacts WHERE source='team_page'"
+            ),
+            "site_pages": q("SELECT COUNT(*) FROM site_pages"),
+            "site_pages_team": q(
+                "SELECT COUNT(*) FROM site_pages WHERE page_type='team'"
             ),
             "needs_domain_resolve": q(
                 """SELECT COUNT(*) FROM businesses

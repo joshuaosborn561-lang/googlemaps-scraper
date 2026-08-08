@@ -860,7 +860,11 @@ def list_background_jobs(limit: int = 20) -> str:
     )
 )
 def enrich_sites(limit: int = 0, workers: int = 12) -> str:
-    """Fetch website text/emails for pending domains (free, no Maps spend)."""
+    """Fetch website text/emails for pending domains (free, no Maps spend).
+
+    Shallow same-domain crawl: homepage + up to 3 about/team pages
+    (/about, /team, /leadership, …). Per-page text is stored with page_type.
+    """
     _ensure_repo_cwd()
     from gmscraper import enrich_site
 
@@ -869,6 +873,110 @@ def enrich_sites(limit: int = 0, workers: int = 12) -> str:
     domains = store.pending_sites(limit=limit or None)
     res = enrich_site.run(store, domains, workers=workers)
     return _json({"result": res, "stats": store.stats()})
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Crawl team/about pages",
+        readOnlyHint=False,
+        openWorldHint=True,
+    )
+)
+def crawl_team_pages(
+    limit: int = 0,
+    workers: int = 12,
+    force: bool = False,
+    background: bool = True,
+) -> str:
+    """Re-crawl about/team pages for domains already fetched (free).
+
+    Use after a large enrich_sites run (e.g. ~8k sites) so team-page text is
+    tagged by page_type. force=true re-crawls even if team pages exist.
+    On HTTP transport defaults to a background job — poll get_job_status.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import enrich_site
+
+    store = _store()
+
+    def _run() -> dict[str, Any]:
+        res = enrich_site.crawl_team_pages(
+            store,
+            limit=limit or None,
+            workers=workers,
+            force=force,
+        )
+        return {"result": res, "stats": store.stats()}
+
+    if background and _http_mode():
+        from mcp_server.jobs import start_job
+
+        job = start_job("crawl_team_pages", _run, meta={"limit": limit, "force": force})
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Extract team-page contacts",
+        readOnlyHint=False,
+        openWorldHint=False,
+    )
+)
+def extract_team_contacts(
+    limit: int = 0,
+    workers: int = 8,
+    icp_only: bool = False,
+    use_llm: bool = False,
+    background: bool = True,
+) -> str:
+    """Parse person+title pairs from team/about page text into contacts.
+
+    Writes to local contacts (source='team_page'). Also fills empty owners.
+    Heuristic by default (free); use_llm=true spends LLM tokens.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import team_contacts
+
+    store = _store()
+
+    def _run() -> dict[str, Any]:
+        llm = _llm() if use_llm else None
+        res = team_contacts.run(
+            store,
+            limit=limit or None,
+            workers=workers,
+            icp_only=icp_only,
+            use_llm=use_llm,
+            llm=llm,
+        )
+        out: dict[str, Any] = {"result": res, "stats": store.stats()}
+        if llm:
+            out["llm_spend"] = llm.spend_line()
+        return out
+
+    if background and _http_mode():
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "extract_team_contacts",
+            _run,
+            meta={"limit": limit, "icp_only": icp_only, "use_llm": use_llm},
+        )
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
 
 
 @mcp.tool(
@@ -1076,9 +1184,11 @@ def find_owners(
     approval_id: str = "",
     workers: int = 0,
 ) -> str:
-    """Extract owner names from site text. Website-only is free; Apify fallback is paid.
+    """Extract owners + team contacts from site text.
 
-    If use_paid_fallback=true, pass approval_id from plan_leads/estimate_cost. No auth.
+    First pulls person+title pairs from team/about pages into `contacts`
+    (source=team_page). Then LLM single-owner extraction. Website-only is free;
+    Apify fallback is paid (needs approval_id).
     """
     _ensure_repo_cwd()
     from gmscraper import owner
@@ -1100,6 +1210,143 @@ def find_owners(
     llm = _llm()
     res = owner.run(store, llm, backend, workers=workers or default_workers(llm))
     return _json({"result": res, "stats": store.stats(), "llm_spend": llm.spend_line()})
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="FullEnrich find email",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def fullenrich_find_email(
+    first_name: str,
+    last_name: str,
+    domain: str,
+    company_name: str = "",
+) -> str:
+    """FullEnrich email lookup (tier 4). 1 credit on work-email hit, 0 on miss.
+
+    Call only after getleads, AI Ark (people), and LeadMagic miss — or use
+    enrich_waterfall which enforces that order. Requires FULLENRICH_API_KEY.
+    """
+    _ensure_repo_cwd()
+    from gmscraper.vendors.fullenrich import FullEnrichClient
+
+    client = FullEnrichClient()
+    if not client.enabled:
+        raise ValueError("FULLENRICH_API_KEY is not set on this MCP service.")
+    hit = client.find_email(first_name, last_name, domain, company_name or domain)
+    return _json(
+        {
+            "email": hit.email if hit else None,
+            "status": hit.status if hit else "not_found",
+            "source_tier": "fullenrich",
+            "credits_used": client.credits_used,
+        }
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="FullEnrich find email (bulk)",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def fullenrich_find_email_bulk(rows: str) -> str:
+    """Bulk FullEnrich email lookup. `rows` = JSON list of
+    {first_name, last_name, domain, company_name?}. Max 100.
+
+    Returns counts + per-row email/status only (no raw vendor payloads).
+    """
+    _ensure_repo_cwd()
+    from gmscraper.vendors.fullenrich import FullEnrichClient
+
+    client = FullEnrichClient()
+    if not client.enabled:
+        raise ValueError("FULLENRICH_API_KEY is not set on this MCP service.")
+    try:
+        parsed = json.loads(rows) if isinstance(rows, str) else rows
+    except json.JSONDecodeError as exc:
+        raise ValueError("rows must be a JSON list") from exc
+    if not isinstance(parsed, list):
+        raise ValueError("rows must be a JSON list")
+    hits = client.find_email_bulk(
+        [r for r in parsed if isinstance(r, dict)][:100]
+    )
+    results = [
+        {
+            "email": h.email if h else None,
+            "status": h.status if h else "not_found",
+            "source_tier": "fullenrich" if h else None,
+        }
+        for h in hits
+    ]
+    return _json(
+        {
+            "rows": len(results),
+            "found": sum(1 for r in results if r["email"]),
+            "credits_used": client.credits_used,
+            "results": results,
+        }
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Enrich waterfall → Supabase gc.*",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def enrich_waterfall(
+    rows: str,
+    need: str = "both",
+    background: bool = True,
+) -> str:
+    """Walk getleads → AI Ark → LeadMagic → FullEnrich; write to gc.* tables.
+
+    `rows` = JSON list of {domain, first_name?, last_name?, company_name?, ...}.
+    need = 'email' | 'dm' | 'both'.
+
+    Stops at first success per field. Records source_tier for hit-rate math.
+    Results go to Supabase gc.companies / gc.contacts — response is counts only.
+    AI Ark is people discovery only (never email reverse lookup).
+    """
+    _ensure_repo_cwd()
+    from gmscraper import waterfall as wf
+
+    need_norm = (need or "both").strip().lower()
+    if need_norm not in ("email", "dm", "both"):
+        raise ValueError("need must be 'email', 'dm', or 'both'")
+
+    store = _store()
+
+    def _run() -> dict[str, Any]:
+        return wf.enrich_waterfall(
+            rows, need=need_norm, store=store, write_supabase=True  # type: ignore[arg-type]
+        )
+
+    if background and _http_mode() and len(rows or "") > 2000:
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "enrich_waterfall",
+            _run,
+            meta={"need": need_norm, "rows_chars": len(rows or "")},
+        )
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
 
 
 @mcp.tool(

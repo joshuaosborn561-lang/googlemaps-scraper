@@ -1,9 +1,8 @@
 """Stage 3: turn a business website into plain text with html2text.
 
-Fetches the homepage, follows at most a few in-domain links that look like
-about/team/contact pages, and flattens the HTML to markdown-ish text the
-local model can read.  One row per domain, so a franchise with 30 locations
-is fetched once.
+Fetches the homepage, then a shallow same-domain crawl of about/team pages
+(max 3, one level deep). Per-page text is stored tagged by page_type; the
+combined blob on `sites.text` remains for classify/owner compatibility.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Sequence
+from typing import Any, Sequence
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
@@ -28,18 +27,26 @@ UA = (
     "+https://github.com/joshuaosborn561-lang/googlemaps-scraper)"
 )
 
-# Link text / href fragments worth a second request.
+# Explicit team/about paths the user asked for (plus close variants).
+TEAM_ABOUT_PATH = re.compile(
+    r"(?:^|/)(?:"
+    r"about(?:-us)?|team|our-team|leadership|management|staff|people|who-we-are"
+    r")(?:/|$)",
+    re.I,
+)
+# Broader interesting links kept for email harvest / classify context.
 INTERESTING = re.compile(
     r"(about|our-?story|our-?team|team|staff|leadership|management|meet|"
-    r"who-?we-?are|contact|owner|founder|history|bio)",
+    r"who-?we-?are|contact|owner|founder|history|bio|people)",
     re.I,
 )
 HREF = re.compile(r'href=["\']([^"\'#]+)["\']', re.I)
 WS = re.compile(r"\n{3,}")
 
-MAX_PAGES = 4
+MAX_TEAM_PAGES = 3          # about/team pages beyond homepage
 MAX_CHARS = 12_000
 MAX_BYTES = 2_000_000
+MAX_PAGE_CHARS = 8_000
 
 
 def _converter() -> html2text.HTML2Text:
@@ -50,6 +57,23 @@ def _converter() -> html2text.HTML2Text:
     h.body_width = 0
     h.skip_internal_links = True
     return h
+
+
+def classify_page_type(url: str) -> str:
+    """Tag a URL as home / team / about / other."""
+    path = (urlsplit(url).path or "/").rstrip("/") or "/"
+    if path == "/":
+        return "home"
+    low = path.lower()
+    if re.search(
+        r"(?:^|/)(team|our-team|leadership|management|staff|people)(?:/|$)", low
+    ):
+        return "team"
+    if re.search(r"(?:^|/)(about(?:-us)?|who-we-are|our-story)(?:/|$)", low):
+        return "about"
+    if INTERESTING.search(low):
+        return "other"
+    return "other"
 
 
 class RobotsCache:
@@ -110,24 +134,35 @@ def _get(session: requests.Session, url: str, timeout: int) -> str | None:
             pass
 
 
-def _sub_pages(html: str, base: str) -> list[str]:
-    """In-domain about/team/contact URLs, best few first."""
+def _team_about_links(html: str, base: str) -> list[str]:
+    """Same-domain about/team URLs, max MAX_TEAM_PAGES, one level deep."""
     host = urlsplit(base).netloc
-    seen, out = set(), []
+    seen, preferred, other = set(), [], []
     for href in HREF.findall(html):
         if href.startswith(("mailto:", "tel:", "javascript:")):
             continue
         url = urljoin(base, href)
         if urlsplit(url).netloc != host:
             continue
-        path = urlsplit(url).path
-        if not path or path == "/" or not INTERESTING.search(path):
+        path = urlsplit(url).path or ""
+        if not path or path == "/" or len(path) > 120:
             continue
-        if url in seen or len(path) > 120:
+        if url in seen:
             continue
         seen.add(url)
-        out.append(url)
-    return out[: MAX_PAGES - 1]
+        if TEAM_ABOUT_PATH.search(path):
+            preferred.append(url)
+        elif INTERESTING.search(path):
+            other.append(url)
+    # Prefer explicit team/about paths; fill remaining slots with other interesting.
+    out = preferred[:MAX_TEAM_PAGES]
+    if len(out) < MAX_TEAM_PAGES:
+        for u in other:
+            if u not in out:
+                out.append(u)
+            if len(out) >= MAX_TEAM_PAGES:
+                break
+    return out
 
 
 def fetch_domain(
@@ -136,17 +171,17 @@ def fetch_domain(
     robots: RobotsCache,
     timeout: int = 15,
     delay: float = 0.0,
-) -> tuple[str, str, list[str], set[str], str | None]:
-    """Return (status, text, pages_fetched, emails, error).
+) -> tuple[str, str, list[dict[str, Any]], set[str], str | None]:
+    """Return (status, combined_text, page_records, emails, error).
 
-    Emails are harvested from the raw HTML before html2text runs -- the
-    converter drops `mailto:` hrefs, which is exactly where contact addresses
-    usually live.
+    page_records: [{url, page_type, text}, ...]
     """
     conv = _converter()
-    pages, chunks = [], []
+    page_records: list[dict[str, Any]] = []
+    chunks: list[str] = []
     found: set[str] = set()
     home_html = None
+    home_url = ""
 
     for scheme in ("https", "http"):
         url = f"{scheme}://{domain}/"
@@ -154,37 +189,74 @@ def fetch_domain(
             return "skipped", "", [], set(), "robots.txt disallows /"
         home_html = _get(session, url, timeout)
         if home_html:
-            pages.append(url)
-            chunks.append(conv.handle(home_html))
+            home_url = url
+            text = conv.handle(home_html)
+            page_records.append(
+                {"url": url, "page_type": "home", "text": text[:MAX_PAGE_CHARS]}
+            )
+            chunks.append(text)
             found |= email_lib.harvest(home_html)
             break
 
     if not home_html:
         return "error", "", [], set(), "homepage unreachable"
 
-    # Keep visiting contact-ish pages even once we have enough text: the
-    # contact page is where the email is, and it is often the last one.
-    for sub in _sub_pages(home_html, pages[0]):
+    for sub in _team_about_links(home_html, home_url):
         enough_text = sum(len(c) for c in chunks) >= MAX_CHARS
-        if enough_text and found:
-            break
+        if enough_text and found and len(page_records) > 1:
+            # Still prefer fetching team pages even with enough text / email,
+            # until we hit the team-page cap (already enforced by link list).
+            pass
         if not robots.allows(sub):
             continue
         if delay:
             time.sleep(delay)
         html = _get(session, sub, timeout)
-        if html:
-            pages.append(sub)
-            found |= email_lib.harvest(html)
-            if not enough_text:
-                chunks.append(conv.handle(html))
+        if not html:
+            continue
+        text = conv.handle(html)
+        page_type = classify_page_type(sub)
+        page_records.append(
+            {"url": sub, "page_type": page_type, "text": text[:MAX_PAGE_CHARS]}
+        )
+        found |= email_lib.harvest(html)
+        if not enough_text:
+            chunks.append(text)
 
-    text = WS.sub("\n\n", "\n\n".join(chunks)).strip()
+    # Tag combined text with page_type markers so downstream extractors know
+    # which section came from a team page even without site_pages rows.
+    tagged_chunks = []
+    for rec in page_records:
+        body = (rec.get("text") or "").strip()
+        if not body:
+            continue
+        tagged_chunks.append(f"[page_type={rec['page_type']} url={rec['url']}]\n{body}")
+    text = WS.sub("\n\n", "\n\n".join(tagged_chunks or chunks)).strip()
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
     if not text:
-        return "error", "", pages, found, "no text extracted"
-    return "ok", text, pages, found, None
+        return "error", "", page_records, found, "no text extracted"
+    return "ok", text, page_records, found, None
+
+
+def fetch_team_pages_only(
+    domain: str,
+    session: requests.Session,
+    robots: RobotsCache,
+    timeout: int = 15,
+    delay: float = 0.0,
+) -> tuple[str, list[dict[str, Any]], set[str], str | None]:
+    """Re-crawl homepage → team/about links for an already-fetched domain."""
+    status, _text, pages, emails, err = fetch_domain(
+        domain, session, robots, timeout=timeout, delay=delay
+    )
+    # Keep home + team/about; drop generic "other" for backfill focus.
+    kept = [
+        p for p in pages
+        if p.get("page_type") in ("home", "team", "about")
+        or classify_page_type(p.get("url") or "") in ("team", "about")
+    ]
+    return status, kept or pages, emails, err
 
 
 def run(
@@ -201,7 +273,7 @@ def run(
 
     print(f"Fetching {len(domains):,} domains with {workers} workers")
     robots = RobotsCache(respect_robots)
-    counts = {"ok": 0, "error": 0, "skipped": 0, "emails": 0}
+    counts = {"ok": 0, "error": 0, "skipped": 0, "emails": 0, "pages": 0}
     lock = threading.Lock()
     done = 0
 
@@ -220,11 +292,14 @@ def run(
         finally:
             session.close()
         store.save_site(domain, status, text, pages, err)
+        if pages:
+            store.save_site_pages(domain, pages)
         if found:
             store.save_emails(domain, found, source="website")
         with lock:
             counts[status] = counts.get(status, 0) + 1
             counts["emails"] += int(bool(found))
+            counts["pages"] += len(pages)
             done += 1
             if done % 25 == 0 or done == len(domains):
                 sys.stderr.write(
@@ -243,5 +318,84 @@ def run(
             print("\nInterrupted -- re-run to continue.")
             for f in futures:
                 f.cancel()
+    sys.stderr.write("\n")
+    return counts
+
+
+def crawl_team_pages(
+    store: Store,
+    domains: Sequence[str] | None = None,
+    workers: int = 12,
+    timeout: int = 15,
+    respect_robots: bool = True,
+    delay: float = 0.0,
+    limit: int | None = None,
+    force: bool = False,
+) -> dict[str, int]:
+    """Backfill team/about pages for domains already in sites (status=ok)."""
+    if domains is None:
+        domains = (
+            store.domains_with_ok_sites(limit=limit)
+            if force
+            else store.domains_needing_team_crawl(limit=limit)
+        )
+    elif limit:
+        domains = list(domains)[: int(limit)]
+    else:
+        domains = list(domains)
+
+    if not domains:
+        return {"ok": 0, "error": 0, "skipped": 0, "pages": 0, "domains": 0}
+
+    print(f"Team-page crawl for {len(domains):,} domains ({workers} workers)")
+    robots = RobotsCache(respect_robots)
+    counts = {"ok": 0, "error": 0, "skipped": 0, "pages": 0, "domains": len(domains)}
+    lock = threading.Lock()
+    done = 0
+
+    def work(domain: str) -> None:
+        nonlocal done
+        session = requests.Session()
+        session.headers.update({"User-Agent": UA, "Accept": "text/html"})
+        try:
+            status, pages, found, err = fetch_team_pages_only(
+                domain, session, robots, timeout, delay
+            )
+        except Exception as exc:  # noqa: BLE001
+            status, pages, found, err = (
+                "error", [], set(), f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            session.close()
+        if pages:
+            store.save_site_pages(domain, pages)
+            # Refresh combined site text with page_type tags when crawl ok.
+            if status == "ok":
+                tagged = []
+                for rec in pages:
+                    body = (rec.get("text") or "").strip()
+                    if body:
+                        tagged.append(
+                            f"[page_type={rec['page_type']} url={rec['url']}]\n{body}"
+                        )
+                combined = WS.sub("\n\n", "\n\n".join(tagged)).strip()[:MAX_CHARS]
+                store.save_site(domain, "ok", combined, pages, None)
+        if found:
+            store.save_emails(domain, found, source="website")
+        with lock:
+            counts[status] = counts.get(status, 0) + 1
+            counts["pages"] += len(pages)
+            done += 1
+            if done % 25 == 0 or done == len(domains):
+                sys.stderr.write(
+                    f"\r  team-crawl {done:,}/{len(domains):,} | "
+                    f"ok={counts['ok']:,} pages={counts['pages']:,}   "
+                )
+                sys.stderr.flush()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(work, d) for d in domains]
+        for f in as_completed(futures):
+            f.exception()
     sys.stderr.write("\n")
     return counts

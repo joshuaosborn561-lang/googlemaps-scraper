@@ -59,8 +59,11 @@ Do NOT use this for:
 | "what verticals exist?" | `list_categories` |
 | "is the API working?" | `probe_maps` (1 paid Maps request) |
 | "re-run classify only" / tighten ICP | `classify_leads` (no re-scrape) |
-| "pull emails from sites" | `enrich_sites` |
-| "find owners" | `find_owners` (Apify fallback only if they want paid web lookup) |
+| "pull emails from sites" | `enrich_sites` (homepage + up to 3 about/team pages) |
+| "crawl team pages on already-fetched sites" | `crawl_team_pages` then `extract_team_contacts` |
+| "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
+| "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (getleads→AI Ark→LeadMagic→FullEnrich) |
+| "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (tier 4; prefer waterfall) |
 | "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |
 | "browse / page through leads" | `query_leads` (page_size max 50) |
 | "how many leads / breakdown" | `leads_summary` (counts only) |

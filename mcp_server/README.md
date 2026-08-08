@@ -40,9 +40,13 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `probe_maps` | 1 Maps req | Schema check |
 | `run_leads` | **yes** | Full pipeline; needs `approval_id` from plan |
 | `scrape_maps` | **yes** | Scrape stage only |
-| `enrich_sites` | no | Website fetch |
+| `enrich_sites` | no | Website fetch (+ about/team pages, page_type tagged) |
+| `crawl_team_pages` | no | Backfill team/about crawl on already-fetched sites |
+| `extract_team_contacts` | optional LLM | Person+title → local `contacts` |
 | `classify_leads` | LLM | ICP filter |
-| `find_owners` | optional Apify | Paid fallback needs approval |
+| `find_owners` | optional Apify | Team contacts + owner; paid fallback needs approval |
+| `enrich_waterfall` | paid vendors | getleads→AI Ark→LeadMagic→FullEnrich → `gc.*` |
+| `fullenrich_find_email` | FullEnrich | Tier-4 email only |
 | `export_csv` | no | CSV text in response (`total_matching`, `capped_at`, `csv`); optional `out_path` |
 | `query_leads` | no | Paginated rows (`page` / `page_size` max 50) |
 | `leads_summary` | no | Counts only (ICP / email / city / category) |
