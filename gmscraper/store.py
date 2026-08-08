@@ -52,10 +52,15 @@ CREATE TABLE IF NOT EXISTS businesses (
     source_zip      TEXT,
     source_category TEXT,
     raw_json        TEXT,
-    first_seen      TEXT DEFAULT CURRENT_TIMESTAMP
+    first_seen      TEXT DEFAULT CURRENT_TIMESTAMP,
+    source          TEXT DEFAULT 'maps',
+    external_id     TEXT,
+    permit_count    INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_biz_domain ON businesses(domain);
 CREATE INDEX IF NOT EXISTS idx_biz_state  ON businesses(state);
+CREATE INDEX IF NOT EXISTS idx_biz_source ON businesses(source);
+CREATE INDEX IF NOT EXISTS idx_biz_external_id ON businesses(external_id);
 
 -- One row per domain, not per business: franchises and multi-location shops
 -- share a website and there is no reason to fetch or read it twice.
@@ -107,12 +112,20 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+_BIZ_EXTRA_COLS = (
+    ("source", "TEXT DEFAULT 'maps'"),
+    ("external_id", "TEXT"),
+    ("permit_count", "INTEGER"),
+)
+
+
 class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
         self._local = threading.local()
         with self.conn as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -126,6 +139,26 @@ class Store:
             conn.execute("PRAGMA busy_timeout=60000")
             self._local.conn = conn
         return conn
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Add columns introduced after the first schema shipped."""
+        existing = {
+            r[1] for r in conn.execute("PRAGMA table_info(businesses)").fetchall()
+        }
+        for name, decl in _BIZ_EXTRA_COLS:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE businesses ADD COLUMN {name} {decl}")
+        # Backfill legacy Maps rows so source filters stay interpretable.
+        conn.execute(
+            "UPDATE businesses SET source = 'maps' "
+            "WHERE source IS NULL OR source = ''"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_biz_source ON businesses(source)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_biz_external_id ON businesses(external_id)"
+        )
 
     # ---------------------------------------------------------------- jobs
 
@@ -179,6 +212,9 @@ class Store:
                 r.get("source_zip"),
                 r.get("source_category"),
                 json.dumps(r.get("raw") or {}, ensure_ascii=False),
+                r.get("source") or "maps",
+                r.get("external_id"),
+                r.get("permit_count"),
             )
             for r in rows
             if r.get("place_id")
@@ -190,17 +226,130 @@ class Store:
                 """INSERT OR IGNORE INTO businesses
                    (place_id, name, address, city, state, zip, phone, website,
                     domain, rating, reviews, main_category, types, latitude,
-                    longitude, maps_url, source_zip, source_category, raw_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    longitude, maps_url, source_zip, source_category, raw_json,
+                    source, external_id, permit_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 payload,
             )
             return cur.rowcount or 0
+
+    def get_business(self, place_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM businesses WHERE place_id = ?", (place_id,)
+        ).fetchone()
+
+    def find_by_domain(self, domain: str) -> sqlite3.Row | None:
+        if not domain:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM businesses WHERE domain = ? LIMIT 1", (domain,)
+        ).fetchone()
+
+    def find_by_external_id(self, source: str, external_id: str) -> sqlite3.Row | None:
+        if not external_id:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM businesses WHERE source = ? AND external_id = ? LIMIT 1",
+            (source, str(external_id)),
+        ).fetchone()
+
+    def insert_business(self, row: dict[str, Any]) -> bool:
+        """Insert one business row. Returns False if place_id already exists."""
+        if not row.get("place_id"):
+            return False
+        with self.conn as c:
+            cur = c.execute(
+                """INSERT OR IGNORE INTO businesses
+                   (place_id, name, address, city, state, zip, phone, website,
+                    domain, rating, reviews, main_category, types, latitude,
+                    longitude, maps_url, source_zip, source_category, raw_json,
+                    source, external_id, permit_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row.get("place_id"),
+                    row.get("name"),
+                    row.get("address"),
+                    row.get("city"),
+                    row.get("state"),
+                    row.get("zip"),
+                    row.get("phone"),
+                    row.get("website"),
+                    row.get("domain"),
+                    row.get("rating"),
+                    row.get("reviews"),
+                    row.get("main_category"),
+                    json.dumps(row.get("types") or []),
+                    row.get("latitude"),
+                    row.get("longitude"),
+                    row.get("maps_url"),
+                    row.get("source_zip"),
+                    row.get("source_category"),
+                    json.dumps(row.get("raw") or {}, ensure_ascii=False),
+                    row.get("source") or "maps",
+                    row.get("external_id"),
+                    row.get("permit_count"),
+                ),
+            )
+            return bool(cur.rowcount)
+
+    def update_business_fields(self, place_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        allowed = {
+            "name", "address", "city", "state", "zip", "phone", "website",
+            "domain", "rating", "reviews", "main_category", "types",
+            "latitude", "longitude", "maps_url", "source_zip", "source_category",
+            "raw_json", "source", "external_id", "permit_count",
+        }
+        cols, vals = [], []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k == "types" and not isinstance(v, str):
+                v = json.dumps(v or [])
+            if k == "raw_json" and not isinstance(v, str):
+                v = json.dumps(v or {}, ensure_ascii=False)
+            cols.append(f"{k}=?")
+            vals.append(v)
+        if not cols:
+            return
+        vals.append(place_id)
+        with self.conn as c:
+            c.execute(
+                f"UPDATE businesses SET {', '.join(cols)} WHERE place_id=?",
+                vals,
+            )
 
     def iter_businesses(self, where: str = "", args: Sequence = ()) -> Iterator[sqlite3.Row]:
         sql = "SELECT * FROM businesses"
         if where:
             sql += f" WHERE {where}"
         yield from self.conn.execute(sql, args)
+
+    def email_bucket(self, place_id: str, domain: str | None = None) -> str:
+        """Key used in the emails table for this business."""
+        d = (domain or "").strip().lower()
+        if d:
+            return d
+        return f"ext:{place_id}"
+
+    def emails_for_business(self, place_id: str, domain: str | None = None) -> list[str]:
+        keys = []
+        d = (domain or "").strip().lower()
+        if d:
+            keys.append(d)
+        keys.append(f"ext:{place_id}")
+        out: list[str] = []
+        seen: set[str] = set()
+        for key in keys:
+            for r in self.conn.execute(
+                "SELECT email FROM emails WHERE domain = ? ORDER BY email", (key,)
+            ):
+                e = r["email"]
+                if e not in seen:
+                    seen.add(e)
+                    out.append(e)
+        return out
 
     # ---------------------------------------------------------------- sites
 
@@ -260,6 +409,10 @@ class Store:
         for r in self.conn.execute("SELECT domain, email FROM emails ORDER BY domain"):
             out.setdefault(r["domain"], []).append(r["email"])
         return out
+
+    def clear_verdict(self, place_id: str) -> None:
+        with self.conn as c:
+            c.execute("DELETE FROM verdicts WHERE place_id = ?", (place_id,))
 
     # ------------------------------------------------------ verdicts/owners
 
@@ -353,12 +506,20 @@ class Store:
         classified = q("SELECT COUNT(*) FROM verdicts")
         unclassifiable = max(0, businesses - eligible)
         pct = round((classified / eligible) * 100.0, 1) if eligible else 0.0
+        by_source = {
+            (r["source"] or "maps"): r["n"]
+            for r in self.conn.execute(
+                "SELECT COALESCE(NULLIF(source,''), 'maps') AS source, COUNT(*) AS n "
+                "FROM businesses GROUP BY 1 ORDER BY n DESC"
+            )
+        }
         return {
             "jobs_total": q("SELECT COUNT(*) FROM jobs"),
             "jobs_done": q("SELECT COUNT(*) FROM jobs WHERE status='done'"),
             "jobs_error": q("SELECT COUNT(*) FROM jobs WHERE status='error'"),
             "jobs_pending": q("SELECT COUNT(*) FROM jobs WHERE status='pending'"),
             "businesses": businesses,
+            "businesses_by_source": by_source,
             "with_website": q(
                 "SELECT COUNT(*) FROM businesses WHERE domain IS NOT NULL AND domain!=''"
             ),
@@ -377,5 +538,10 @@ class Store:
             "in_icp": q("SELECT COUNT(*) FROM verdicts WHERE in_icp=1"),
             "owners_found": q(
                 "SELECT COUNT(*) FROM owners WHERE owner_name IS NOT NULL AND owner_name!=''"
+            ),
+            "needs_domain_resolve": q(
+                """SELECT COUNT(*) FROM businesses
+                   WHERE (domain IS NULL OR domain = '')
+                     AND name IS NOT NULL AND name != ''"""
             ),
         }

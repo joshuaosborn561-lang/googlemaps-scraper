@@ -37,7 +37,7 @@ mcp = MCPServer(
     ),
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
-    version="1.3.0",
+    version="1.4.0",
 )
 
 
@@ -873,16 +873,162 @@ def enrich_sites(limit: int = 0, workers: int = 12) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Ingest external leads",
+        readOnlyHint=False,
+        openWorldHint=False,
+    )
+)
+def ingest_external_leads(
+    rows: str,
+    source_tag: str = "shovels",
+    dedupe_on: str = "domain",
+) -> str:
+    """Insert external lead rows (e.g. Shovels CSV/JSON) into the local DB.
+
+    `rows` is a JSON list of objects. Shovels mapping:
+      business_name→name, website→domain, primary_email/email→emails,
+      address_city/state→city/state, primary_phone→phone, name→owner_name,
+      permit_count + id kept on the row. source is set from source_tag.
+
+    Email cells may be comma-separated; primary email prefers an address whose
+    domain matches website (typo hosts like yhaoo.com / gmail.comp lose).
+    Returns counts only — never echoes rows.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import ingest
+
+    result = ingest.run(
+        _store(),
+        rows,
+        source_tag=source_tag or "shovels",
+        dedupe_on=dedupe_on or "domain",
+    )
+    result["stats"] = _store().stats()
+    return _json(result)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Estimate domain resolve cost",
+        readOnlyHint=True,
+        openWorldHint=True,
+    )
+)
+def estimate_resolve_domains(source: str = "", limit: int = 0) -> str:
+    """Estimate paid Maps cost to find websites for businesses missing a domain.
+
+    Only ~28% of typical Shovels rows have websites; classify needs site text.
+    Returns approval_id for resolve_domains. One Maps request per business.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import resolve_domains
+    from mcp_server.approvals import create_approval
+
+    store = _store()
+    est = resolve_domains.estimate(store, source=source, limit=limit)
+    plan_path = resolve_domains.save_resolve_plan(est, source, limit)
+    approval = create_approval(
+        brief=f"resolve_domains source={source or '*'} limit={limit or 'all'}",
+        plan_path=str(plan_path),
+        requests=int(est["requests"]),
+        estimated_overage_usd=est["estimated_overage_usd"],
+        blocked=bool(est["blocked"]),
+        states=[],
+        categories=["resolve_domains"],
+        vertical="resolve_domains",
+    )
+    public = approval.to_public()
+    public.update(est)
+    public["instruction"] = (
+        f"Call resolve_domains(approval_id={approval.id}"
+        + (f", source={source!r}" if source else "")
+        + (f", limit={limit}" if limit else "")
+        + "). No auth required."
+    )
+    return _json(public)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Resolve missing domains via Maps",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def resolve_domains(
+    approval_id: str,
+    source: str = "",
+    limit: int = 0,
+    force: bool = False,
+    workers: int = 4,
+    i_approve_spend: bool = True,
+) -> str:
+    """Paid Maps name+city lookup to fill website/domain on ingested rows.
+
+    Requires approval_id from estimate_resolve_domains. After resolve, call
+    enrich_sites then classify_leads(source=...).
+    """
+    _ensure_repo_cwd()
+    from gmscraper import resolve_domains as resolve_mod
+
+    approval = require_spend_approval(
+        approval_id=approval_id, i_approve_spend=i_approve_spend
+    )
+    store = _store()
+    src = source
+    lim = limit
+    try:
+        plan = json.loads(Path(approval.plan_path).read_text(encoding="utf-8"))
+        src = src or (plan.get("source") or "")
+        if not lim:
+            lim = int(plan.get("limit") or 0)
+    except Exception:
+        pass
+
+    res = resolve_mod.run(
+        store,
+        source=src,
+        limit=lim,
+        force=force,
+        workers=max(1, workers),
+    )
+    mark_used(approval_id)
+    next_src = src or "…"
+    return _json(
+        {
+            "result": res,
+            "approval_id": approval_id,
+            "stats": store.stats(),
+            "next": (
+                "Call enrich_sites for new domains, then "
+                f"classify_leads(source={next_src!r}, icp=…)."
+            ),
+        }
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Classify leads against ICP",
         readOnlyHint=False,
         openWorldHint=True,
     )
 )
-def classify_leads(icp: str = "", vertical: str = "", workers: int = 0) -> str:
+def classify_leads(
+    icp: str = "",
+    vertical: str = "",
+    workers: int = 0,
+    source: str = "",
+    force: bool = False,
+    limit: int = 0,
+    include_no_site: bool = False,
+) -> str:
     """LLM-classify businesses against an ICP (LLM cost only; not Maps).
 
-    Only businesses with fetched website text are eligible. When nothing is
-    left to classify, result.reason explains why (already done vs no site text).
+    Only businesses with fetched website text are eligible by default. Scope
+    with source (e.g. 'shovels'), re-run with force=true, and cap with limit.
+    When nothing is eligible, result.reason explains why.
     """
     _ensure_repo_cwd()
     from gmscraper import classify
@@ -901,6 +1047,10 @@ def classify_leads(icp: str = "", vertical: str = "", workers: int = 0) -> str:
         llm,
         icp,
         workers=workers or default_workers(llm),
+        source=source,
+        force=force,
+        limit=limit or None,
+        include_no_site=include_no_site,
     )
     out: dict[str, Any] = {
         "result": res,

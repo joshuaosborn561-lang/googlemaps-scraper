@@ -62,6 +62,28 @@ Does this business match the ICP? Answer with JSON:
 NO_SITE_NOTE = "(no website text available - judge from the Maps data alone)"
 
 
+def _eligible_clauses(
+    *,
+    source: str = "",
+    force: bool = False,
+    include_no_site: bool = False,
+) -> tuple[str, list]:
+    clauses: list[str] = []
+    args: list = []
+    if not force:
+        clauses.append("b.place_id NOT IN (SELECT place_id FROM verdicts)")
+    if source:
+        clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
+        args.append(source.strip().lower())
+    if not include_no_site:
+        clauses.append("b.domain IS NOT NULL AND b.domain != ''")
+        clauses.append(
+            "EXISTS (SELECT 1 FROM sites s WHERE s.domain=b.domain AND s.status='ok')"
+        )
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, args
+
+
 def run(
     store: Store,
     ollama: Ollama,
@@ -71,61 +93,87 @@ def run(
     include_no_site: bool = False,
     min_confidence: float = 0.0,
     max_evidence_chars: int | None = None,
+    source: str = "",
+    force: bool = False,
 ) -> dict[str, int]:
-    """Classify every business without a verdict yet."""
-    where = "b.place_id NOT IN (SELECT place_id FROM verdicts)"
-    if not include_no_site:
-        where += (
-            " AND b.domain IS NOT NULL AND b.domain != ''"
-            " AND EXISTS (SELECT 1 FROM sites s WHERE s.domain=b.domain AND s.status='ok')"
-        )
-    sql = f"SELECT b.* FROM businesses b WHERE {where}"
+    """Classify businesses against an ICP.
+
+    By default only unclassified rows with fetched site text are eligible.
+    Pass source= to scope (e.g. 'shovels'), force=True to re-classify, and
+    limit= to cap the batch.
+    """
+    where, args = _eligible_clauses(
+        source=source, force=force, include_no_site=include_no_site
+    )
+    sql = f"SELECT b.* FROM businesses b{where} ORDER BY b.first_seen DESC, b.place_id"
     if limit:
         sql += f" LIMIT {int(limit)}"
-    rows = list(store.conn.execute(sql))
+    rows = list(store.conn.execute(sql, args))
     cap = max_evidence_chars or settings.max_evidence_chars
 
     if not rows:
         print("Nothing to classify.")
         stats = store.stats()
+        pending_where, pending_args = _eligible_clauses(
+            source=source, force=False, include_no_site=include_no_site
+        )
         pending_eligible = store.conn.execute(
-            """SELECT COUNT(*) FROM businesses b
-               WHERE b.place_id NOT IN (SELECT place_id FROM verdicts)
-                 AND b.domain IS NOT NULL AND b.domain != ''
-                 AND EXISTS (
-                   SELECT 1 FROM sites s
-                   WHERE s.domain = b.domain AND s.status = 'ok'
-                 )"""
+            f"SELECT COUNT(*) FROM businesses b{pending_where}", pending_args
         ).fetchone()[0]
-        already = int(stats.get("classified") or 0)
-        no_site = int(stats.get("unclassifiable_no_site") or 0)
-        if already and not pending_eligible:
+        # Source-scoped no-site count.
+        no_site_clauses = ["(b.domain IS NULL OR b.domain = '' OR NOT EXISTS (SELECT 1 FROM sites s WHERE s.domain=b.domain AND s.status='ok'))"]
+        no_site_args: list = []
+        if source:
+            no_site_clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
+            no_site_args.append(source.strip().lower())
+        no_site = store.conn.execute(
+            "SELECT COUNT(*) FROM businesses b WHERE " + " AND ".join(no_site_clauses),
+            no_site_args,
+        ).fetchone()[0]
+        already_q = "SELECT COUNT(*) FROM verdicts v JOIN businesses b ON b.place_id=v.place_id"
+        already_args: list = []
+        if source:
+            already_q += " WHERE COALESCE(NULLIF(b.source,''), 'maps') = ?"
+            already_args.append(source.strip().lower())
+        already = store.conn.execute(already_q, already_args).fetchone()[0]
+        src_note = f" for source={source!r}" if source else ""
+        if already and not pending_eligible and not force:
             reason = (
-                f"nothing eligible: all classifiable businesses already have verdicts "
-                f"({already:,} classified; {no_site:,} businesses have no site text)"
+                f"nothing eligible{src_note}: all classifiable businesses already have verdicts "
+                f"({already:,} classified; {no_site:,} businesses have no site text). "
+                f"Pass force=true to re-classify, or resolve_domains / enrich_sites first."
             )
         elif no_site and not include_no_site:
             reason = (
-                f"nothing eligible: {no_site:,} businesses have no site text"
+                f"nothing eligible{src_note}: {no_site:,} businesses have no site text"
                 + (f"; {already:,} already classified" if already else "")
+                + ". Call estimate_resolve_domains / resolve_domains then enrich_sites."
             )
         else:
-            reason = "nothing eligible: no businesses match the classify filters"
+            reason = f"nothing eligible{src_note}: no businesses match the classify filters"
         return {
             "done": 0,
             "in_icp": 0,
             "errors": 0,
             "reason": reason,
+            "source": source or None,
+            "force": force,
             "unclassifiable_no_site": no_site,
             "classified": already,
             "classifiable_with_site": int(stats.get("classifiable_with_site") or 0),
         }
 
+    if force:
+        for row in rows:
+            store.clear_verdict(row["place_id"])
+
+    scope = f" source={source!r}" if source else ""
     print(
-        f"Classifying {len(rows):,} businesses with {ollama.model} "
-        f"({workers} worker{'s' if workers != 1 else ''}, {cap:,} chars evidence)"
+        f"Classifying {len(rows):,} businesses{scope} with {ollama.model} "
+        f"({workers} worker{'s' if workers != 1 else ''}, {cap:,} chars evidence"
+        f"{', force' if force else ''})"
     )
-    counts = {"done": 0, "in_icp": 0, "errors": 0}
+    counts = {"done": 0, "in_icp": 0, "errors": 0, "source": source or None, "force": force}
     lock = threading.Lock()
 
     def work(row) -> None:

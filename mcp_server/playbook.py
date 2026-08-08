@@ -64,6 +64,9 @@ Do NOT use this for:
 | "export what we have" | `export_csv` |
 | "show me some rows" / QA | `sample_leads` (random sample; never rely on CSV path alone) |
 | "put results in Supabase / SQL" | `sync_to_supabase` (counts only; use run_label) |
+| "load Shovels / external CSV rows" | `ingest_external_leads` (set source_tag; counts only) |
+| "these rows have no website" | `estimate_resolve_domains` → `resolve_domains` → `enrich_sites` |
+| "classify only shovels / re-run" | `classify_leads(source=…, force=…, limit=…)` |
 | "job status?" | `get_job_status` / `list_background_jobs` |
 | "history on the website?" | `list_remote_jobs` / `download_remote_csv` |
 | config check | `health` |

@@ -95,7 +95,27 @@ def _radius_tuple(
     return None
 
 
-def _normalize_row(rec: dict[str, Any], by_domain: dict[str, list[str]]) -> dict[str, Any]:
+def _emails_for_row(store, rec: dict[str, Any], by_domain: dict[str, list[str]]) -> list[str]:
+    domain = (rec.get("domain") or "").strip().lower()
+    place_id = rec.get("place_id") or ""
+    pool: list[str] = []
+    seen: set[str] = set()
+    for key in ((domain,) if domain else ()) + ((f"ext:{place_id}",) if place_id else ()):
+        for e in by_domain.get(key, []):
+            if e not in seen:
+                seen.add(e)
+                pool.append(e)
+    # Fallback for DBs that gained emails after by_domain was built.
+    if not pool and hasattr(store, "emails_for_business"):
+        pool = store.emails_for_business(place_id, domain)
+    return pool
+
+
+def _normalize_row(
+    rec: dict[str, Any],
+    by_domain: dict[str, list[str]],
+    store=None,
+) -> dict[str, Any]:
     out = dict(rec)
     try:
         out["types"] = ", ".join(json.loads(out.get("types") or "[]"))
@@ -105,12 +125,13 @@ def _normalize_row(rec: dict[str, Any], by_domain: dict[str, list[str]]) -> dict
         out["in_icp"] = "yes" if out["in_icp"] else "no"
 
     ranked = email_lib.rank(
-        by_domain.get(out.get("domain") or "", []),
+        _emails_for_row(store, out, by_domain),
         out.get("domain") or "",
         out.get("owner_name") or "",
     )
     out["email"] = ranked[0] if ranked else ""
-    out["all_emails"] = ", ".join(ranked[1:6])
+    # Full multi-value list (Shovels cells can hold 15+ addresses).
+    out["all_emails"] = ", ".join(ranked)
     return out
 
 
@@ -175,7 +196,7 @@ def iter_leads(
             clat, clng, miles = radius_filter
             if haversine_miles(clat, clng, blat, blng) > miles:
                 continue
-        out = _normalize_row(rec, by_domain)
+        out = _normalize_row(rec, by_domain, store=store)
         yield out
         n += 1
         if limit and n >= limit:

@@ -46,6 +46,9 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `export_csv` | no | Write CSV on the container |
 | `sample_leads` | no | Inline QA sample (random by default) |
 | `sync_to_supabase` | no | Batch upsert into `maps_leads` (counts only) |
+| `ingest_external_leads` | no | Insert Shovels/external rows (`source_tag`) |
+| `estimate_resolve_domains` | no | Cost + approval for website lookup |
+| `resolve_domains` | **yes** | Paid Maps name+city → website/domain |
 | `renormalize` | no | Re-map stored JSON |
 | `remote_*` | Railway | Optional job API via `GMAPS_API_BASE` |
 

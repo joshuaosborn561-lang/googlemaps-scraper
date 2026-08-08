@@ -109,17 +109,50 @@ def _tokens(name: str) -> set[str]:
     return {t for t in re.split(r"[^a-z]+", (name or "").lower()) if len(t) > 2}
 
 
+# Host / TLD shapes that are almost always typos, never a real mailbox.
+TYPO_TLDS = {".comp", ".con", ".cpm", ".comm", ".coom", ".netx", ".orgg"}
+TYPO_HOSTS = {
+    "yhaoo.com", "yahooo.com", "gamil.com", "gmial.com", "gmal.com",
+    "hotmial.com", "outlok.com", "gmail.comp", "gmail.con",
+}
+
+
+def split_addresses(raw: str | None) -> list[str]:
+    """Split comma/semicolon/whitespace-separated multi-value email cells."""
+    if not raw:
+        return []
+    text = str(raw).replace(";", ",").replace("\n", ",")
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in text.split(","):
+        e = _clean(part)
+        if not e or not is_valid(e) or e in seen:
+            # Still try a regex find inside messy fragments.
+            for m in EMAIL_RE.findall(part or ""):
+                ee = _clean(m)
+                if ee and is_valid(ee) and ee not in seen:
+                    seen.add(ee)
+                    out.append(ee)
+            continue
+        seen.add(e)
+        out.append(e)
+    return out
+
+
 def score(email: str, site_domain: str = "", owner_name: str = "") -> float:
     """Higher is a better address to actually send to."""
     local, _, domain = email.partition("@")
     s = 0.0
 
     if site_domain and (domain == site_domain or domain.endswith("." + site_domain)):
-        s += 100          # on the company's own domain
+        s += 120          # hard prefer the company's own domain
     elif domain in FREE_MAIL:
         s += 30           # plenty of local businesses really do use gmail
     else:
         s += 10
+
+    if domain in TYPO_HOSTS or any(domain.endswith(t) for t in TYPO_TLDS):
+        s -= 80           # jcbeach23@yhaoo.com / foo@gmail.comp lose hard
 
     base = re.sub(r"[^a-z]", "", local.lower())
     owner_tokens = _tokens(owner_name)
@@ -149,3 +182,31 @@ def best_for(
 ) -> str:
     ranked = rank(emails, site_domain, owner_name)
     return ranked[0] if ranked else ""
+
+
+def choose_primary(
+    candidates: list[str],
+    *,
+    website: str = "",
+    site_domain: str = "",
+    owner_name: str = "",
+    prefer: str = "",
+) -> tuple[str, list[str]]:
+    """Pick one primary address; return (primary, all_ranked).
+
+    Prefers an address whose domain matches the website host. `prefer` (e.g.
+    Shovels primary_email) is kept in the candidate set but does not win over
+    a website-domain match or beat an obvious typo.
+    """
+    from .mapsdata import domain_of
+
+    dom = (site_domain or domain_of(website) or "").lower()
+    pool: list[str] = []
+    seen: set[str] = set()
+    for raw in list(candidates) + ([prefer] if prefer else []):
+        for ee in split_addresses(raw):
+            if ee not in seen:
+                seen.add(ee)
+                pool.append(ee)
+    ranked = rank(pool, dom, owner_name)
+    return (ranked[0] if ranked else ""), ranked
