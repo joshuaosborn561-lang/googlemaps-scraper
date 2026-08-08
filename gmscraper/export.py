@@ -144,17 +144,46 @@ def _radius_tuple(
     return None
 
 
+def _city_from_zip(zip_code: str) -> tuple[str, str]:
+    """Return (city, state) for a 5-digit ZIP via the offline zipcodes table."""
+    z = (zip_code or "").strip()[:5]
+    if not z.isdigit() or len(z) != 5:
+        return "", ""
+    try:
+        import zipcodes
+    except ImportError:  # pragma: no cover
+        return "", ""
+    matches = zipcodes.matching(z) or []
+    if not matches:
+        return "", ""
+    m = matches[0]
+    return (m.get("city") or "").strip(), (m.get("state") or "").strip().upper()
+
+
 def backfill_blank_cities(store) -> int:
-    """Fill empty city (and state/zip when missing) from formatted address."""
+    """Fill empty city (and state/zip when missing) from address or source_zip.
+
+    ~10% of Maps rows have a blank city (often also blank address). Prefer parsing
+    the formatted address; fall back to the scrape source_zip / zip via the
+    offline USPS ZIP table so geo filters still work.
+    """
     rows = list(
         store.conn.execute(
-            "SELECT place_id, address, city, state, zip FROM businesses "
-            "WHERE (city IS NULL OR city = '') AND address IS NOT NULL AND address != ''"
+            "SELECT place_id, address, city, state, zip, source_zip FROM businesses "
+            "WHERE city IS NULL OR city = ''"
         )
     )
     n = 0
     for row in rows:
         city, state, zip_code = parse_address_parts(row["address"] or "")
+        if not city:
+            city, state_from_zip = _city_from_zip(
+                (row["zip"] or "") or (row["source_zip"] or "")
+            )
+            if state_from_zip and not state:
+                state = state_from_zip
+            if not zip_code:
+                zip_code = ((row["zip"] or "") or (row["source_zip"] or "")).strip()[:5]
         if not city:
             continue
         fields: dict[str, Any] = {"city": city}

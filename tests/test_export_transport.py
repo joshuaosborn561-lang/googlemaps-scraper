@@ -71,6 +71,24 @@ def test_backfill_blank_cities(tmp_path: Path) -> None:
     assert city == "Plano"
 
 
+def test_backfill_city_from_source_zip(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    with store.conn as c:
+        c.execute(
+            """INSERT INTO businesses
+               (place_id, name, city, state, domain, address, source_zip, zip)
+               VALUES ('pz','No Addr GC','','','x.com','','75016','')"""
+        )
+    n = export.backfill_blank_cities(store)
+    assert n == 1
+    row = store.conn.execute(
+        "SELECT city, state, zip FROM businesses WHERE place_id='pz'"
+    ).fetchone()
+    assert row["city"] == "Irving"
+    assert row["state"] == "TX"
+    assert row["zip"] == "75016"
+
+
 def test_export_payload_returns_csv_text(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
