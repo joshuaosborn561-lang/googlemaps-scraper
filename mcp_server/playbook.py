@@ -61,8 +61,10 @@ Do NOT use this for:
 | "re-run classify only" / tighten ICP | `classify_leads` (no re-scrape) |
 | "pull emails from sites" | `enrich_sites` |
 | "find owners" | `find_owners` (Apify fallback only if they want paid web lookup) |
-| "export what we have" | `export_csv` |
-| "show me some rows" / QA | `sample_leads` (random sample; never rely on CSV path alone) |
+| "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |
+| "browse / page through leads" | `query_leads` (page_size max 50) |
+| "how many leads / breakdown" | `leads_summary` (counts only) |
+| "show me some rows" / QA | `sample_leads` (random sample; never rely on disk path alone) |
 | "put results in Supabase / SQL" | `sync_to_supabase` (counts only; use run_label) |
 | "load Shovels / external CSV rows" | `ingest_external_leads` (set source_tag; counts only) |
 | "these rows have no website" | `estimate_resolve_domains` → `resolve_domains` → `enrich_sites` |

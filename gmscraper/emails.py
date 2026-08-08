@@ -38,6 +38,19 @@ JUNK_DOMAINS = {
     "email.com", "sentry.io", "wixpress.com", "wix.com", "squarespace.com",
     "godaddy.com", "schema.org", "w3.org", "sentry-next.wixpress.com",
     "yoursite.com", "company.com", "test.com", "localhost",
+    "mysite.com", "mywebsite.com", "emailprovider.tld",
+}
+# Web-design / marketing / CMS mailboxes that are not the business itself.
+AGENCY_DOMAINS = {
+    "wixpress.com", "wix.com", "squarespace.com", "weebly.com", "godaddy.com",
+    "wordpress.com", "hubspot.com", "mailchimp.com", "constantcontact.com",
+    "klaviyo.com", "shopify.com", "bigcommerce.com", "webflow.io",
+    "bluehost.com", "siteground.com", "hostgator.com", "namecheap.com",
+    "googlegroups.com", "googleusercontent.com",
+}
+PLACEHOLDER_LOCALS = {
+    "example", "test", "testing", "sample", "demo", "yourname", "email",
+    "username", "name", "user",
 }
 FILE_EXT = (
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".css", ".js",
@@ -182,6 +195,34 @@ def best_for(
 ) -> str:
     ranked = rank(emails, site_domain, owner_name)
     return ranked[0] if ranked else ""
+
+
+def is_placeholder_or_agency(
+    email: str, business_domain: str = ""
+) -> bool:
+    """True when the address is boilerplate or an unrelated agency mailbox."""
+    e = _clean(email or "")
+    if not e or "@" not in e:
+        return True
+    local, _, domain = e.partition("@")
+    biz = (business_domain or "").lower().strip()
+    if domain in JUNK_DOMAINS or domain.endswith(".wixpress.com"):
+        return True
+    if local in PLACEHOLDER_LOCALS or local.startswith("example"):
+        return True
+    if e in {"example@mysite.com", "info@example.com", "email@domain.com"}:
+        return True
+    # Agency host that is not the business's own domain.
+    if domain in AGENCY_DOMAINS and (not biz or domain != biz):
+        return True
+    return False
+
+
+def is_clean_lead_email(email: str, business_domain: str = "") -> bool:
+    e = _clean(email or "")
+    if not e or not is_valid(e):
+        return False
+    return not is_placeholder_or_agency(e, business_domain)
 
 
 def choose_primary(

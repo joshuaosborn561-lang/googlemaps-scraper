@@ -1116,34 +1116,127 @@ def export_csv(
     min_rating: float = 0.0,
     min_reviews: int = 0,
     states: str = "",
+    city: str = "",
+    state: str = "",
+    q: str = "",
     icp_only: bool = True,
     center: str = "",
     radius_miles: float = 0.0,
+    include_reason: bool = False,
+    clean: bool = True,
 ) -> str:
-    """Write the current DB leads to a CSV (free).
+    """Return matching leads as CSV text in the response (free).
 
-    Includes latitude, longitude, and source_zip. Optional center + radius_miles
-    filters rows post-hoc by business coordinates without re-scraping.
+    Shape matches Property Owners pmf_shovels_contractors_export_csv:
+      { total_matching, capped_at: 5000, csv: "<text>", ... }
+
+    Caps at 5000 rows. Large responses may be spilled to a local file by the
+    MCP client harness. Optional out_path also writes a full CSV on disk.
+    clean=true (default) drops placeholder / agency emails. icp_reason is
+    opt-in via include_reason. Blank cities are backfilled from address.
     """
     _ensure_repo_cwd()
     from gmscraper import export
 
-    out = Path(out_path) if out_path else ROOT / "data" / "outputs" / "leads-export.csv"
-    out.parent.mkdir(parents=True, exist_ok=True)
     state_list = [s.strip().upper() for s in states.split(",") if s.strip()] or None
-    n = export.run(
+    payload = export.export_payload(
         _store(),
-        str(out),
         icp_only=icp_only,
         with_owner=with_owner,
         with_email=with_email,
         min_rating=min_rating,
         min_reviews=min_reviews,
         states=state_list,
+        city=city or None,
+        state=state or None,
+        q=q or None,
         center=center or None,
         radius_miles=radius_miles or None,
+        include_reason=include_reason,
+        clean=clean,
+        out_path=out_path or None,
+        backfill_cities=True,
     )
-    return _json({"leads": n, "csv": str(out), "columns": export.COLUMNS})
+    return _json(payload)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Query leads (paginated)",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def query_leads(
+    q: str = "",
+    city: str = "",
+    state: str = "",
+    icp_only: bool = False,
+    with_email: bool = False,
+    with_owner: bool = False,
+    min_permits: int = 0,
+    page: int = 1,
+    page_size: int = 50,
+    clean: bool = True,
+    include_reason: bool = False,
+) -> str:
+    """Paginated lead rows for browsing / joins (free).
+
+    Mirrors Property Owners pmf_shovels_contractors_query.
+    Returns { total, page, page_size, total_pages, items }.
+    page_size max 50. clean=true drops placeholder / agency emails.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import export
+
+    return _json(
+        export.query_leads(
+            _store(),
+            q=q,
+            city=city,
+            state=state,
+            icp_only=icp_only,
+            with_email=with_email,
+            with_owner=with_owner,
+            min_permits=min_permits,
+            page=page,
+            page_size=page_size,
+            clean=clean,
+            include_reason=include_reason,
+            backfill_cities=True,
+        )
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Leads summary (counts)",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def leads_summary(
+    icp_only: bool = False,
+    source: str = "",
+    clean: bool = True,
+) -> str:
+    """Aggregate counts only — no row payloads (free).
+
+    Returns total businesses, in_icp, with_email/phone/website, unique domains,
+    classified vs unclassified, and in_icp breakdowns by city and main_category.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import export
+
+    return _json(
+        export.leads_summary(
+            _store(),
+            icp_only=icp_only,
+            source=source,
+            clean=clean,
+            backfill_cities=True,
+        )
+    )
 
 
 @mcp.tool(

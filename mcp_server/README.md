@@ -43,7 +43,9 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `enrich_sites` | no | Website fetch |
 | `classify_leads` | LLM | ICP filter |
 | `find_owners` | optional Apify | Paid fallback needs approval |
-| `export_csv` | no | Write CSV on the container |
+| `export_csv` | no | CSV text in response (`total_matching`, `capped_at`, `csv`); optional `out_path` |
+| `query_leads` | no | Paginated rows (`page` / `page_size` max 50) |
+| `leads_summary` | no | Counts only (ICP / email / city / category) |
 | `sample_leads` | no | Inline QA sample (random by default) |
 | `sync_to_supabase` | no | Batch upsert into `maps_leads` (counts only) |
 | `ingest_external_leads` | no | Insert Shovels/external rows (`source_tag`) |
