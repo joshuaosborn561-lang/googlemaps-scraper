@@ -254,7 +254,6 @@ function App() {
                       value={prompt}
                       onChange={(event) => {
                         setPrompt(event.target.value)
-                        setApproved(false)
                       }}
                       rows={5}
                       placeholder="Find HVAC companies in Denver with owner emails, max 40"
