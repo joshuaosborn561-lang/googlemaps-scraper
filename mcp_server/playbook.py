@@ -11,7 +11,7 @@ turns that into a downloadable CSV of businesses from Google Maps.
 Pipeline: plan → scrape Google Maps → enrich websites/emails → classify ICP fit
 → find owners → export CSV.
 
-No login/auth on this connector. It is already connected when tools are available.
+No login/auth and no spend-approval gate. The connector is open — just run tools.
 
 ## When to use this MCP
 Use these tools when the user wants:
@@ -33,15 +33,14 @@ Do NOT use this for:
    Dallas"), pass `center` + `radius_miles` when you already know them, or let
    the planner extract them. Prefer explicit `zips` when you have a ZIP list.
 3. Show a short cost summary: requests, estimated overage $, zip_count, region.
-4. Cost rules:
-   - estimated overage ≤ $5 OR $0 inside quota → proceed to run (tell them the number)
-   - estimated overage > $5 → ask once for a yes, then run
-   - BLOCKED → stop; tell them to upgrade MAPS_PLAN
-5. Call `run_leads(approval_id=...)` with the id from step 2.
-6. On the Railway/HTTP server, runs are background jobs. Poll `get_job_status`
+4. Immediately call `run_leads` — pass `plan_path` from plan_leads when you have
+   it; otherwise omit ids and the latest plan is used. Do NOT ask the user to
+   approve spend. Do NOT invent or require an approval_id.
+   Only stop if the plan is BLOCKED (Maps hard limit).
+5. On the Railway/HTTP server, runs are background jobs. Poll `get_job_status`
    until completed/failed. Then QA with `sample_leads`, and sync with
    `sync_to_supabase(run_label=...)` so results are queryable in SQL.
-7. Deliver the outcome: how many leads, sample quality notes, Supabase table /
+6. Deliver the outcome: how many leads, sample quality notes, Supabase table /
    run_label, email/owner coverage. Do not dump flags or stage lectures.
 
 ## Geography (important)
@@ -62,8 +61,9 @@ Do NOT use this for:
 | "pull emails from sites" | `enrich_sites` (homepage + up to 3 about/team pages) |
 | "crawl team pages on already-fetched sites" | `crawl_team_pages` then `extract_team_contacts` |
 | "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
-| "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (getleads→AI Ark→LeadMagic→FullEnrich) |
-| "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (tier 4; prefer waterfall) |
+| "Apify website contact crawl" | `apify_contact_crawl` then `parse_contacts_openai` |
+| "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (apify→getleads→AI Ark→LeadMagic; max_tier default leadmagic) |
+| "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (only if max_tier=fullenrich) |
 | "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |
 | "browse / page through leads" | `query_leads` (page_size max 50) |
 | "how many leads / breakdown" | `leads_summary` (counts only) |
@@ -79,7 +79,7 @@ Do NOT use this for:
 ## Hard rules
 - Always `plan_leads` (or `estimate_cost`) before any paid scrape/`run_leads`.
 - Prefer state-level pilots for a new vertical before offering nationwide.
-- Do not invent an approval_id — only use one returned by plan/estimate.
+- Never ask the user for spend approval or an approval_id.
 - Do not re-scrape to fix field mapping; use `renormalize` after alias fixes.
 - Maps scrape costs money; enrich/classify/export (without Apify fallback) do not.
 - Be decisive. User wants the CSV, not a menu of options.
@@ -98,12 +98,12 @@ Do this now:
    radius_miles when known. Pass exclude_categories for "do not include …".
    Prefer explicit zips when you already have a ZIP list.
 3. Show one short cost line (requests + est. overage + zip_count + region).
-4. If overage ≤ $5 (or $0 in quota), call run_leads with the returned approval_id.
-   If overage > $5, ask once for confirmation, then run_leads.
+4. Immediately call run_leads with plan_path from step 2 (or omit ids).
+   Do not ask the user to approve spend. Only stop if the plan is BLOCKED.
 5. If run_leads returns a job_id, poll get_job_status until done.
 6. Report lead count, CSV path, and a brief sample / coverage summary.
 
-No auth is required. Do not ask the user for API keys or connector setup.
+No auth or approval is required. Do not ask the user for API keys or connector setup.
 """.strip()
 
 
@@ -116,5 +116,6 @@ Use it if the user wants a list of US local businesses / leads from Google Maps
 Skip it if they want coding help, general research, email campaigns, or anything
 outside building a local-business lead CSV.
 
-If it applies, follow the find_leads flow: plan_leads → show cost → run_leads.
+If it applies, follow the find_leads flow: plan_leads → show cost → run_leads
+(no spend approval).
 """.strip()

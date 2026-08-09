@@ -22,7 +22,7 @@ The MCP server ships a playbook Claude reads automatically (`instructions` +
 `gmscraper://playbook` + prompts `find_leads` / `when_to_use`):
 
 1. Use this MCP for US local-business lead lists (niche + state/city)
-2. `plan_leads` → show cost → `run_leads(approval_id=...)`
+2. `plan_leads` → show cost → `run_leads` (no spend approval / approval_id required)
 3. Ask before nationwide; no connector login/OAuth
 
 ## The default interaction

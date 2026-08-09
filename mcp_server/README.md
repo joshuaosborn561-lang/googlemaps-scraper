@@ -35,26 +35,26 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `list_categories` | no | Built-in verticals |
 | `ensure_zips` | no | Build ZIP list once |
 | `pipeline_stats` | no | Local SQLite counts |
-| `plan_leads` | LLM only | Brief → plan + **approval_id** + cost |
-| `estimate_cost` | no | Vertical/states cost + **approval_id** |
+| `plan_leads` | LLM only | Brief → plan + `plan_path` + cost |
+| `estimate_cost` | no | Vertical/states cost + `plan_path` |
 | `probe_maps` | 1 Maps req | Schema check |
-| `run_leads` | **yes** | Full pipeline; needs `approval_id` from plan |
-| `scrape_maps` | **yes** | Scrape stage only |
+| `run_leads` | **yes** | Full pipeline; `plan_path` optional (uses latest plan) |
+| `scrape_maps` | **yes** | Scrape stage only; no spend approval |
 | `enrich_sites` | no | Website fetch (+ about/team pages, page_type tagged) |
 | `crawl_team_pages` | no | Backfill team/about crawl on already-fetched sites |
 | `extract_team_contacts` | optional LLM | Person+title → local `contacts` |
 | `classify_leads` | LLM | ICP filter |
-| `find_owners` | optional Apify | Team contacts + owner; paid fallback needs approval |
-| `enrich_waterfall` | paid vendors | getleads→AI Ark→LeadMagic→FullEnrich → `gc.*` |
-| `fullenrich_find_email` | FullEnrich | Tier-4 email only |
+| `find_owners` | optional Apify | Team contacts + owner; paid fallback needs no approval |
+| `enrich_waterfall` | paid vendors | apify→getleads→AI Ark→LeadMagic (`max_tier` default leadmagic) → `gc.*` |
+| `fullenrich_find_email` | FullEnrich | Last-tier email only |
 | `export_csv` | no | CSV text in response (`total_matching`, `capped_at`, `csv`); optional `out_path` |
 | `query_leads` | no | Paginated rows (`page` / `page_size` max 50) |
 | `leads_summary` | no | Counts only (ICP / email / city / category) |
 | `sample_leads` | no | Inline QA sample (random by default) |
 | `sync_to_supabase` | no | Batch upsert into `maps_leads` (counts only) |
 | `ingest_external_leads` | no | Insert Shovels/external rows (`source_tag`) |
-| `estimate_resolve_domains` | no | Cost + approval for website lookup |
-| `resolve_domains` | **yes** | Paid Maps name+city → website/domain |
+| `estimate_resolve_domains` | no | Cost estimate for website lookup |
+| `resolve_domains` | **yes** | Paid Maps name+city → website/domain (no approval) |
 | `renormalize` | no | Re-map stored JSON |
 | `remote_*` | Railway | Optional job API via `GMAPS_API_BASE` |
 
@@ -62,9 +62,9 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 
 1. Claude calls `plan_leads("HVAC companies in Ohio with owners and emails")`.
 2. You see the estimate (requests + overage).
-3. Claude calls `run_leads(approval_id=...)`.
+3. Claude calls `run_leads(plan_path=...)` — or `run_leads()` with no ids to use the latest plan.
 
-No connector auth and no `i_approve_spend` flag.
+No connector auth and no spend-approval gate.
 
 ## Setup
 
