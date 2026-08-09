@@ -943,6 +943,57 @@ def list_background_jobs(limit: int = 20) -> str:
         openWorldHint=True,
     )
 )
+def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
+    """Run site enrich in a child process so html2text cannot wedge uvicorn.
+
+    The parent job thread blocks in wait() (GIL released); the heartbeat ticker
+    and HTTP event loop keep running in this process.
+    """
+    import subprocess
+    import sys
+    import time
+
+    store = _store()
+    store.queue_sites()
+    domains = store.pending_sites(limit=limit or None)
+    total = len(domains)
+    _job_progress("enrich", done=0, total=total, via="subprocess")
+    if total == 0:
+        return {"result": {"ok": 0, "error": 0, "skipped": 0}, "stats": store.stats(), "domains": 0}
+
+    w = max(1, min(int(workers or 3), 3))
+    cmd = [sys.executable, "-m", "gmscraper", "enrich", "--workers", str(w)]
+    if limit:
+        cmd.extend(["--limit", str(int(limit))])
+    log_dir = ROOT / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"enrich-{int(time.time())}.log"
+    with log_path.open("w", encoding="utf-8") as logf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+        )
+        while proc.poll() is None:
+            _job_progress("enrich", total=total, via="subprocess", pid=proc.pid)
+            time.sleep(15)
+        code = proc.wait()
+    if code != 0:
+        tail = ""
+        try:
+            tail = log_path.read_text(encoding="utf-8")[-2000:]
+        except OSError:
+            pass
+        raise RuntimeError(f"enrich subprocess exited {code}: {tail}")
+    return {
+        "result": {"exit_code": code, "log": str(log_path)},
+        "stats": store.stats(),
+        "domains": total,
+        "workers": w,
+    }
+
+
 def enrich_sites(
     limit: int = 0,
     workers: int = 3,
@@ -954,11 +1005,13 @@ def enrich_sites(
     (/about, /team, /leadership, …). Per-page text is stored with page_type.
 
     On Railway/HTTP this defaults to a background job — poll get_job_status.
-    Workers default to 3 so the MCP HTTP loop stays responsive.
+    Work runs in a subprocess so the MCP HTTP loop stays responsive.
     """
     _ensure_repo_cwd()
 
     def _run() -> dict[str, Any]:
+        if _http_mode():
+            return _enrich_sites_via_subprocess(limit, workers)
         from gmscraper import enrich_site
 
         store = _store()
