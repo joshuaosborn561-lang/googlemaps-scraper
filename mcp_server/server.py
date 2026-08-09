@@ -936,13 +936,6 @@ def list_background_jobs(limit: int = 20) -> str:
     return _json([j.to_public() for j in list_jobs(limit=limit)])
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        title="Enrich business websites",
-        readOnlyHint=False,
-        openWorldHint=True,
-    )
-)
 def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
     """Run site enrich in a child process so html2text cannot wedge uvicorn.
 
@@ -994,6 +987,13 @@ def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
     }
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Enrich business websites",
+        readOnlyHint=False,
+        openWorldHint=True,
+    )
+)
 def enrich_sites(
     limit: int = 0,
     workers: int = 3,
