@@ -21,23 +21,33 @@ type CostEstimate = {
 type JobRecord = {
   id: string
   createdAt: string
-  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'completed'
   prompt: string
-  intent: Intent
-  costEstimate: CostEstimate
-  approvedSpendUsd: number
-  command: string
-  outputPath: string | null
+  intent?: Intent
+  costEstimate?: CostEstimate
+  approvedSpendUsd?: number
+  estimate?: { total?: number }
+  command?: string
+  outputPath?: string | null
+  downloadUrl?: string | null
   error: string | null
-  startedAt: string | null
+  startedAt?: string | null
   finishedAt: string | null
 }
 
-type HistoryResponse = {
-  jobs: JobRecord[]
-  supabaseConfigured: boolean
-  historyMode: string
-  persistence: string
+function jobSpendUsd(job: JobRecord): number {
+  return Number(job.approvedSpendUsd ?? job.estimate?.total ?? job.costEstimate?.estimatedUsd ?? 0)
+}
+
+function jobTitle(job: JobRecord): string {
+  if (job.intent?.niche) return `${job.intent.niche} · ${job.intent.city}`
+  const prompt = (job.prompt || '').trim()
+  return prompt.length > 64 ? `${prompt.slice(0, 64)}…` : prompt || job.id
+}
+
+function normalizeStatus(status: JobRecord['status']): JobRecord['status'] {
+  if (status === 'completed') return 'succeeded'
+  return status
 }
 
 const EXAMPLES = [
@@ -99,28 +109,29 @@ function estimateCost(intent: Intent): CostEstimate {
     ].filter((row) => row.usd > 0),
     notes: [
       'Estimate only. Actual spend depends on API pricing and result volume.',
-      'No paid call is made until you explicitly approve this estimate.',
+      'Starting the scrape runs paid APIs against this estimate.',
     ],
   }
 }
 
 function statusClass(status: JobRecord['status']) {
-  if (status === 'succeeded') return 'completed'
-  if (status === 'failed') return 'failed'
+  const s = normalizeStatus(status)
+  if (s === 'succeeded') return 'completed'
+  if (s === 'failed') return 'failed'
   return 'awaiting'
 }
 
 function statusLabel(status: JobRecord['status']) {
-  if (status === 'queued') return 'Queued'
-  if (status === 'running') return 'Running'
-  if (status === 'succeeded') return 'Ready'
+  const s = normalizeStatus(status)
+  if (s === 'queued') return 'Queued'
+  if (s === 'running') return 'Running'
+  if (s === 'succeeded') return 'Ready'
   return 'Failed'
 }
 
 function App() {
   const [step, setStep] = useState(1)
   const [prompt, setPrompt] = useState(EXAMPLES[0])
-  const [approved, setApproved] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<JobRecord[]>([])
@@ -135,10 +146,11 @@ function App() {
   async function refreshHistory() {
     const response = await fetch('/api/jobs')
     if (!response.ok) throw new Error('Could not load scrape history')
-    const data = (await response.json()) as HistoryResponse
-    setJobs(data.jobs || [])
-    setSupabaseConfigured(Boolean(data.supabaseConfigured))
-    setHistoryMode(data.historyMode || 'unknown')
+    const data = await response.json()
+    const list: JobRecord[] = Array.isArray(data) ? data : data.jobs || []
+    setJobs(list)
+    setSupabaseConfigured(Boolean(data?.supabaseConfigured ?? true))
+    setHistoryMode(data?.historyMode || 'supabase')
   }
 
   useEffect(() => {
@@ -147,7 +159,8 @@ function App() {
 
   useEffect(() => {
     if (!activeJob) return
-    if (activeJob.status === 'succeeded' || activeJob.status === 'failed') return
+    const status = normalizeStatus(activeJob.status)
+    if (status === 'succeeded' || status === 'failed') return
     const timer = window.setInterval(() => {
       refreshHistory().catch(() => undefined)
     }, 2500)
@@ -157,12 +170,6 @@ function App() {
   async function onSubmit(event: FormEvent) {
     event.preventDefault()
     setError(null)
-
-    if (!approved) {
-      setError('Approve the estimated spend before starting the scrape.')
-      return
-    }
-
     setSubmitting(true)
     try {
       const response = await fetch('/api/jobs', {
@@ -170,15 +177,13 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
-          intent,
-          costEstimate: estimate,
-          approvedSpendUsd: estimate.estimatedUsd,
-          approved: true,
+          tags: [],
+          approvals: { maps: true, llm: true, apify: true },
         }),
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || 'Failed to create scrape job')
-      setActiveJobId(data.job.id)
+      setActiveJobId(data.id || data.job?.id)
       await refreshHistory()
       setStep(3)
     } catch (err) {
@@ -201,7 +206,7 @@ function App() {
           <span>Google Maps Scraper</span>
         </a>
         <span className="safety-badge">
-          <i /> Human approval required before spend
+          <i /> Cost estimate shown before run
         </span>
       </header>
 
@@ -210,8 +215,8 @@ function App() {
           <p className="eyebrow">Lead generation console</p>
           <h1>From a plain-English brief to downloadable leads.</h1>
           <p>
-            Describe the niche and city, review the paid-API estimate, then approve before anything
-            runs. History and CSV exports stay in Supabase.
+            Describe the niche and city, review the paid-API estimate, then start the scrape.
+            History and CSV exports stay in Supabase.
           </p>
         </section>
 
@@ -334,21 +339,6 @@ function App() {
                     </div>
                   </div>
 
-                  <label className="choice-row confirmation">
-                    <input
-                      type="checkbox"
-                      checked={approved}
-                      onChange={(event) => setApproved(event.target.checked)}
-                    />
-                    <span>
-                      <strong>I approve this paid-API estimate</strong>
-                      <small>
-                        Nothing is charged until you check this box and start the scrape. Cap:{' '}
-                        ${estimate.estimatedUsd.toFixed(2)}.
-                      </small>
-                    </span>
-                  </label>
-
                   {error ? <p className="form-message">{error}</p> : null}
 
                   <div className="wizard-actions">
@@ -356,8 +346,8 @@ function App() {
                       Back
                     </button>
                     <span />
-                    <button type="submit" disabled={!approved || submitting}>
-                      {submitting ? 'Starting…' : 'Approve & start scrape'}
+                    <button type="submit" disabled={submitting}>
+                      {submitting ? 'Starting…' : 'Start scrape'}
                     </button>
                   </div>
                 </form>
@@ -370,9 +360,7 @@ function App() {
                       <div className="job-head">
                         <div>
                           <p className="eyebrow">Active job</p>
-                          <h2>
-                            {activeJob.intent.niche} · {activeJob.intent.city}
-                          </h2>
+                          <h2>{jobTitle(activeJob)}</h2>
                         </div>
                         <span className={`status ${statusClass(activeJob.status)}`}>
                           {statusLabel(activeJob.status)}
@@ -387,8 +375,8 @@ function App() {
                           </strong>
                         </div>
                         <div className="review-row">
-                          <span>Approved</span>
-                          <strong>${activeJob.approvedSpendUsd.toFixed(2)}</strong>
+                          <span>Estimate</span>
+                          <strong>${jobSpendUsd(activeJob).toFixed(2)}</strong>
                         </div>
                         <div className="review-row">
                           <span>Request</span>
@@ -398,7 +386,7 @@ function App() {
 
                       {activeJob.error ? <p className="form-message">{activeJob.error}</p> : null}
 
-                      {activeJob.status === 'succeeded' ? (
+                      {normalizeStatus(activeJob.status) === 'succeeded' ? (
                         <div className="info-callout" style={{ marginTop: '1.25rem' }}>
                           <span>✓</span>
                           <p>CSV is ready. Download stays available from Supabase history.</p>
@@ -410,7 +398,6 @@ function App() {
                           type="button"
                           className="button secondary"
                           onClick={() => {
-                            setApproved(false)
                             setActiveJobId(null)
                             setError(null)
                             setStep(1)
@@ -419,7 +406,7 @@ function App() {
                           New scrape
                         </button>
                         <span />
-                        {activeJob.status === 'succeeded' ? (
+                        {normalizeStatus(activeJob.status) === 'succeeded' ? (
                           <a className="button" href={`/api/jobs/${activeJob.id}/file`}>
                             Download CSV
                           </a>
@@ -432,7 +419,7 @@ function App() {
                     </>
                   ) : (
                     <>
-                      <p className="empty-state">No active job yet. Approve a plan to start one.</p>
+                      <p className="empty-state">No active job yet. Start a scrape from step 1.</p>
                       <div className="wizard-actions single">
                         <span />
                         <button type="button" onClick={() => setStep(1)}>
@@ -455,7 +442,7 @@ function App() {
               </div>
 
               {jobs.length === 0 ? (
-                <p className="empty-state">Approved scrapes appear here with download links.</p>
+                <p className="empty-state">Completed scrapes appear here with download links.</p>
               ) : (
                 <div className="table-wrap">
                   <table className="history-table">
@@ -473,9 +460,7 @@ function App() {
                         <tr key={job.id}>
                           <td>{new Date(job.createdAt).toLocaleString()}</td>
                           <td>
-                            <strong>
-                              {job.intent.niche} · {job.intent.city}
-                            </strong>
+                            <strong>{jobTitle(job)}</strong>
                             <small>{job.prompt}</small>
                           </td>
                           <td>
@@ -483,9 +468,9 @@ function App() {
                               {statusLabel(job.status)}
                             </span>
                           </td>
-                          <td>${job.approvedSpendUsd.toFixed(2)}</td>
+                          <td>${jobSpendUsd(job).toFixed(2)}</td>
                           <td>
-                            {job.status === 'succeeded' ? (
+                            {normalizeStatus(job.status) === 'succeeded' ? (
                               <a href={`/api/jobs/${job.id}/file`}>Download</a>
                             ) : (
                               '—'
@@ -551,12 +536,18 @@ function App() {
                         }}
                       >
                         <span>
-                          <strong>
-                            {job.intent.niche} · {job.intent.city}
-                          </strong>
+                          <strong>{jobTitle(job)}</strong>
                           <small>{new Date(job.createdAt).toLocaleString()}</small>
                         </span>
-                        <em className={job.status === 'succeeded' ? 'good' : job.status === 'failed' ? 'bad' : ''}>
+                        <em
+                          className={
+                            normalizeStatus(job.status) === 'succeeded'
+                              ? 'good'
+                              : normalizeStatus(job.status) === 'failed'
+                                ? 'bad'
+                                : ''
+                          }
+                        >
                           {statusLabel(job.status)}
                         </em>
                       </button>
@@ -573,7 +564,7 @@ function App() {
                   <span>✓</span> Cost estimate shown before run
                 </li>
                 <li>
-                  <span>✓</span> Explicit approval required
+                  <span>✓</span> No spend-approval checkbox
                 </li>
                 <li>
                   <span>✓</span> Jobs + CSVs stored in Supabase

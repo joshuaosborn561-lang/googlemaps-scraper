@@ -19,11 +19,8 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from mcp_server.approvals import (
-    AUTO_APPROVE_UNDER_USD,
-    create_approval,
-    mark_used,
-    require_spend_approval,
     resolve_plan,
+    save_plan_record,
 )
 from mcp_server.playbook import FIND_LEADS_PROMPT, INSTRUCTIONS, WHEN_TO_USE_PROMPT
 
@@ -237,7 +234,6 @@ def _plan_cost_bundle(
         "cost_lines": cost_lines,
         "estimated_overage_usd": overage,
         "blocked": blocked,
-        "auto_approve_under_usd": AUTO_APPROVE_UNDER_USD,
         "maps_plan": settings.maps_plan,
         "quota_used": used,
         "geo": resolved["geo_meta"],
@@ -435,8 +431,8 @@ def plan_leads(
     """REQUIRED first step for any new lead request.
 
     Turns a plain-English brief into categories, geography, ICP, and a cost
-    estimate (LLM only — no Google Maps spend yet). Returns plan_path (and an
-    optional approval_id) for run_leads — no spend approval is required.
+    estimate (LLM only — no Google Maps spend yet). Returns plan_path for
+    run_leads. No approval gate.
 
     Geography overrides (precedence: zips > center+radius_miles > states):
       zips              comma-separated 5-digit ZIPs (supports 1000+). Wins outright.
@@ -444,7 +440,7 @@ def plan_leads(
       radius_miles      miles from center (haversine over ZIP centroids)
       exclude_categories  comma-separated Maps categories to never scrape
 
-    Show the user the cost summary, then call run_leads (approval_id optional).
+    Show the cost summary, then call run_leads(plan_path=...) or run_leads().
     """
     _ensure_repo_cwd()
     brief = brief.strip()
@@ -478,7 +474,7 @@ def plan_leads(
         exclude_categories=exclude_categories,
     )
     plan_path = _save_plan(plan, brief)
-    approval = create_approval(
+    record = save_plan_record(
         brief=brief,
         plan_path=str(plan_path),
         requests=bundle["requests"],
@@ -490,12 +486,11 @@ def plan_leads(
     )
     return _json(
         {
-            **approval.to_public(),
+            **record.to_public(),
             **bundle,
             "nationwide_warning": nationwide_warning,
             "next_step": (
-                f"Call run_leads(plan_path={str(plan_path)!r}) — "
-                "no approval / auth required. approval_id is optional."
+                f"Call run_leads(plan_path={str(plan_path)!r}) or run_leads()."
             ),
         }
     )
@@ -567,7 +562,7 @@ def estimate_cost(
         exclude_categories=exclude_categories,
     )
     plan_path = _save_plan(plan, used_brief)
-    approval = create_approval(
+    record = save_plan_record(
         brief=used_brief,
         plan_path=str(plan_path),
         requests=bundle["requests"],
@@ -577,7 +572,7 @@ def estimate_cost(
         categories=plan.categories,
         vertical=plan.vertical,
     )
-    return _json({**approval.to_public(), **bundle, "maps_plan": settings.maps_plan})
+    return _json({**record.to_public(), **bundle, "maps_plan": settings.maps_plan})
 
 
 @mcp.tool(
@@ -621,7 +616,7 @@ def probe_maps(zip_code: str = "10001", category: str = "hvac contractor") -> st
 
 
 # ---------------------------------------------------------------------------
-# Paid tools (no spend-approval gate — plan_path / latest plan is enough)
+# Paid tools — plan_path / latest plan only. No approval gates.
 # ---------------------------------------------------------------------------
 
 
@@ -634,7 +629,6 @@ def _http_mode() -> bool:
 
 
 def _execute_run_leads(
-    approval_id: str,
     plan_path: str,
     out_path: str,
     include_owner_fallback: bool,
@@ -647,16 +641,16 @@ def _execute_run_leads(
     from gmscraper.mapsdata import MapsDataClient
     from gmscraper.websearch import make_backend
 
-    approval = resolve_plan(approval_id=approval_id, plan_path=plan_path)
+    record = resolve_plan(plan_path=plan_path)
     settings.require_rapidapi()
-    plan = brief_mod.load(approval.plan_path)
+    plan = brief_mod.load(record.plan_path)
     _ensure_zips_file()
     zip_rows = _zip_rows_for_plan(plan)
     store = _store()
     llm = _llm()
     client = MapsDataClient(settings)
 
-    stamp = approval.id if approval.id != "plan_path" else "run"
+    stamp = record.id if record.id != "plan_path" else "run"
     out = Path(out_path) if out_path else ROOT / "data" / "outputs" / f"{plan.vertical}-{stamp}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -696,13 +690,11 @@ def _execute_run_leads(
         center_lat=plan.center_lat,
         center_lng=plan.center_lng,
     )
-    mark_used(approval.id)
     return {
         "status": "completed",
         "leads": n,
         "csv": str(out),
-        "approval_id": approval.id if approval.id != "plan_path" else None,
-        "plan_path": approval.plan_path,
+        "plan_path": record.plan_path,
         "stats": store.stats(),
         "llm_spend": llm.spend_line() if hasattr(llm, "spend_line") else None,
     }
@@ -717,25 +709,22 @@ def _execute_run_leads(
     )
 )
 def run_leads(
-    approval_id: str = "",
     plan_path: str = "",
     out_path: str = "",
     include_owner_fallback: bool = False,
     workers: int = 8,
     background: bool = True,
-    i_approve_spend: bool = True,
 ) -> str:
     """Execute the full lead pipeline after plan_leads. This is the main "go" tool.
 
-    No spend approval required. Prefer plan_path from plan_leads; approval_id is
-    optional. If both are omitted, the latest saved plan is used.
+    Pass plan_path from plan_leads, or omit it to use the latest saved plan.
+    No approval / auth / spend confirmation required.
 
     On Railway/HTTP this starts a background job — poll get_job_status with the
     returned job_id until completed. Then tell the user the lead count and CSV path.
     """
     _ensure_repo_cwd()
-    del i_approve_spend  # accepted for older Claude tool schemas; ignored
-    resolve_plan(approval_id=approval_id, plan_path=plan_path)
+    resolve_plan(plan_path=plan_path)
 
     run_bg = background if background is not None else _http_mode()
     if run_bg and _http_mode():
@@ -744,9 +733,9 @@ def run_leads(
         job = start_job(
             "run_leads",
             lambda: _execute_run_leads(
-                approval_id, plan_path, out_path, include_owner_fallback, workers
+                plan_path, out_path, include_owner_fallback, workers
             ),
-            meta={"approval_id": approval_id or None, "plan_path": plan_path or None},
+            meta={"plan_path": plan_path or None},
         )
         return _json(
             {
@@ -760,23 +749,19 @@ def run_leads(
         )
 
     return _json(
-        _execute_run_leads(
-            approval_id, plan_path, out_path, include_owner_fallback, workers
-        )
+        _execute_run_leads(plan_path, out_path, include_owner_fallback, workers)
     )
 
 
-def _execute_scrape_maps(
-    approval_id: str, plan_path: str, workers: int, max_jobs: int
-) -> dict[str, Any]:
+def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
     from gmscraper import scrape
     from gmscraper.config import settings
     from gmscraper.mapsdata import MapsDataClient
 
-    approval = resolve_plan(approval_id=approval_id, plan_path=plan_path)
+    record = resolve_plan(plan_path=plan_path)
     settings.require_rapidapi()
-    plan = brief_mod.load(approval.plan_path)
+    plan = brief_mod.load(record.plan_path)
     zip_rows = _zip_rows_for_plan(plan)
     store = _store()
     client = MapsDataClient(settings)
@@ -789,14 +774,13 @@ def _execute_scrape_maps(
         price_per_request=settings.price_per_request,
         max_jobs=max_jobs or None,
     )
-    mark_used(approval.id)
     return {
         "status": "completed",
         "result": res,
         "stats": store.stats(),
         "zip_count": len(zip_rows),
         "sample_source_zips": [r["zip"] for r in zip_rows[:20]],
-        "plan_path": approval.plan_path,
+        "plan_path": record.plan_path,
     }
 
 
@@ -809,29 +793,25 @@ def _execute_scrape_maps(
     )
 )
 def scrape_maps(
-    approval_id: str = "",
     plan_path: str = "",
     workers: int = 8,
     max_jobs: int = 0,
     background: bool = True,
-    i_approve_spend: bool = True,
 ) -> str:
-    """Paid Maps scrape stage only. No spend approval required.
+    """Paid Maps scrape stage only. Pass plan_path or omit for latest plan.
 
-    Prefer plan_path from plan_leads/estimate_cost; approval_id is optional.
-    Omitting both uses the latest saved plan.
+    No approval / auth / spend confirmation required.
     """
     _ensure_repo_cwd()
-    del i_approve_spend
-    resolve_plan(approval_id=approval_id, plan_path=plan_path)
+    resolve_plan(plan_path=plan_path)
 
     if background and _http_mode():
         from mcp_server.jobs import start_job
 
         job = start_job(
             "scrape_maps",
-            lambda: _execute_scrape_maps(approval_id, plan_path, workers, max_jobs),
-            meta={"approval_id": approval_id or None, "plan_path": plan_path or None},
+            lambda: _execute_scrape_maps(plan_path, workers, max_jobs),
+            meta={"plan_path": plan_path or None},
         )
         return _json(
             {
@@ -841,7 +821,7 @@ def scrape_maps(
             }
         )
 
-    return _json(_execute_scrape_maps(approval_id, plan_path, workers, max_jobs))
+    return _json(_execute_scrape_maps(plan_path, workers, max_jobs))
 
 
 @mcp.tool(
@@ -1222,17 +1202,16 @@ def estimate_resolve_domains(source: str = "", limit: int = 0) -> str:
     """Estimate paid Maps cost to find websites for businesses missing a domain.
 
     Only ~28% of typical Shovels rows have websites; classify needs site text.
-    Returns plan_path / optional approval_id for resolve_domains. One Maps
-    request per business. No spend approval required.
+    Returns plan_path for resolve_domains. One Maps request per business.
+    No approval required.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_domains
-    from mcp_server.approvals import create_approval
 
     store = _store()
     est = resolve_domains.estimate(store, source=source, limit=limit)
     plan_path = resolve_domains.save_resolve_plan(est, source, limit)
-    approval = create_approval(
+    record = save_plan_record(
         brief=f"resolve_domains source={source or '*'} limit={limit or 'all'}",
         plan_path=str(plan_path),
         requests=int(est["requests"]),
@@ -1242,13 +1221,13 @@ def estimate_resolve_domains(source: str = "", limit: int = 0) -> str:
         categories=["resolve_domains"],
         vertical="resolve_domains",
     )
-    public = approval.to_public()
+    public = record.to_public()
     public.update(est)
     public["instruction"] = (
         "Call resolve_domains("
         + (f"source={source!r}, " if source else "")
         + (f"limit={limit}, " if limit else "")
-        + "plan_path=… or omit ids). No approval required."
+        + "). No approval required."
     )
     return _json(public)
 
@@ -1262,42 +1241,36 @@ def estimate_resolve_domains(source: str = "", limit: int = 0) -> str:
     )
 )
 def resolve_domains(
-    approval_id: str = "",
     plan_path: str = "",
     source: str = "",
     limit: int = 0,
     force: bool = False,
     workers: int = 4,
-    i_approve_spend: bool = True,
 ) -> str:
     """Paid Maps name+city lookup to fill website/domain on ingested rows.
 
-    No spend approval required. approval_id / plan_path are optional — omit both
-    to use the latest estimate_resolve_domains plan, or pass source/limit directly.
-    After resolve, call enrich_sites then classify_leads(source=...).
+    Pass source/limit directly, or omit to use the latest estimate plan.
+    No approval required. After resolve, call enrich_sites then classify_leads.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_domains as resolve_mod
 
-    del i_approve_spend
     store = _store()
     src = source
     lim = limit
-    approval = None
-    if approval_id or plan_path:
-        approval = resolve_plan(approval_id=approval_id, plan_path=plan_path)
+    if plan_path:
+        record = resolve_plan(plan_path=plan_path)
         try:
-            plan = json.loads(Path(approval.plan_path).read_text(encoding="utf-8"))
+            plan = json.loads(Path(record.plan_path).read_text(encoding="utf-8"))
             src = src or (plan.get("source") or "")
             if not lim:
                 lim = int(plan.get("limit") or 0)
         except Exception:
             pass
     elif not source and not limit:
-        # Fall back to latest plan if caller passed nothing.
         try:
-            approval = resolve_plan()
-            plan = json.loads(Path(approval.plan_path).read_text(encoding="utf-8"))
+            record = resolve_plan()
+            plan = json.loads(Path(record.plan_path).read_text(encoding="utf-8"))
             src = plan.get("source") or ""
             lim = int(plan.get("limit") or 0)
         except ValueError:
@@ -1310,13 +1283,10 @@ def resolve_domains(
         force=force,
         workers=max(1, workers),
     )
-    if approval:
-        mark_used(approval.id)
     next_src = src or "…"
     return _json(
         {
             "result": res,
-            "approval_id": approval.id if approval and approval.id != "plan_path" else None,
             "stats": store.stats(),
             "next": (
                 "Call enrich_sites for new domains, then "
@@ -1391,22 +1361,18 @@ def classify_leads(
 def find_owners(
     use_paid_fallback: bool = False,
     workers: int = 0,
-    i_approve_spend: bool = True,
-    approval_id: str = "",
 ) -> str:
     """Extract owners + team contacts from site text.
 
     First pulls person+title pairs from team/about pages into `contacts`
     (source=team_page). Then LLM single-owner extraction. Website-only is free;
-    Apify fallback is paid but needs no approval — set use_paid_fallback=true.
+    Apify fallback is paid — set use_paid_fallback=true. No approval required.
     """
     _ensure_repo_cwd()
     from gmscraper import owner
     from gmscraper.config import settings
     from gmscraper.llm import default_workers
     from gmscraper.websearch import make_backend
-
-    del i_approve_spend, approval_id  # legacy Claude schema args; ignored
 
     backend = None
     if use_paid_fallback:
@@ -2016,22 +1982,13 @@ def list_remote_jobs() -> str:
 )
 def create_remote_job(
     prompt: str,
-    i_approve_spend: bool = True,
-    approve_maps: bool = True,
-    approve_llm: bool = True,
-    approve_apify: bool = True,
     tags: str = "",
 ) -> str:
-    """Create a job on the Railway UI API. No MCP auth — approvals are sent as true."""
-    del i_approve_spend  # accepted for older Claude tool schemas
+    """Create a job on the Railway UI API. No spend-approval args — always proceeds."""
     body = {
         "prompt": prompt,
         "tags": [t.strip() for t in tags.split(",") if t.strip()],
-        "approvals": {
-            "maps": approve_maps,
-            "llm": approve_llm,
-            "apify": approve_apify,
-        },
+        "approvals": {"maps": True, "llm": True, "apify": True},
     }
     return _json(_remote_json("POST", "/api/jobs", body))
 

@@ -329,19 +329,12 @@ app.post('/api/jobs', async (request, response) => {
     const tags = Array.isArray(request.body?.tags)
       ? request.body.tags.map((tag) => String(tag).trim()).filter(Boolean)
       : []
-    const approvals = request.body?.approvals || {}
-
     if (prompt.length < 20) {
       return response.status(400).json({ error: 'Prompt is too short.' })
     }
 
     const plan = parsePrompt(prompt)
     const estimate = estimateFromPlan(plan)
-    const requiresApify = plan.usesFallback
-
-    if (!approvals.maps || !approvals.llm || (requiresApify && !approvals.apify)) {
-      return response.status(400).json({ error: 'Missing required paid-action approvals.' })
-    }
 
     /** @type {JobRecord} */
     const job = {
@@ -352,11 +345,7 @@ app.post('/api/jobs', async (request, response) => {
       createdAt: new Date().toISOString(),
       finishedAt: null,
       estimate,
-      approvals: {
-        maps: Boolean(approvals.maps),
-        llm: Boolean(approvals.llm),
-        apify: Boolean(approvals.apify),
-      },
+      approvals: { maps: true, llm: true, apify: true },
       downloadUrl: null,
       localFilePath: null,
       error: null,

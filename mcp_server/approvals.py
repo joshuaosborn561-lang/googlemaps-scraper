@@ -1,9 +1,8 @@
 """Saved scrape plans for paid MCP tools.
 
-`plan_leads` / `estimate_cost` write a plan record. Paid tools can load it by
-`approval_id` (kept for compatibility) OR by `plan_path`, OR fall back to the
-latest saved plan. There is no spend-approval gate and no i_approve_spend check
-— Claude Web does not surface approval ids reliably, so tools must run without them.
+plan_leads / estimate_cost write a plan file + index record. Paid tools load by
+plan_path or the latest saved plan. There is no spend-approval gate, no
+approval_id requirement, and no i_approve_spend check.
 """
 
 from __future__ import annotations
@@ -15,13 +14,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APPROVALS_DIR = ROOT / "data" / "approvals"
-AUTO_APPROVE_UNDER_USD = 5.0
-APPROVAL_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days (informational only)
+PLANS_INDEX_DIR = ROOT / "data" / "approvals"  # legacy path; keep for existing files
+AUTO_APPROVE_UNDER_USD = 5.0  # reporting only; never gates a run
 
 
 @dataclass
-class Approval:
+class PlanRecord:
     id: str
     brief: str
     plan_path: str
@@ -32,16 +30,12 @@ class Approval:
     categories: list[str]
     vertical: str
     created_at: float
-    expires_at: float
+    expires_at: float = 0.0
     used: bool = False
-
-    @property
-    def expired(self) -> bool:
-        return time.time() > self.expires_at
 
     def to_public(self) -> dict:
         return {
-            "approval_id": self.id,
+            "plan_id": self.id,
             "brief": self.brief,
             "plan_path": self.plan_path,
             "vertical": self.vertical,
@@ -51,20 +45,23 @@ class Approval:
             "estimated_overage_usd": (
                 "BLOCKED" if self.blocked else self.estimated_overage_usd
             ),
-            "expires_at": self.expires_at,
             "instruction": (
-                f"Call run_leads with plan_path={self.plan_path!r} "
-                f"(or approval_id={self.id}). No approval / auth required."
+                f"Call run_leads(plan_path={self.plan_path!r}) or run_leads() "
+                "to use the latest plan. No approval required."
             ),
         }
 
 
-def _path(approval_id: str) -> Path:
-    APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
-    return APPROVALS_DIR / f"{approval_id}.json"
+# Backward-compatible aliases so older imports keep working.
+Approval = PlanRecord
 
 
-def create_approval(
+def _path(plan_id: str) -> Path:
+    PLANS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    return PLANS_INDEX_DIR / f"{plan_id}.json"
+
+
+def save_plan_record(
     *,
     brief: str,
     plan_path: str,
@@ -74,8 +71,8 @@ def create_approval(
     states: list[str],
     categories: list[str],
     vertical: str,
-) -> Approval:
-    approval = Approval(
+) -> PlanRecord:
+    rec = PlanRecord(
         id=secrets.token_urlsafe(12),
         brief=brief,
         plan_path=plan_path,
@@ -86,56 +83,61 @@ def create_approval(
         categories=list(categories),
         vertical=vertical,
         created_at=time.time(),
-        expires_at=time.time() + APPROVAL_TTL_SECONDS,
     )
-    _path(approval.id).write_text(json.dumps(asdict(approval), indent=2), encoding="utf-8")
-    return approval
+    _path(rec.id).write_text(json.dumps(asdict(rec), indent=2), encoding="utf-8")
+    return rec
 
 
-def load_approval(approval_id: str) -> Approval:
-    path = _path(approval_id)
-    if not path.exists():
-        raise ValueError(
-            f"Unknown approval_id {approval_id!r}. "
-            "Pass plan_path from plan_leads, or omit both to use the latest plan."
-        )
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return Approval(**data)
+# Legacy name used across server.py — keep as thin alias.
+create_approval = save_plan_record
 
 
-def latest_approval() -> Approval | None:
-    """Most recently created plan record, if any."""
-    APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
-    files = sorted(APPROVALS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+def latest_plan() -> PlanRecord | None:
+    PLANS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(
+        PLANS_INDEX_DIR.glob("*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     for path in files:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return Approval(**data)
+            # Drop fields we no longer require
+            data.pop("expires_at", None)
+            return PlanRecord(
+                id=data["id"],
+                brief=data.get("brief") or "",
+                plan_path=data["plan_path"],
+                requests=int(data.get("requests") or 0),
+                estimated_overage_usd=data.get("estimated_overage_usd"),
+                blocked=bool(data.get("blocked")),
+                states=list(data.get("states") or []),
+                categories=list(data.get("categories") or []),
+                vertical=data.get("vertical") or "",
+                created_at=float(data.get("created_at") or 0),
+                used=bool(data.get("used")),
+            )
         except (json.JSONDecodeError, TypeError, KeyError):
             continue
     return None
 
 
+latest_approval = latest_plan
+
+
 def resolve_plan(
     *,
-    approval_id: str = "",
     plan_path: str = "",
-) -> Approval:
-    """Resolve a plan without any spend-approval gate.
-
-    Precedence: explicit approval_id → plan_path → latest saved plan.
-    Expired / already-used plans are still accepted (Claude often reconnects).
-    Only hard-blocked plan estimates (Maps hard limit) are refused.
-    """
-    approval: Approval | None = None
-    if (approval_id or "").strip():
-        approval = load_approval(approval_id.strip())
-    elif (plan_path or "").strip():
+    plan_id: str = "",
+    approval_id: str = "",  # ignored legacy alias
+) -> PlanRecord:
+    """Load a saved plan. No spend gate. Never refuses for used/expired."""
+    del approval_id  # never gate on legacy approval ids
+    if (plan_path or "").strip():
         path = Path(plan_path.strip())
         if not path.exists():
             raise ValueError(f"plan_path not found: {plan_path!r}")
-        # Synthetic approval wrapping a direct plan file.
-        approval = Approval(
+        return PlanRecord(
             id="plan_path",
             brief="",
             plan_path=str(path),
@@ -146,39 +148,41 @@ def resolve_plan(
             categories=[],
             vertical="",
             created_at=time.time(),
-            expires_at=time.time() + APPROVAL_TTL_SECONDS,
-            used=False,
         )
-    else:
-        approval = latest_approval()
-        if approval is None:
-            raise ValueError(
-                "No plan found. Call plan_leads (or estimate_cost) first, "
-                "then run_leads — approval_id is optional."
+
+    if (plan_id or "").strip():
+        path = _path(plan_id.strip())
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return PlanRecord(
+                id=data["id"],
+                brief=data.get("brief") or "",
+                plan_path=data["plan_path"],
+                requests=int(data.get("requests") or 0),
+                estimated_overage_usd=data.get("estimated_overage_usd"),
+                blocked=bool(data.get("blocked")),
+                states=list(data.get("states") or []),
+                categories=list(data.get("categories") or []),
+                vertical=data.get("vertical") or "",
+                created_at=float(data.get("created_at") or 0),
             )
 
-    if approval.blocked:
+    rec = latest_plan()
+    if rec is None:
         raise ValueError(
-            "This run is BLOCKED on the current Maps plan (hard limit). "
-            "Upgrade MAPS_PLAN before running."
+            "No plan found. Call plan_leads (or estimate_cost) first, then run_leads()."
         )
-    if not approval.plan_path or not Path(approval.plan_path).exists():
-        raise ValueError(
-            f"Plan file missing at {approval.plan_path!r}. Re-run plan_leads."
-        )
-    return approval
+    # Soft-warn only: still allow Maps hard-limit blocked plans to surface
+    # the BLOCKED estimate, but do not treat as an approval refusal.
+    if not rec.plan_path or not Path(rec.plan_path).exists():
+        raise ValueError(f"Plan file missing at {rec.plan_path!r}. Re-run plan_leads.")
+    return rec
 
 
-def mark_used(approval_id: str) -> None:
-    """Best-effort mark; never required for subsequent runs."""
-    if not (approval_id or "").strip() or approval_id == "plan_path":
-        return
-    try:
-        approval = load_approval(approval_id)
-    except ValueError:
-        return
-    approval.used = True
-    _path(approval_id).write_text(json.dumps(asdict(approval), indent=2), encoding="utf-8")
+def mark_used(plan_id: str = "") -> None:
+    """No-op — plans are reusable. Kept so older call sites import cleanly."""
+    del plan_id
+    return None
 
 
 def require_spend_approval(
@@ -187,7 +191,7 @@ def require_spend_approval(
     plan_path: str = "",
     i_approve_spend: bool = True,
     allow_auto_under: bool = True,
-) -> Approval:
-    """Backward-compatible alias — no spend gate, just resolve the plan."""
+) -> PlanRecord:
+    """Legacy alias — resolves a plan, never checks spend approval."""
     del i_approve_spend, allow_auto_under
-    return resolve_plan(approval_id=approval_id, plan_path=plan_path)
+    return resolve_plan(plan_path=plan_path, plan_id=approval_id)

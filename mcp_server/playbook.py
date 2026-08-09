@@ -34,8 +34,8 @@ Do NOT use this for:
    the planner extract them. Prefer explicit `zips` when you have a ZIP list.
 3. Show a short cost summary: requests, estimated overage $, zip_count, region.
 4. Immediately call `run_leads` — pass `plan_path` from plan_leads when you have
-   it; otherwise omit ids and the latest plan is used. Do NOT ask the user to
-   approve spend. Do NOT invent or require an approval_id.
+   it; otherwise omit args and the latest plan is used. Do NOT ask the user to
+   approve spend.
    Only stop if the plan is BLOCKED (Maps hard limit).
 5. On the Railway/HTTP server, runs are background jobs. Poll `get_job_status`
    until completed/failed. Then QA with `sample_leads`, and sync with
@@ -82,7 +82,7 @@ Do NOT use this for:
 ## Hard rules
 - Always `plan_leads` (or `estimate_cost`) before any paid scrape/`run_leads`.
 - Prefer state-level pilots for a new vertical before offering nationwide.
-- Never ask the user for spend approval or an approval_id.
+- Never ask the user for spend approval.
 - Do not re-scrape to fix field mapping; use `renormalize` after alias fixes.
 - Maps scrape costs money; enrich/classify/export (without Apify fallback) do not.
 - Be decisive. User wants the CSV, not a menu of options.

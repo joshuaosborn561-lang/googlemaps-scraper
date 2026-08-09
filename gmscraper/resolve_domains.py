@@ -80,7 +80,7 @@ def estimate(
         "billable_requests": billable,
         "note": (
             "One paid Maps search per business without a website/domain. "
-            "Call resolve_domains with the returned approval_id."
+            "Call resolve_domains(plan_path=…) or resolve_domains() with the latest plan."
         ),
     }
 

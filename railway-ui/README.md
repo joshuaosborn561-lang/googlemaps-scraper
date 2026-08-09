@@ -1,13 +1,13 @@
 # Google Maps Scraper UI (Railway)
 
-For Claude chat access to the same pipeline (with “yes” spend approval), use the
+For Claude chat access to the same pipeline (no spend-approval gate), use the
 MCP server at [`../mcp_server/README.md`](../mcp_server/README.md).
 
-This UI now reflects the repository's real target workflow and is explicitly built for:
+This UI is built for:
 
 - entering a **natural-language lead-gen prompt**
 - reviewing parsed scrape scope + projected cost
-- approving paid actions before run commands
+- starting the run immediately (no approval checkbox)
 
 Core workflow:
 
@@ -17,16 +17,12 @@ Core workflow:
 4. Classify ICP fit and extract owner data
 5. Export qualified CSV leads
 
-Current state: this frontend is deployed and aligned to that flow, and includes
-an HTTP backend that can queue and run `gmscraper` jobs from the UI.
-
-## What this UI now does
+## What this UI does
 
 - Accepts a natural-language scraping brief
 - Parses scope (categories, states, rating/review gates)
 - Estimates paid usage (Maps, LLM, optional Apify fallback)
-- Enforces explicit approval checkboxes before run
-- Queues backend job execution (`gmscraper run`)
+- Queues backend job execution (`gmscraper run`) — no spend gate
 - Persists job history and allows CSV redownload by job
 
 ## Run locally
@@ -66,22 +62,10 @@ python -m gmscraper stats --all
 railway logs --service railway-ui --lines 200 --json
 ```
 
-## What the audit found
+## Cost estimate (informational)
 
-- Project purpose is a **lead-generation pipeline** for US local businesses.
-- Main paid source is **RapidAPI Maps Data**.
-- LLM stages handle planning, ICP classification, and owner extraction.
-- Export output is CSV leads with filters (email/owner/rating/reviews).
-
-## Spend approval gate (required)
-
-Before any paid API call (RapidAPI, OpenAI-compatible endpoints, Apify fallback), this workflow requires:
-
-1. A written cost estimate
-2. Explicit user approval
-3. Only then execution
-
-No exceptions for "small" calls.
+Before paid API calls, the UI shows a written cost estimate, then starts when
+you click **Start scrape**. There is no approval checkbox or spend gate.
 
 ## Supabase integration (primary persistence)
 
@@ -98,15 +82,5 @@ Tables:
 
 API behavior:
 - `GET /api/jobs` reads from Supabase (survives Railway restarts/refreshes)
-- `GET /api/jobs/:id/file` streams the CSV from Supabase
-- local disk is only a temporary workspace while a job is running
-
-## Railway start command used by this app
-
-`npm start` runs:
-
-```bash
-node server.mjs
-```
-
-This serves the built frontend plus `/api/jobs` endpoints for job execution and file history.
+- `POST /api/jobs` creates a job and starts execution
+- `GET /api/jobs/:id/file` returns the CSV export

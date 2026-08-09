@@ -11,7 +11,7 @@ from mcp_server import approvals
 
 
 def test_resolve_plan_by_path(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(approvals, "APPROVALS_DIR", tmp_path / "approvals")
+    monkeypatch.setattr(approvals, "PLANS_INDEX_DIR", tmp_path / "approvals")
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"vertical": "hvac"}), encoding="utf-8")
 
@@ -21,10 +21,10 @@ def test_resolve_plan_by_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_resolve_plan_latest(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(approvals, "APPROVALS_DIR", tmp_path / "approvals")
+    monkeypatch.setattr(approvals, "PLANS_INDEX_DIR", tmp_path / "approvals")
     plan = tmp_path / "plan.json"
     plan.write_text("{}", encoding="utf-8")
-    a = approvals.create_approval(
+    a = approvals.save_plan_record(
         brief="test",
         plan_path=str(plan),
         requests=10,
@@ -34,18 +34,18 @@ def test_resolve_plan_latest(tmp_path: Path, monkeypatch) -> None:
         categories=["hvac"],
         vertical="hvac",
     )
-    # used + expired still accepted
+    # used flag is ignored — plans are reusable
     approvals.mark_used(a.id)
     got = approvals.resolve_plan()
     assert got.id == a.id
-    assert got.used is True
 
 
-def test_resolve_plan_blocked(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(approvals, "APPROVALS_DIR", tmp_path / "approvals")
+def test_resolve_plan_blocked_still_returns(tmp_path: Path, monkeypatch) -> None:
+    """Blocked is informational only — resolve_plan never refuses spend."""
+    monkeypatch.setattr(approvals, "PLANS_INDEX_DIR", tmp_path / "approvals")
     plan = tmp_path / "plan.json"
     plan.write_text("{}", encoding="utf-8")
-    a = approvals.create_approval(
+    a = approvals.save_plan_record(
         brief="blocked",
         plan_path=str(plan),
         requests=10,
@@ -55,11 +55,12 @@ def test_resolve_plan_blocked(tmp_path: Path, monkeypatch) -> None:
         categories=[],
         vertical="x",
     )
-    with pytest.raises(ValueError, match="BLOCKED"):
-        approvals.resolve_plan(approval_id=a.id)
+    got = approvals.resolve_plan(plan_id=a.id)
+    assert got.blocked is True
+    assert got.id == a.id
 
 
 def test_no_plan_errors(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(approvals, "APPROVALS_DIR", tmp_path / "approvals")
+    monkeypatch.setattr(approvals, "PLANS_INDEX_DIR", tmp_path / "approvals")
     with pytest.raises(ValueError, match="No plan found"):
         approvals.resolve_plan()

@@ -22,7 +22,7 @@ The MCP server ships a playbook Claude reads automatically (`instructions` +
 `gmscraper://playbook` + prompts `find_leads` / `when_to_use`):
 
 1. Use this MCP for US local-business lead lists (niche + state/city)
-2. `plan_leads` → show cost → `run_leads` (no spend approval / approval_id required)
+2. `plan_leads` → show cost → `run_leads` (no spend approval)
 3. Ask before nationwide; no connector login/OAuth
 
 ## The default interaction
@@ -55,16 +55,12 @@ silently if they're missing; don't make him watch.
 `scrape` and `run` cost real money on Josh's RapidAPI plan. Everything else
 is free.
 
-```
-AUTO_APPROVE_UNDER = $5.00 of overage
-```
-
 Billing is a monthly plan + quota, not cents per request — `estimate` and
 `plan` already price against `MAPS_PLAN` and subtract quota already used this
 month. Read the `est. cost` line they print, not a per-request rate.
 
 1. **Always run after showing the estimate** — show the number, don't wait for
-   a yes (Claude Web has no spend-approval UX). Josh is on `ultra`: 300,000
+   a yes. There is no spend-approval gate. Josh is on `ultra`: 300,000
    requests a month included. If the estimate says BLOCKED, the plan dropped
    to `basic` — tell him, don't try to run it.
 2. **No region named?** Ask which state(s) before running. Nationwide is
