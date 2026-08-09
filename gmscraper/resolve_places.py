@@ -181,6 +181,7 @@ def resolve_one_row(
 
     if not best:
         # Persist miss / low-confidence for review; mark resolved so we don't re-spend.
+        # No Place Details call — rejects must not burn a second request.
         patch = {
             binding.resolved_column: True,
             binding.confidence_column: round(conf, 4),
@@ -196,15 +197,14 @@ def resolve_one_row(
             "candidates": n_cand or len(results),
         }
 
-    website = best.get("website") or ""
-    domain = best.get("domain") or domain_of(website)
     raw_store["picked"] = {
         "place_id": best.get("place_id"),
         "name": best.get("name"),
         "address": best.get("address"),
-        "website": website,
+        "website": best.get("website"),
     }
     # Never overwrite a stronger existing confidence with a weaker hit.
+    # Skip Place Details — we are not writing website/phone on this path.
     existing_conf = row.get(binding.confidence_column)
     try:
         existing_conf_f = float(existing_conf) if existing_conf is not None else None
@@ -228,12 +228,34 @@ def resolve_one_row(
             "domain": row.get(binding.domain_column),
         }
 
+    # Confidence cleared and we will write — Place Details for website / phone.
+    details = client.place_details(str(best.get("place_id") or ""))
+    website = ""
+    phone = ""
+    if details:
+        website = (details.get("website") or "").strip()
+        phone = (details.get("phone") or "").strip()
+        raw_store["details"] = {
+            "place_id": details.get("place_id"),
+            "website": website,
+            "phone": phone,
+        }
+    # Fall back to search-hit fields only when details omitted them.
+    if not website:
+        website = (best.get("website") or "").strip()
+    if not phone:
+        phone = (best.get("phone") or "").strip()
+    domain = domain_of(website)
+    raw_store["picked"]["website"] = website
+    raw_store["picked"]["phone"] = phone
+    raw_store["picked"]["domain"] = domain
+
     patch = {
         binding.domain_column: domain or None,
         binding.confidence_column: round(conf, 4),
         binding.resolved_column: True,
         "website": website or None,
-        "phone": best.get("phone") or None,
+        "phone": phone or None,
         "place_id": best.get("place_id") or None,
         "latitude": best.get("latitude"),
         "longitude": best.get("longitude"),
@@ -248,6 +270,8 @@ def resolve_one_row(
         "status": "resolved",
         "confidence": conf,
         "domain": domain,
+        "website": website,
+        "phone": phone,
         "candidates": n_cand,
     }
 
@@ -268,7 +292,9 @@ def estimate(
         used = Store(str(DEFAULT_DB)).requests_this_cycle(settings.quota_reset_day)
     except Exception:
         used = 0
-    overage, billable = settings.plan.cost_for(n, used)
+    # Worst case: text search + Place Details per pending row.
+    requests = n * 2
+    overage, billable = settings.plan.cost_for(requests, used)
     blocked = overage == float("inf")
     max_cost = float(getattr(settings, "maps_max_cost_usd", 25.0) or 25.0)
     est = None if blocked else round(float(overage), 4)
@@ -278,7 +304,8 @@ def estimate(
         "schema": binding.schema,
         "table": binding.table,
         "pending_rows": n,
-        "requests": n,
+        "requests": requests,
+        "requests_per_row": 2,
         "maps_plan": settings.plan.name,
         "already_used_this_cycle": used,
         "estimated_overage_usd": est,
@@ -290,6 +317,10 @@ def estimate(
             else ("exceeds_MAPS_MAX_COST_USD" if cost_blocked else None)
         ),
         "billable_requests": billable,
+        "note": (
+            "2 Maps requests/row (search + Place Details). Details only runs when "
+            "a candidate clears min_confidence."
+        ),
     }
 
 

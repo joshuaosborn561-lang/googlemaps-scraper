@@ -143,6 +143,9 @@ class Settings:
     maps_path: str = field(
         default_factory=lambda: _env("MAPS_DATA_PATH", "/searchmaps.php")
     )
+    maps_place_path: str = field(
+        default_factory=lambda: _env("MAPS_PLACE_PATH", "/place.php")
+    )
 
     # openai (any OpenAI-shaped endpoint) | ollama (local)
     llm_provider: str = field(
@@ -271,6 +274,10 @@ class Settings:
     @property
     def maps_url(self) -> str:
         return self._url(self.maps_host, self.maps_path)
+
+    @property
+    def maps_place_url(self) -> str:
+        return self._url(self.maps_host, self.maps_place_path)
 
     @property
     def owj_url(self) -> str:

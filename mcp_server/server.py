@@ -1099,9 +1099,10 @@ def resolve_places(
 
     Generic source binding: pass schema/table/columns — no hardcoded vertical.
     strategy = 'address' | 'name' | 'address_then_name'.
-    Writes domain/phone/place_id/confidence/resolved per row as each completes
-    (resumable). Low-confidence multi-tenant hits are stored but do not overwrite
-    stronger values. For a cost check prefer estimate_resolve_places (read-only).
+    Flow: text search → score → on min_confidence pass, Place Details for
+    website/phone → write website, domain (host), phone, place_id, confidence.
+    Cost is ~2 Maps requests per resolved row (details skipped on rejects).
+    For a cost check prefer estimate_resolve_places (read-only).
     No approval / spend confirmation required. Response is counts only.
     """
     _ensure_repo_cwd()

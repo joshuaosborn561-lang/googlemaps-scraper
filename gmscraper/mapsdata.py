@@ -30,8 +30,9 @@ LIST_KEYS = ("data", "results", "items", "places", "businesses", "result")
 
 ALIASES: dict[str, tuple[str, ...]] = {
     "place_id": (
-        "business_id", "place_id", "placeid", "id", "cid", "data_id",
-        "google_id", "fid", "data_cid",
+        # Prefer Google Place ID (ChIJ…) over Maps-Data business_id (0x…:0x…).
+        "place_id", "placeid", "google_id", "business_id", "id", "cid",
+        "data_id", "fid", "data_cid",
     ),
     "name": ("name", "title", "business_name", "displayname"),
     "address": (
@@ -41,8 +42,22 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "city": ("city", "locality", "town"),
     "state": ("state", "region", "administrative_area", "us_state"),
     "zip": ("zipcode", "zip", "postal_code", "postcode"),
-    "phone": ("phone_number", "phone", "formatted_phone_number", "telephone", "tel"),
-    "website": ("website", "site", "url", "web", "domain_url"),
+    "phone": (
+        "international_phone_number",
+        "formatted_phone_number",
+        "phone_number",
+        "phone",
+        "telephone",
+        "tel",
+    ),
+    "website": (
+        "website_full",
+        "website",
+        "site",
+        "url",
+        "web",
+        "domain_url",
+    ),
     "rating": ("rating", "average_rating", "stars", "score"),
     "reviews": ("review_count", "reviews", "user_ratings_total", "reviews_count",
                 "num_reviews", "rating_count"),
@@ -296,13 +311,12 @@ class MapsDataClient:
         params.update(self.extra_params)
         return params
 
-    def raw_search(self, category: str, zip_row: dict[str, str]) -> Any:
-        params = self.build_params(category, zip_row)
+    def _get_json(self, url: str, params: dict[str, str]) -> Any:
         last: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 self.request_count += 1
-                r = self.session.get(self.s.maps_url, params=params, timeout=self.timeout)
+                r = self.session.get(url, params=params, timeout=self.timeout)
                 if r.status_code in (401, 403):
                     raise AuthError(
                         f"HTTP {r.status_code} from {self.s.maps_host}: check "
@@ -328,6 +342,9 @@ class MapsDataClient:
                     time.sleep(min(2 ** attempt, 30) + random.uniform(0, 1))
         raise MapsDataError(f"failed after {self.max_retries + 1} attempts: {last}")
 
+    def raw_search(self, category: str, zip_row: dict[str, str]) -> Any:
+        return self._get_json(self.s.maps_url, self.build_params(category, zip_row))
+
     def search(
         self, category: str, zip_row: dict[str, str]
     ) -> list[dict[str, Any]]:
@@ -339,6 +356,29 @@ class MapsDataClient:
             if rec["place_id"]:
                 out.append(rec)
         return out
+
+    def place_details(self, place_id: str) -> dict[str, Any] | None:
+        """Fetch Place Details (website / phone) for a search hit's place_id.
+
+        Uses Maps Data `/place.php`. Counts as one billable request.
+        Returns None for synthetic ids or empty payloads.
+        """
+        pid = (place_id or "").strip()
+        if not pid or pid.startswith("syn:"):
+            return None
+        params: dict[str, str] = {"lang": "en", "country": "us"}
+        # Search returns Google place_id (ChIJ…) and/or business_id (0x…:0x…).
+        if pid.startswith("0x") or (":" in pid and not pid.startswith("Ch")):
+            params["business_id"] = pid
+        else:
+            params["place_id"] = pid
+        payload = self._get_json(self.s.maps_place_url, params)
+        items = extract_list(payload)
+        if not items and isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            items = [payload["data"]]
+        if not items:
+            return None
+        return normalize(items[0])
 
 
 def renormalize(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

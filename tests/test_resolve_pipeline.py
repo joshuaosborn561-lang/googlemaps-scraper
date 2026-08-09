@@ -57,6 +57,122 @@ def test_virtual_office_penalty() -> None:
     assert resolve_places.score_candidate(query, result) < 0.5
 
 
+def test_domain_of_strips_www_and_path() -> None:
+    from gmscraper.mapsdata import domain_of
+
+    assert domain_of("https://www.Acme.com/about/team") == "acme.com"
+    assert domain_of("http://www.acme.com") == "acme.com"
+    assert domain_of("acme.com/foo") == "acme.com"
+
+
+def test_resolve_one_row_calls_details_only_on_pass(monkeypatch) -> None:
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(
+        project_id="x",
+        schema="s",
+        table="t",
+        key_column="id",
+        address_column="addr",
+        domain_column="domain",
+        resolved_column="resolved",
+        confidence_column="confidence",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    patches: list[dict] = []
+    monkeypatch.setattr(
+        resolve_places.sb, "patch_row", lambda b, key, patch: patches.append(patch)
+    )
+
+    client = MagicMock()
+    client.request_count = 0
+    # Strong address match
+    client.search.return_value = [
+        {
+            "place_id": "ChIJtest",
+            "name": "Acme Partners",
+            "address": "3102 Maple Ave Ste 500, Dallas, TX 75201",
+            "zip": "75201",
+            "website": "",
+            "phone": "",
+            "latitude": 1.0,
+            "longitude": 2.0,
+        }
+    ]
+    client.place_details.return_value = {
+        "place_id": "ChIJtest",
+        "website": "https://www.acme.com/store/1",
+        "phone": "+12145551212",
+    }
+
+    row = {"id": 1, "addr": "3102 Maple Ave Ste 500, Dallas, TX 75201"}
+    out = resolve_places.resolve_one_row(
+        client, binding, row, strategy="address", min_confidence=0.6
+    )
+    assert out["status"] == "resolved"
+    assert out["domain"] == "acme.com"
+    assert out["website"] == "https://www.acme.com/store/1"
+    assert out["phone"] == "+12145551212"
+    client.place_details.assert_called_once_with("ChIJtest")
+    assert patches[-1]["website"] == "https://www.acme.com/store/1"
+    assert patches[-1]["domain"] == "acme.com"
+    assert patches[-1]["phone"] == "+12145551212"
+
+
+def test_resolve_one_row_skips_details_on_low_confidence(monkeypatch) -> None:
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(
+        project_id="x",
+        schema="s",
+        table="t",
+        key_column="id",
+        address_column="addr",
+        domain_column="domain",
+        resolved_column="resolved",
+        confidence_column="confidence",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    monkeypatch.setattr(resolve_places.sb, "patch_row", lambda *a, **k: None)
+
+    client = MagicMock()
+    # Suite mismatch → low confidence
+    client.search.return_value = [
+        {
+            "place_id": "ChIJreject",
+            "name": "Other Tenant",
+            "address": "3102 Maple Ave Ste 200, Dallas, TX 75201",
+            "zip": "75201",
+            "website": "https://other.test",
+            "phone": "1",
+        }
+    ]
+    out = resolve_places.resolve_one_row(
+        client,
+        binding,
+        {"id": 1, "addr": "3102 Maple Ave Ste 500, Dallas, TX 75201"},
+        strategy="address",
+        min_confidence=0.6,
+    )
+    assert out["status"] == "low_confidence"
+    client.place_details.assert_not_called()
+
+
+def test_estimate_counts_two_requests_per_row(monkeypatch) -> None:
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(
+        project_id="x", schema="s", table="t", key_column="id"
+    )
+    monkeypatch.setattr(resolve_places.sb, "count_pending", lambda b: 10)
+    est = resolve_places.estimate(binding, limit=0)
+    assert est["pending_rows"] == 10
+    assert est["requests"] == 20
+    assert est["requests_per_row"] == 2
+
+
 def test_estimate_only_skips_schema_writes(monkeypatch) -> None:
     from gmscraper import source_binding as sb
 
