@@ -179,8 +179,8 @@ def resolve_sync_target(
         }
     raise ValueError(
         "client_tag is required for sync_to_supabase so each client lands in "
-        "its own table (e.g. client_tag='peterson' → client_peterson.leads, "
-        "client_tag='basco' → client_basco.leads). "
+        "its own table (e.g. client_tag='peterson' → peterson_leads, "
+        "client_tag='basco' → basco_leads). "
         "Call list_clients() for the registry."
     )
 
