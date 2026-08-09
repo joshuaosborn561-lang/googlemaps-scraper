@@ -386,11 +386,13 @@ def enrich_waterfall(
     max_tier: str = DEFAULT_MAX_TIER,
     run_apify: bool = True,
     on_progress: Any | None = None,
+    client_tag: str = "",
 ) -> dict[str, Any]:
     """Walk tiers per row; upsert companies/contacts to Supabase; return counts only.
 
     max_tier (default leadmagic) hard-stops the walk so FullEnrich never fires
-    unless explicitly requested.
+    unless explicitly requested. Pass client_tag so writes go to
+    client_<slug>.contacts / .companies instead of the shared gc.* schema.
     """
     max_tier_n = normalize_max_tier(max_tier)
     parsed = [_norm_row(r) for r in _parse_rows(rows)]
@@ -604,6 +606,7 @@ def enrich_waterfall(
                     if v
                 },
                 dm_lookup_status="found" if dm_tier else "not_found",
+                client_tag=client_tag,
             )
         )
 
@@ -630,6 +633,7 @@ def enrich_waterfall(
                     source_tier=email_tier or dm_tier,
                     place_id=row.get("place_id") or "",
                     confidence=0.7 if email or dm_tier else 0.0,
+                    client_tag=client_tag,
                 )
             )
 
@@ -650,13 +654,20 @@ def enrich_waterfall(
 
     companies_upserted = 0
     contacts_written = 0
+    write_target = gc_sync.resolve_write_schema(client_tag)
     if write_supabase:
-        companies_upserted = gc_sync.upsert_companies(company_rows)
+        companies_upserted = gc_sync.upsert_companies(
+            company_rows, client_tag=client_tag
+        )
         # Emails: ignore (domain, email) conflicts; null emails insert separately.
         with_email = [r for r in contact_rows if r.get("email")]
         no_email = [r for r in contact_rows if not r.get("email")]
-        contacts_written = gc_sync.insert_contacts_ignore_conflict(with_email)
-        contacts_written += gc_sync.insert_contacts(no_email)
+        contacts_written = gc_sync.insert_contacts_ignore_conflict(
+            with_email, client_tag=client_tag
+        )
+        contacts_written += gc_sync.insert_contacts(
+            no_email, client_tag=client_tag
+        )
 
     # Merge live client counters into tier_stats for reporting.
     for name, client in (
@@ -697,6 +708,8 @@ def enrich_waterfall(
         "tier_breakdown": tier_breakdown,
         "need": need,
         "max_tier": max_tier_n,
+        "client_tag": write_target.get("client_tag") or None,
+        "supabase_schema": write_target.get("schema"),
         "apify": apify_result or None,
         "vendors_enabled": {
             "apify": bool(settings.apify_token) and wf._allowed("apify"),

@@ -162,11 +162,11 @@ def test_waterfall_writes_counts_only(tmp_path: Path, monkeypatch) -> None:
 
     upserted = {}
 
-    def fake_companies(rows):
+    def fake_companies(rows, **kw):
         upserted["companies"] = rows
         return len(rows)
 
-    def fake_contacts(rows):
+    def fake_contacts(rows, **kw):
         upserted["contacts"] = rows
         return len(rows)
 

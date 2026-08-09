@@ -1,4 +1,8 @@
-"""Write enrichment results directly to Supabase gc.companies / gc.contacts."""
+"""Write enrichment results to Supabase — per-client schema when client_tag set.
+
+Legacy default remains gc.companies / gc.contacts when no client_tag is given.
+With client_tag='peterson' → client_peterson.companies / .contacts.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,10 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib import error, request
 
-SCHEMA = "gc"
+from . import clients as client_reg
+
+# Legacy shared schema (only used when client_tag is omitted).
+DEFAULT_SCHEMA = "gc"
 COMPANIES = "companies"
 CONTACTS = "contacts"
 
@@ -28,15 +35,28 @@ def supabase_config() -> dict[str, str]:
     return {"url": url, "key": key}
 
 
-def _headers(key: str, *, prefer: str) -> dict[str, str]:
+def resolve_write_schema(client_tag: str = "", schema: str = "") -> dict[str, str]:
+    """Return schema/table names for enrichment writes."""
+    tag = (client_tag or "").strip()
+    if tag:
+        client = client_reg.resolve_client(tag)
+        assert client is not None
+        return {
+            "schema": (schema or "").strip() or client.supabase_schema,
+            "client_tag": client.slug,
+            "companies_table": client.companies_table,
+            "contacts_table": client.contacts_table,
+        }
     return {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "Prefer": prefer,
-        "Accept-Profile": SCHEMA,
-        "Content-Profile": SCHEMA,
+        "schema": (schema or "").strip() or DEFAULT_SCHEMA,
+        "client_tag": "",
+        "companies_table": COMPANIES,
+        "contacts_table": CONTACTS,
     }
+
+
+def _headers(key: str, *, prefer: str, schema: str) -> dict[str, str]:
+    return client_reg.rest_headers(schema, key, prefer=prefer)
 
 
 def _request(
@@ -47,13 +67,14 @@ def _request(
     *,
     body: Any = None,
     prefer: str = "return=minimal",
+    schema: str = DEFAULT_SCHEMA,
 ) -> tuple[int, str]:
     url = f"{base_url}/rest/v1/{path}"
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = request.Request(
         url,
         data=data,
-        headers=_headers(key, prefer=prefer),
+        headers=_headers(key, prefer=prefer, schema=schema),
         method=method,
     )
     try:
@@ -62,43 +83,74 @@ def _request(
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"Supabase {method} {url} failed ({exc.code}): {detail[:500]}"
+            f"Supabase {method} {url} [schema={schema}] failed ({exc.code}): {detail[:500]}"
         ) from exc
 
 
-def upsert_companies(rows: list[dict[str, Any]]) -> int:
+def upsert_companies(
+    rows: list[dict[str, Any]],
+    *,
+    client_tag: str = "",
+    schema: str = "",
+) -> int:
     if not rows:
         return 0
+    target = resolve_write_schema(client_tag, schema)
+    if target["client_tag"]:
+        for r in rows:
+            r.setdefault("client_tag", target["client_tag"])
+    # Legacy gc.companies has no client_tag column — strip it.
+    payload = rows
+    if not target["client_tag"]:
+        payload = [{k: v for k, v in r.items() if k != "client_tag"} for r in rows]
     cfg = supabase_config()
-    # PostgREST upsert on domain PK
     _request(
         "POST",
-        f"{COMPANIES}?on_conflict=domain",
+        f"{target['companies_table']}?on_conflict=domain",
         cfg["key"],
         cfg["url"],
-        body=rows,
+        body=payload,
         prefer="resolution=merge-duplicates,return=minimal",
+        schema=target["schema"],
     )
     return len(rows)
 
 
-def insert_contacts(rows: list[dict[str, Any]]) -> int:
+def insert_contacts(
+    rows: list[dict[str, Any]],
+    *,
+    client_tag: str = "",
+    schema: str = "",
+) -> int:
     """Insert contact rows (used for null-email rows with no unique conflict)."""
     if not rows:
         return 0
+    target = resolve_write_schema(client_tag, schema)
+    if target["client_tag"]:
+        for r in rows:
+            r.setdefault("client_tag", target["client_tag"])
+    payload = rows
+    if not target["client_tag"]:
+        payload = [{k: v for k, v in r.items() if k != "client_tag"} for r in rows]
     cfg = supabase_config()
     _request(
         "POST",
-        CONTACTS,
+        target["contacts_table"],
         cfg["key"],
         cfg["url"],
-        body=rows,
+        body=payload,
         prefer="return=minimal",
+        schema=target["schema"],
     )
     return len(rows)
 
 
-def insert_contacts_ignore_conflict(rows: list[dict[str, Any]]) -> int:
+def insert_contacts_ignore_conflict(
+    rows: list[dict[str, Any]],
+    *,
+    client_tag: str = "",
+    schema: str = "",
+) -> int:
     """Insert contacts; skip duplicates on unique (domain, email).
 
     Rows with a null/empty email must NOT use this path — Postgres unique
@@ -107,18 +159,25 @@ def insert_contacts_ignore_conflict(rows: list[dict[str, Any]]) -> int:
     """
     if not rows:
         return 0
-    # Drop empties so on_conflict=domain,email is well-defined.
     clean = [r for r in rows if (r.get("email") or "").strip()]
     if not clean:
         return 0
+    target = resolve_write_schema(client_tag, schema)
+    if target["client_tag"]:
+        for r in clean:
+            r.setdefault("client_tag", target["client_tag"])
+    payload = clean
+    if not target["client_tag"]:
+        payload = [{k: v for k, v in r.items() if k != "client_tag"} for r in clean]
     cfg = supabase_config()
     _request(
         "POST",
-        f"{CONTACTS}?on_conflict=domain,email",
+        f"{target['contacts_table']}?on_conflict=domain,email",
         cfg["key"],
         cfg["url"],
-        body=clean,
+        body=payload,
         prefer="resolution=ignore-duplicates,return=minimal",
+        schema=target["schema"],
     )
     return len(clean)
 
@@ -154,6 +213,7 @@ def company_row(
     shovels_email: str = "",
     shovels_name: str = "",
     dm_lookup_status: str = "",
+    client_tag: str = "",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     tier = source_tier or {}
@@ -161,7 +221,7 @@ def company_row(
         tier = {**tier, "email": email_source_tier}
     if dm_source_tier:
         tier = {**tier, "dm": dm_source_tier}
-    return {
+    row = {
         "domain": domain,
         "company_name": company_name or None,
         "source": source or None,
@@ -180,6 +240,9 @@ def company_row(
         "dm_lookup_status": dm_lookup_status or None,
         "updated_at": now,
     }
+    if client_tag:
+        row["client_tag"] = client_tag
+    return row
 
 
 def contact_row(
@@ -200,10 +263,11 @@ def contact_row(
     confidence: float | None = None,
     place_id: str = "",
     job_level: str = "",
+    client_tag: str = "",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     title = job_title or ""
-    return {
+    row = {
         "domain": domain,
         "first_name": first_name or None,
         "last_name": last_name or None,
@@ -222,3 +286,6 @@ def contact_row(
         "place_id": place_id or None,
         "updated_at": now,
     }
+    if client_tag:
+        row["client_tag"] = client_tag
+    return row

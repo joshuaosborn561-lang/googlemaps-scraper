@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.6.0",
+    version="1.7.0",
 )
 
 
@@ -952,9 +952,11 @@ def _execute_run_leads(
     out_path: str,
     include_owner_fallback: bool,
     workers: int,
+    client_tag: str = "",
 ) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
     from gmscraper import classify, enrich_site, export, owner, scrape
+    from gmscraper import clients as client_reg
     from gmscraper.config import settings
     from gmscraper.llm import default_workers
     from gmscraper.mapsdata import MapsDataClient
@@ -1013,6 +1015,21 @@ def _execute_run_leads(
 
     tag_plan = _plan_id_from_path(record.plan_path)
     tag_run = current_job_id() or ""
+    if (client_tag or "").strip():
+        resolved = client_reg.resolve_client(client_tag)
+        tag_client = resolved.slug if resolved else client_reg.normalize_slug(client_tag)
+    else:
+        # Prefer a known client alias inside the vertical string; else leave blank
+        # so rows are not mis-tagged as a bogus client.
+        tag_client = ""
+        for cand in (plan.vertical or "", getattr(plan, "icp", "") or ""):
+            try:
+                hit = client_reg.resolve_client(cand.split()[0], required=False)
+                if hit:
+                    tag_client = hit.slug
+                    break
+            except Exception:  # noqa: BLE001
+                continue
     scrape_res = scrape.run(
         store,
         client,
@@ -1024,7 +1041,7 @@ def _execute_run_leads(
         heartbeat_every=10,
         plan_id=tag_plan,
         run_id=tag_run,
-        client_tag=(plan.vertical or "")[:80],
+        client_tag=tag_client,
     )
 
     _job_progress("enrich")
@@ -1123,11 +1140,13 @@ def run_leads(
     include_owner_fallback: bool = False,
     workers: int = 8,
     background: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Execute the full lead pipeline after plan_leads. This is the main "go" tool.
 
     Pass plan_path from plan_leads, or omit it to use the latest saved plan.
-    No approval / auth / spend confirmation required.
+    Pass client_tag ('peterson' / 'basco') so scraped rows are stamped for
+    that client's Supabase tables (peterson_* / basco_*).
 
     On Railway/HTTP this starts a background job — poll get_job_status with the
     returned job_id until completed/failed/stalled/interrupted. Maps scrape
@@ -1148,12 +1167,13 @@ def run_leads(
             "plan_path": record.plan_path,
             "resumable_scrape": True,
             "categories": list(plan.categories),
+            "client_tag": client_tag or None,
         }
         before = find_active_by_queue_key(make_queue_key("run_leads", meta))
         job = start_job(
             "run_leads",
             lambda: _execute_run_leads(
-                plan_path, out_path, include_owner_fallback, workers
+                plan_path, out_path, include_owner_fallback, workers, client_tag
             ),
             meta=meta,
         )
@@ -1167,12 +1187,20 @@ def run_leads(
         return _json(out)
 
     return _json(
-        _execute_run_leads(plan_path, out_path, include_owner_fallback, workers)
+        _execute_run_leads(
+            plan_path, out_path, include_owner_fallback, workers, client_tag
+        )
     )
 
 
-def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[str, Any]:
+def _execute_scrape_maps(
+    plan_path: str,
+    workers: int,
+    max_jobs: int,
+    client_tag: str = "",
+) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
+    from gmscraper import clients as client_reg
     from gmscraper import scrape
     from gmscraper.config import settings
     from gmscraper.mapsdata import MapsDataClient
@@ -1186,6 +1214,11 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
     client = MapsDataClient(settings)
     tag_plan = _plan_id_from_path(record.plan_path)
     tag_run = current_job_id() or ""
+    if (client_tag or "").strip():
+        resolved = client_reg.resolve_client(client_tag)
+        tag_client = resolved.slug if resolved else client_reg.normalize_slug(client_tag)
+    else:
+        tag_client = ""
     res = scrape.run(
         store,
         client,
@@ -1197,7 +1230,7 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
         on_progress=lambda p: _job_progress(**p),
         plan_id=tag_plan,
         run_id=tag_run,
-        client_tag=(getattr(plan, "vertical", None) or "")[:80],
+        client_tag=tag_client,
     )
     return {
         "status": "completed",
@@ -1208,6 +1241,7 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
         "plan_path": record.plan_path,
         "plan_id": tag_plan,
         "run_id": tag_run,
+        "client_tag": tag_client or None,
         "resume_note": (
             "Re-run scrape_maps with the same plan to continue unfinished pairs."
         ),
@@ -1228,10 +1262,11 @@ def scrape_maps(
     workers: int = 8,
     max_jobs: int = 0,
     background: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Paid Maps scrape stage only. Pass plan_path or omit for latest plan.
 
-    No approval / auth / spend confirmation required.
+    Pass client_tag ('peterson' / 'basco') to stamp rows for that client.
     """
     _ensure_repo_cwd()
     resolve_plan(plan_path=plan_path)
@@ -1240,18 +1275,18 @@ def scrape_maps(
         from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
         record = resolve_plan(plan_path=plan_path)
-        meta = {"plan_path": record.plan_path}
+        meta = {"plan_path": record.plan_path, "client_tag": client_tag or None}
         before = find_active_by_queue_key(make_queue_key("scrape_maps", meta))
         job = start_job(
             "scrape_maps",
-            lambda: _execute_scrape_maps(plan_path, workers, max_jobs),
+            lambda: _execute_scrape_maps(plan_path, workers, max_jobs, client_tag),
             meta=meta,
         )
         return _json(
             _started_response(job, attached=before is not None and before.id == job.id)
         )
 
-    return _json(_execute_scrape_maps(plan_path, workers, max_jobs))
+    return _json(_execute_scrape_maps(plan_path, workers, max_jobs, client_tag))
 
 
 @mcp.tool(
@@ -2600,17 +2635,19 @@ def enrich_waterfall(
     max_tier: str = "leadmagic",
     run_apify: bool = True,
     background: bool = True,
+    client_tag: str = "",
 ) -> str:
-    """Walk apify → AI Ark → getleads → LeadMagic → FullEnrich; write to gc.*.
+    """Walk apify → AI Ark → getleads → LeadMagic → FullEnrich.
+
+    Pass client_tag ('peterson' / 'basco') so contacts write to
+    {slug}_contacts / {slug}_companies. Omitting client_tag falls back to
+    the legacy shared gc.* schema (discouraged for new runs).
 
     `rows` = JSON list of {domain, first_name?, last_name?, company_name?, ...}.
     need = 'email' | 'dm' | 'both'.
     max_tier = 'apify' | 'aiark' | 'getleads' | 'leadmagic' | 'fullenrich'
     (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
-
-    Apify+OpenAI is discovery tier 1; AI Ark is people-discovery tier 2.
-    Stops at first success per field. Records source_tier for hit-rate math.
-    No approval / spend confirmation required. Response is counts only.
+    Response is counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import waterfall as wf
@@ -2634,6 +2671,7 @@ def enrich_waterfall(
                 max_tier=max_tier_n,
                 run_apify=bool(run_apify),
                 on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
+                client_tag=client_tag,
             )
         except Exception as exc:  # noqa: BLE001
             return tool_error_from_exception(exc)
@@ -2646,6 +2684,7 @@ def enrich_waterfall(
         meta = {
             "need": need_norm,
             "max_tier": max_tier_n,
+            "client_tag": client_tag or None,
             "rows_chars": len(rows or ""),
             "rows_fingerprint": hashlib.sha1((rows or "").encode()).hexdigest()[:16],
         }
@@ -2681,21 +2720,26 @@ def export_csv(
     radius_miles: float = 0.0,
     include_reason: bool = False,
     clean: bool = True,
+    client_tag: str = "",
+    plan_id: str = "",
+    run_id: str = "",
 ) -> str:
     """Return matching leads as CSV text in the response (free).
 
-    Shape matches Property Owners pmf_shovels_contractors_export_csv:
-      { total_matching, capped_at: 5000, csv: "<text>", ... }
-
-    Caps at 5000 rows. Large responses may be spilled to a local file by the
-    MCP client harness. Optional out_path also writes a full CSV on disk.
-    clean=true (default) drops placeholder / agency emails. icp_reason is
-    opt-in via include_reason. Blank cities are backfilled from address.
+    Pass client_tag to export one client's rows only (peterson / basco).
+    Caps at 5000 rows. clean=true drops placeholder / agency emails.
     """
     _ensure_repo_cwd()
     from gmscraper import export
 
     state_list = [s.strip().upper() for s in states.split(",") if s.strip()] or None
+    # Resolve aliases so export_csv(client_tag='kyle') works.
+    tag = ""
+    if (client_tag or "").strip():
+        from gmscraper import clients as client_reg
+
+        resolved = client_reg.resolve_client(client_tag)
+        tag = resolved.slug if resolved else client_tag.strip()
     payload = export.export_payload(
         _store(),
         icp_only=icp_only,
@@ -2712,6 +2756,9 @@ def export_csv(
         include_reason=include_reason,
         clean=clean,
         out_path=out_path or None,
+        client_tag=tag or None,
+        plan_id=plan_id or None,
+        run_id=run_id or None,
         backfill_cities=True,
     )
     return _json(payload)
@@ -2848,6 +2895,63 @@ def sample_leads(
 
 @mcp.tool(
     annotations=_ann(
+        'List registered clients',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
+    )
+)
+def list_clients() -> str:
+    """Show registered clients and their dedicated Supabase tables.
+
+    peterson → public.peterson_{leads,contacts,companies} (Kyle / Roofs by Peterson)
+    basco    → public.basco_{leads,contacts,companies} (Carlos / Basco Warranty)
+    Always pass client_tag on scrape/sync/enrich so rows never mix.
+    """
+    from gmscraper import clients as client_reg
+
+    return _json(
+        {
+            "clients": client_reg.list_clients_public(),
+            "usage": {
+                "scrape": "run_leads(..., client_tag='peterson'|'basco')",
+                "sync": "sync_to_supabase(client_tag='peterson'|'basco')",
+                "enrich": "enrich_waterfall(..., client_tag='peterson'|'basco')",
+                "aliases": "kyle→peterson, carlos→basco",
+            },
+        }
+    )
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Ensure client Supabase tables',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
+    )
+)
+def ensure_client_tables(client_tag: str = "") -> str:
+    """Probe (and report DDL for) per-client Supabase schemas.
+
+    Creates nothing itself when PostgREST cannot DDL — returns apply_sql to
+    run once in the Supabase SQL editor. Pass client_tag to check one client,
+    or omit to check all registered clients.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import clients as client_reg
+    from mcp_server.errors import tool_error_from_exception
+
+    try:
+        return _json(client_reg.ensure_client_tables(client_tag))
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
+
+
+@mcp.tool(
+    annotations=_ann(
         'Sync leads to Supabase',
         read_only=False,
         destructive=False,
@@ -2856,7 +2960,9 @@ def sample_leads(
     )
 )
 def sync_to_supabase(
-    table: str = "maps_leads",
+    client_tag: str = "",
+    table: str = "",
+    schema: str = "",
     dataset: str = "",
     county: str = "",
     cursor: int = 0,
@@ -2867,12 +2973,15 @@ def sync_to_supabase(
     with_email: bool = False,
     truncate: bool = False,
     run_label: str = "",
+    plan_id: str = "",
+    run_id: str = "",
     background: bool = True,
 ) -> str:
-    """Batch-upsert into Supabase. Counts only — never echoes rows.
+    """Batch-upsert into the client's Supabase table. Counts only.
 
-    dataset='' (default): upsert local leads into `table` (maps_leads) on
-    (place_id, run_label).
+    dataset='' (default): requires client_tag ('peterson' or 'basco').
+    Writes to {slug}_leads (never a shared maps_leads dump).
+    Filters local SQLite by that client_tag so clients cannot mix.
 
     dataset='parcels': page scrape_leads → permit_parcel.parcels with cursor
     pagination. Honour `county`. Upsert on natural key (county, account_id).
@@ -2911,16 +3020,24 @@ def sync_to_supabase(
         return _json(_run_parcels())
 
     from gmscraper import supabase_sync
+    from mcp_server.errors import tool_error_from_exception
 
-    result = supabase_sync.sync_to_supabase(
-        _store(),
-        table=table or "maps_leads",
-        icp_only=icp_only,
-        with_email=with_email,
-        truncate=truncate,
-        run_label=run_label,
-    )
-    return _json(result)
+    try:
+        result = supabase_sync.sync_to_supabase(
+            _store(),
+            client_tag=client_tag,
+            table=table,
+            schema=schema,
+            icp_only=icp_only,
+            with_email=with_email,
+            truncate=truncate,
+            run_label=run_label,
+            plan_id=plan_id,
+            run_id=run_id,
+        )
+        return _json(result)
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
 
 
 @mcp.tool(
@@ -3113,9 +3230,12 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
             if kind == "run_leads" and meta.get("plan_path"):
                 plan_path = meta["plan_path"]
                 workers = int(meta.get("workers") or 8)
+                ctag = str(meta.get("client_tag") or "")
                 job = start_job(
                     "run_leads",
-                    lambda p=plan_path, w=workers: _execute_run_leads(p, "", True, w),
+                    lambda p=plan_path, w=workers, c=ctag: _execute_run_leads(
+                        p, "", True, w, c
+                    ),
                     meta={**meta, "auto_resumed_from": rec.get("id")},
                     queue_key=make_queue_key("run_leads", meta),
                     priority=int(meta.get("priority") or 10),
@@ -3125,10 +3245,11 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 plan_path = meta["plan_path"]
                 workers = int(meta.get("workers") or 8)
                 max_jobs = int(meta.get("max_jobs") or 0)
+                ctag = str(meta.get("client_tag") or "")
                 job = start_job(
                     "scrape_maps",
-                    lambda p=plan_path, w=workers, m=max_jobs: _execute_scrape_maps(
-                        p, w, m
+                    lambda p=plan_path, w=workers, m=max_jobs, c=ctag: _execute_scrape_maps(
+                        p, w, m, c
                     ),
                     meta={**meta, "auto_resumed_from": rec.get("id")},
                     queue_key=make_queue_key("scrape_maps", meta),

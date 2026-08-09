@@ -328,11 +328,11 @@ def test_waterfall_aiark_runs_before_getleads(monkeypatch) -> None:
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
-    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
-        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows: len(rows)
+        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows, **kw: len(rows)
     )
-    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows, **kw: len(rows))
 
     out = waterfall.enrich_waterfall(
         [{"domain": "acme.test", "company_name": "Acme"}],
@@ -369,11 +369,11 @@ def test_waterfall_max_tier_aiark_blocks_later(monkeypatch) -> None:
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
-    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
-        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows: len(rows)
+        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows, **kw: len(rows)
     )
-    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows, **kw: len(rows))
 
     out = waterfall.enrich_waterfall(
         [{"domain": "acme.test", "company_name": "Acme"}],

@@ -1,4 +1,8 @@
-"""Push export-shaped leads into Supabase for SQL / downstream joins."""
+"""Push export-shaped leads into per-client Supabase tables.
+
+Default path: client_tag → client_<slug>.leads (never a shared maps_leads dump
+unless explicitly overridden with table= for legacy).
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib import error, request
 
+from . import clients as client_reg
 from . import export
 
 BATCH_SIZE = 500
@@ -31,13 +36,13 @@ def supabase_config() -> dict[str, str]:
     return {"url": url, "key": key}
 
 
-def _headers(key: str, *, prefer: str) -> dict[str, str]:
-    return {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "Prefer": prefer,
-    }
+def _headers(
+    key: str,
+    *,
+    prefer: str,
+    schema: str = "public",
+) -> dict[str, str]:
+    return client_reg.rest_headers(schema, key, prefer=prefer)
 
 
 def _request(
@@ -47,12 +52,13 @@ def _request(
     *,
     body: Any = None,
     prefer: str = "return=minimal",
+    schema: str = "public",
 ) -> tuple[int, str]:
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = request.Request(
         url,
         data=data,
-        headers=_headers(key, prefer=prefer),
+        headers=_headers(key, prefer=prefer, schema=schema),
         method=method,
     )
     try:
@@ -60,17 +66,24 @@ def _request(
             return resp.status, resp.read().decode("utf-8", errors="replace")
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Supabase {method} {url} failed ({exc.code}): {detail[:500]}") from exc
+        raise RuntimeError(
+            f"Supabase {method} {url} [schema={schema}] failed ({exc.code}): {detail[:500]}"
+        ) from exc
 
 
-def truncate_table(table: str = "maps_leads") -> None:
+def truncate_table(table: str = "leads", *, schema: str = "public") -> None:
     cfg = supabase_config()
-    # PostgREST requires a filter; delete every row that has a place_id.
     url = f"{cfg['url']}/rest/v1/{table}?place_id=not.is.null"
-    _request("DELETE", url, cfg["key"], prefer="return=minimal")
+    _request("DELETE", url, cfg["key"], prefer="return=minimal", schema=schema)
 
 
-def _row_for_supabase(rec: dict[str, Any], run_label: str, synced_at: str) -> dict[str, Any]:
+def _row_for_supabase(
+    rec: dict[str, Any],
+    run_label: str,
+    synced_at: str,
+    *,
+    client_tag: str,
+) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for col in export.COLUMNS:
         val = rec.get(col)
@@ -84,14 +97,30 @@ def _row_for_supabase(rec: dict[str, Any], run_label: str, synced_at: str) -> di
                 out[col] = int(val) if val not in (None, "") else None
             except (TypeError, ValueError):
                 out[col] = None
+        elif col == "in_icp":
+            # export stores yes/no strings; Supabase column is boolean.
+            if val in (True, False):
+                out[col] = val
+            elif str(val).strip().lower() in ("yes", "true", "1"):
+                out[col] = True
+            elif str(val).strip().lower() in ("no", "false", "0"):
+                out[col] = False
+            else:
+                out[col] = None
         else:
             out[col] = "" if val is None else val
+    out["client_tag"] = client_tag or out.get("client_tag") or ""
     out["run_label"] = run_label or ""
     out["synced_at"] = synced_at
     return out
 
 
-def upsert_rows(table: str, rows: list[dict[str, Any]]) -> int:
+def upsert_rows(
+    table: str,
+    rows: list[dict[str, Any]],
+    *,
+    schema: str = "public",
+) -> int:
     if not rows:
         return 0
     cfg = supabase_config()
@@ -108,43 +137,103 @@ def upsert_rows(table: str, rows: list[dict[str, Any]]) -> int:
             cfg["key"],
             body=batch,
             prefer="resolution=merge-duplicates,return=minimal",
+            schema=schema,
         )
         synced += len(batch)
     return synced
 
 
+def resolve_sync_target(
+    *,
+    client_tag: str = "",
+    table: str = "",
+    schema: str = "",
+) -> dict[str, str]:
+    """Pick schema/table from client registry unless explicitly overridden."""
+    tag = (client_tag or "").strip()
+    explicit_table = (table or "").strip()
+    explicit_schema = (schema or "").strip()
+
+    if tag:
+        client = client_reg.resolve_client(tag)
+        assert client is not None
+        return {
+            "client_tag": client.slug,
+            "schema": explicit_schema or client.supabase_schema,
+            "table": explicit_table or client.leads_table,
+            "fqn": (
+                f"{explicit_schema or client.supabase_schema}."
+                f"{explicit_table or client.leads_table}"
+            ),
+            "display_name": client.display_name,
+        }
+
+    # Legacy escape hatch: shared maps_leads only when no client_tag.
+    if explicit_table and explicit_table != "maps_leads":
+        return {
+            "client_tag": "",
+            "schema": explicit_schema or "public",
+            "table": explicit_table,
+            "fqn": f"{explicit_schema or 'public'}.{explicit_table}",
+            "display_name": "",
+        }
+    raise ValueError(
+        "client_tag is required for sync_to_supabase so each client lands in "
+        "its own table (e.g. client_tag='peterson' → client_peterson.leads, "
+        "client_tag='basco' → client_basco.leads). "
+        "Call list_clients() for the registry."
+    )
+
+
 def sync_to_supabase(
     store,
     *,
-    table: str = "maps_leads",
+    client_tag: str = "",
+    table: str = "",
+    schema: str = "",
     icp_only: bool = False,
     with_email: bool = False,
     truncate: bool = False,
     run_label: str = "",
+    plan_id: str = "",
+    run_id: str = "",
 ) -> dict[str, Any]:
-    """Batch-upsert leads. Returns counts only — never row payloads."""
-    table = (table or "maps_leads").strip() or "maps_leads"
-    label = (run_label or "").strip()
+    """Batch-upsert leads into the client's Supabase table. Counts only."""
+    target = resolve_sync_target(
+        client_tag=client_tag, table=table, schema=schema
+    )
+    label = (run_label or "").strip() or target["client_tag"]
     # Touch config early so missing env fails before truncate/work.
     supabase_config()
 
     if truncate:
-        truncate_table(table)
+        truncate_table(target["table"], schema=target["schema"])
 
     synced_at = datetime.now(timezone.utc).isoformat()
     rows = [
-        _row_for_supabase(rec, label, synced_at)
+        _row_for_supabase(
+            rec, label, synced_at, client_tag=target["client_tag"]
+        )
         for rec in export.iter_leads(
             store,
             icp_only=icp_only,
             with_email=with_email,
+            client_tag=target["client_tag"] or None,
+            plan_id=plan_id or None,
+            run_id=run_id or None,
             order="name",
         )
     ]
-    n = upsert_rows(table, rows)
+    n = upsert_rows(target["table"], rows, schema=target["schema"])
     return {
-        "table": table,
+        "client_tag": target["client_tag"],
+        "display_name": target.get("display_name") or None,
+        "schema": target["schema"],
+        "table": target["table"],
+        "fqn": target["fqn"],
         "rows_synced": n,
         "rows_skipped": 0,
         "run_label": label,
+        "plan_id": plan_id or None,
+        "run_id": run_id or None,
     }

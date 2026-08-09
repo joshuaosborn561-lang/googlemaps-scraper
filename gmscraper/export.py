@@ -19,7 +19,7 @@ COLUMNS = [
     "address", "city", "state", "zip", "source_zip",
     "rating", "reviews", "main_category", "types", "latitude", "longitude",
     "maps_url", "in_icp", "icp_confidence", "icp_reason", "source_category",
-    "permit_count", "source",
+    "permit_count", "source", "client_tag", "plan_id", "run_id",
 ]
 
 # Default columns returned to MCP clients (icp_reason opt-in).
@@ -42,6 +42,7 @@ SELECT b.place_id, b.name, b.phone, b.website, b.domain, b.address, b.city,
        b.state, b.zip, b.source_zip, b.rating, b.reviews, b.main_category, b.types,
        b.latitude, b.longitude, b.maps_url, b.source_category,
        b.permit_count, b.source AS lead_source,
+       b.client_tag, b.plan_id, b.run_id,
        v.in_icp, v.confidence AS icp_confidence, v.reason AS icp_reason,
        o.owner_name, o.owner_title, o.source AS owner_source
 FROM businesses b
@@ -66,6 +67,9 @@ def _build_where(
     state: str | None = None,
     q: str | None = None,
     source: str | None = None,
+    client_tag: str | None = None,
+    plan_id: str | None = None,
+    run_id: str | None = None,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     args: list[Any] = []
@@ -113,6 +117,15 @@ def _build_where(
     if source:
         clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
         args.append(source.strip().lower())
+    if client_tag:
+        clauses.append("b.client_tag = ?")
+        args.append(client_tag.strip())
+    if plan_id:
+        clauses.append("b.plan_id = ?")
+        args.append(plan_id.strip())
+    if run_id:
+        clauses.append("b.run_id = ?")
+        args.append(run_id.strip())
     if q:
         needle = f"%{q.strip().lower()}%"
         clauses.append(
@@ -259,6 +272,9 @@ def iter_leads(
     state: str | None = None,
     q: str | None = None,
     source: str | None = None,
+    client_tag: str | None = None,
+    plan_id: str | None = None,
+    run_id: str | None = None,
     center: str | None = None,
     radius_miles: float | None = None,
     center_lat: float | None = None,
@@ -284,6 +300,9 @@ def iter_leads(
         state=state,
         q=q,
         source=source,
+        client_tag=client_tag,
+        plan_id=plan_id,
+        run_id=run_id,
     )
     sql = BASE_SQL + where
     if order == "recent":
@@ -403,6 +422,9 @@ def export_payload(
     state: str | None = None,
     q: str | None = None,
     source: str | None = None,
+    client_tag: str | None = None,
+    plan_id: str | None = None,
+    run_id: str | None = None,
     center: str | None = None,
     radius_miles: float | None = None,
     include_reason: bool = False,
@@ -427,6 +449,9 @@ def export_payload(
         state=state,
         q=q,
         source=source,
+        client_tag=client_tag,
+        plan_id=plan_id,
+        run_id=run_id,
         center=center,
         radius_miles=radius_miles,
         order="name",

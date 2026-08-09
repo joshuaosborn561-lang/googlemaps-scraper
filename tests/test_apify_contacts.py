@@ -146,11 +146,11 @@ def test_parse_filters_title_and_company(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         apify_contacts, "make_llm", lambda settings, model="": FakeLLM()
     )
-    monkeypatch.setattr(apify_contacts.gc_sync, "upsert_companies", lambda rows: len(rows))
+    monkeypatch.setattr(apify_contacts.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
-        apify_contacts.gc_sync, "insert_contacts_ignore_conflict", lambda rows: len(rows)
+        apify_contacts.gc_sync, "insert_contacts_ignore_conflict", lambda rows, **kw: len(rows)
     )
-    monkeypatch.setattr(apify_contacts.gc_sync, "insert_contacts", lambda rows: len(rows))
+    monkeypatch.setattr(apify_contacts.gc_sync, "insert_contacts", lambda rows, **kw: len(rows))
 
     out = apify_contacts.parse_contacts_openai(store, run_id="run-bad", workers=1)
     assert out["domains_processed"] == 1
@@ -197,11 +197,11 @@ def test_waterfall_max_tier_blocks_fullenrich(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
-    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
-        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows: len(rows)
+        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows, **kw: len(rows)
     )
-    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows, **kw: len(rows))
 
     out = waterfall.enrich_waterfall(
         [
@@ -255,11 +255,11 @@ def test_waterfall_max_tier_apify_skips_paid_dm(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(
         waterfall, "FullEnrichClient", lambda: MagicMock(enabled=False, calls=0, hits=0)
     )
-    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
-        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows: len(rows)
+        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows, **kw: len(rows)
     )
-    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows: len(rows))
+    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows, **kw: len(rows))
 
     out = waterfall.enrich_waterfall(
         [{"domain": "acme.test", "company_name": "Acme"}],
