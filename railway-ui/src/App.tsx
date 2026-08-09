@@ -269,7 +269,6 @@ function App() {
                         className="example-chip"
                         onClick={() => {
                           setPrompt(example)
-                          setApproved(false)
                         }}
                       >
                         {example}
