@@ -40,8 +40,10 @@ Do NOT use this for:
    approve spend.
    Only stop if the plan is BLOCKED (Maps hard limit).
 5. On the Railway/HTTP server, runs are background jobs. Poll `get_job_status`
-   until completed/failed. Then QA with `sample_leads`, and sync with
-   `sync_to_supabase(run_label=...)` so results are queryable in SQL.
+   until completed/failed/stalled/interrupted. If stalled or interrupted
+   (container restart killed the worker), re-call `run_leads` with the same
+   `plan_path` — Maps scrape resumes from unfinished ZIP×category pairs.
+   Then QA with `sample_leads`, and sync with `sync_to_supabase(run_label=...)`.
 6. Deliver the outcome: how many leads, sample quality notes, Supabase table /
    run_label, email/owner coverage. Do not dump flags or stage lectures.
 
