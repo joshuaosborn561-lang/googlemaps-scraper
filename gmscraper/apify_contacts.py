@@ -1,5 +1,6 @@
-"""Apify website-contact-finder crawl + OpenAI person parsing.
+"""Apify contact-info-scraper crawl + OpenAI person parsing.
 
+Default actor: vdrmota/contact-info-scraper.
 Never returns row payloads to MCP callers — counts / run_id only.
 """
 
@@ -21,10 +22,11 @@ from .config import settings
 from .llm import OllamaError, make_llm
 from .store import Store
 
-# Pricing model (FREE tier) for automation-lab/website-contact-finder
-COST_START_USD = 0.035
-COST_WEBSITE_USD = 0.001
-COST_EMAIL_VERIFY_USD = 0.002
+# Pricing model (FREE tier) for vdrmota/contact-info-scraper
+# https://apify.com/vdrmota/contact-info-scraper/pricing
+COST_START_USD = 0.001  # Actor start per 1 GB
+COST_PAGE_USD = 0.002  # scraped page
+# Email-verify / leads-enrichment add-ons stay OFF (expensive); verify_emails is ignored.
 
 POLL_INTERVAL_SEC = 5.0
 POLL_MAX_WAIT_SEC = 60 * 45  # 45 minutes
@@ -88,13 +90,20 @@ PARSE_SCHEMA = {
 }
 
 
-def estimate_cost_usd(n_urls: int, verify_emails: bool = False) -> float:
+def estimate_cost_usd(
+    n_urls: int,
+    verify_emails: bool = False,
+    max_pages_per_site: int = 5,
+) -> float:
+    """Upper-bound FREE-tier estimate: start + pages × maxRequestsPerStartUrl.
+
+    verify_emails is accepted for API compat but does not enable the paid
+    leads-enrichment / email-verification add-ons on this actor.
+    """
+    del verify_emails
     n = max(0, int(n_urls))
-    return (
-        COST_START_USD
-        + COST_WEBSITE_USD * n
-        + (COST_EMAIL_VERIFY_USD * n if verify_emails else 0.0)
-    )
+    pages_per = max(1, int(max_pages_per_site or 5))
+    return COST_START_USD + COST_PAGE_USD * n * pages_per
 
 
 def apify_token_valid(token: str | None = None, timeout: int = 15) -> bool:
@@ -233,12 +242,21 @@ def crawl(
     run_label: str = "",
 ) -> dict[str, Any]:
     urls = resolve_urls(store, domains=domains, source=source, limit=limit)
-    estimated = round(estimate_cost_usd(len(urls), verify_emails=verify_emails), 6)
+    pages_per = max(1, int(max_pages_per_site or 5))
+    estimated = round(
+        estimate_cost_usd(
+            len(urls),
+            verify_emails=verify_emails,
+            max_pages_per_site=pages_per,
+        ),
+        6,
+    )
     max_cost = float(settings.apify_max_cost_usd or 5.0)
     base = {
         "domains": len(urls),
         "estimated_cost_usd": estimated,
         "max_cost_usd": max_cost,
+        "max_pages_per_site": pages_per,
         "verify_emails": bool(verify_emails),
         "actor": settings.apify_contact_actor,
         "run_label": run_label or "",
@@ -265,24 +283,27 @@ def crawl(
         raise RuntimeError("APIFY_TOKEN failed validation against /v2/users/me")
 
     actor = _actor_id(settings.apify_contact_actor)
+    # vdrmota/contact-info-scraper input schema
     run_input: dict[str, Any] = {
-        "urls": urls,
-        "maxPagesPerSite": int(max_pages_per_site or 5),
-        "maxConcurrency": 10,
-        "maxWebsitesConcurrency": 10,
-        "requestTimeoutSecs": 30,
-        "useProxy": bool(use_proxy),
-        "verifyEmails": bool(verify_emails),
+        "startUrls": [{"url": u} for u in urls],
+        "maxRequestsPerStartUrl": pages_per,
+        "mergeContacts": True,
+        "maxDepth": 2,
+        "sameDomain": True,
+        "considerChildFrames": False,
+        # Keep paid leads / email-verify add-ons OFF (default 0 / false).
+        "maximumLeadsEnrichmentRecords": 0,
+        "verifyLeadsEnrichmentEmails": False,
+        "useBrowser": False,
+        "proxyConfig": {"useApifyProxy": bool(use_proxy)},
     }
-    if use_proxy:
-        run_input["proxyConfiguration"] = {"useApifyProxy": True}
 
     start_url = f"{settings.apify_base_url}/v2/acts/{actor}/runs"
     params = {
         "token": token,
         "maxTotalChargeUsd": max_cost,
         "timeout": 600,
-        "memory": 256,
+        "memory": 1024,
     }
     resp = requests.post(
         start_url,
@@ -374,20 +395,45 @@ def _fetch_dataset_items(dataset_id: str, token: str) -> list[dict[str, Any]]:
 
 
 def _item_domain(item: dict[str, Any]) -> str:
-    for key in ("domain", "website", "url", "inputUrl", "startUrl", "loadedUrl"):
+    for key in (
+        "domain",
+        "website",
+        "url",
+        "originalStartUrl",
+        "inputUrl",
+        "startUrl",
+        "loadedUrl",
+    ):
         val = item.get(key)
         if isinstance(val, str) and val.strip():
             if "://" in val or "/" in val:
                 return _domain_from_url(_normalize_url(val))
             return val.strip().lower().lstrip("www.")
+    scraped = item.get("scrapedUrls")
+    if isinstance(scraped, list) and scraped:
+        first = scraped[0]
+        if isinstance(first, str) and first.strip():
+            return _domain_from_url(_normalize_url(first))
     return ""
 
 
 def _item_url(item: dict[str, Any]) -> str:
-    for key in ("url", "loadedUrl", "startUrl", "inputUrl", "website"):
+    for key in (
+        "originalStartUrl",
+        "url",
+        "loadedUrl",
+        "startUrl",
+        "inputUrl",
+        "website",
+    ):
         val = item.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
+    scraped = item.get("scrapedUrls")
+    if isinstance(scraped, list):
+        for u in scraped:
+            if isinstance(u, str) and u.strip():
+                return u.strip()
     domain = _item_domain(item)
     return f"https://{domain}" if domain else ""
 
@@ -402,8 +448,21 @@ def _item_text(item: dict[str, Any]) -> str:
         val = item.get(key)
         if isinstance(val, str) and val.strip():
             chunks.append(val.strip())
-    # Structured contact fields also help the model (emails seen on page).
-    for key in ("emails", "phones", "socials", "people", "contacts"):
+    # Structured contact fields (vdrmota/contact-info-scraper shape).
+    for key in (
+        "emails",
+        "phones",
+        "phonesUncertain",
+        "linkedIns",
+        "facebooks",
+        "twitters",
+        "instagrams",
+        "leadsEnrichment",
+        "socials",
+        "people",
+        "contacts",
+        "scrapedUrls",
+    ):
         val = item.get(key)
         if val:
             chunks.append(f"{key}: {json.dumps(val, ensure_ascii=False)[:4000]}")
@@ -594,7 +653,7 @@ def parse_contacts_openai(
                 email=p.get("email") or "",
                 cellphone=p.get("phone") or "",
                 linkedin_url=p.get("linkedin_url") or "",
-                source_tool="apify:website-contact-finder",
+                source_tool="apify:contact-info-scraper",
                 source_tier="apify_openai",
                 source_url=p.get("source_url") or res.get("source_url") or "",
                 confidence=float(p.get("confidence") or 0.0),
@@ -609,7 +668,7 @@ def parse_contacts_openai(
                 domain=res["domain"],
                 title=p.get("job_title") or "",
                 email=p.get("email") or "",
-                source="apify:website-contact-finder",
+                source="apify:contact-info-scraper",
                 source_tier="apify_openai",
                 confidence=float(p.get("confidence") or 0.0),
                 source_url=p.get("source_url") or "",

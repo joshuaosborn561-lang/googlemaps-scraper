@@ -1482,7 +1482,7 @@ def apify_contact_crawl(
     run_label: str = "",
     background: bool = True,
 ) -> str:
-    """Run automation-lab/website-contact-finder; persist raw items locally.
+    """Run vdrmota/contact-info-scraper; persist raw items locally.
 
     Pass domains as comma-separated hosts/URLs, or source='maps_no_owner' /
     'icp_no_owner' to select from local SQLite. Prefer estimate_apify_contact_crawl

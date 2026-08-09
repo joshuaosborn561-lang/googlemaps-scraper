@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS emails (
 );
 CREATE INDEX IF NOT EXISTS idx_emails_domain ON emails(domain);
 
--- Raw Apify website-contact-finder dataset items (one row per item).
+-- Raw Apify contact-info-scraper dataset items (one row per item).
 CREATE TABLE IF NOT EXISTS apify_contact_raw (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      TEXT NOT NULL,

@@ -216,7 +216,7 @@ class Settings:
     )
     apify_contact_actor: str = field(
         default_factory=lambda: _env(
-            "APIFY_CONTACT_ACTOR", "automation-lab/website-contact-finder"
+            "APIFY_CONTACT_ACTOR", "vdrmota/contact-info-scraper"
         )
     )
     apify_content_actor: str = field(

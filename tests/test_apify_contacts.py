@@ -14,11 +14,14 @@ from gmscraper.vendors.base import EmailHit, PersonHit
 
 
 def test_estimate_cost_215_domains() -> None:
-    # 0.035 + 0.001*215 = 0.25
-    assert apify_contacts.estimate_cost_usd(215, verify_emails=False) == pytest.approx(0.25)
-    assert apify_contacts.estimate_cost_usd(215, verify_emails=True) == pytest.approx(
-        0.035 + 0.001 * 215 + 0.002 * 215
+    # FREE tier: 0.001 start + 0.002/page × 215 domains × 5 pages = 2.151
+    assert apify_contacts.estimate_cost_usd(215, max_pages_per_site=5) == pytest.approx(
+        0.001 + 0.002 * 215 * 5
     )
+    # verify_emails does not change estimate (leads-enrichment add-on stays off)
+    assert apify_contacts.estimate_cost_usd(
+        215, verify_emails=True, max_pages_per_site=5
+    ) == pytest.approx(0.001 + 0.002 * 215 * 5)
 
 
 def test_estimate_only_does_not_start(tmp_path: Path, monkeypatch) -> None:
@@ -33,7 +36,7 @@ def test_estimate_only_does_not_start(tmp_path: Path, monkeypatch) -> None:
     assert out["started"] is False
     assert out["blocked"] is False
     assert out["domains"] == 215
-    assert out["estimated_cost_usd"] == pytest.approx(0.25)
+    assert out["estimated_cost_usd"] == pytest.approx(0.001 + 0.002 * 215 * 5)
     assert out.get("run_id") is None
     assert store.apify_contact_raw_rows() == []
 
@@ -51,7 +54,7 @@ def test_cost_ceiling_blocks_run(tmp_path: Path, monkeypatch) -> None:
         )
     assert out["blocked"] is True
     assert out["started"] is False
-    assert out["estimated_cost_usd"] == pytest.approx(0.25)
+    assert out["estimated_cost_usd"] == pytest.approx(0.001 + 0.002 * 215 * 5)
 
 
 def test_save_apify_contact_raw(tmp_path: Path) -> None:
@@ -224,7 +227,7 @@ def test_waterfall_max_tier_apify_skips_paid_dm(tmp_path: Path, monkeypatch) -> 
         name="Jason Parrott",
         domain="acme.test",
         title="President",
-        source="apify:website-contact-finder",
+        source="apify:contact-info-scraper",
         source_tier="apify_openai",
         confidence=0.9,
     )
