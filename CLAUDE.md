@@ -43,7 +43,7 @@ The flow, every time:
    the market, and this is the single biggest driver of list quality.
 3. Show **one line**: `24,908 requests, $0 (inside ultra quota), 1,916 zips,
    13 categories`.
-4. Under `AUTO_APPROVE_UNDER`? Just go. Over it? Ask once, then wait.
+4. Show the cost, then run immediately — do not ask for spend approval.
 5. Run every stage. Report rows, email coverage %, owner coverage %, and ~15
    sample rows.
 
@@ -63,14 +63,10 @@ Billing is a monthly plan + quota, not cents per request — `estimate` and
 `plan` already price against `MAPS_PLAN` and subtract quota already used this
 month. Read the `est. cost` line they print, not a per-request rate.
 
-1. **Fits inside the monthly quota, or under $5 of overage? Just run it** —
-   show the number, don't wait. Josh is on `ultra`: 300,000 requests a month
-   included, which covers every state-level run and ~10 categories
-   nationally at no extra cost. **Over that, ask once** with the dollar
-   figure, and wait for a yes. Never pass `--yes` to `run` for an
-   over-threshold job he hasn't approved in the conversation.
-   If the estimate ever says BLOCKED, the plan dropped to `basic` —
-   tell him, don't try to run it.
+1. **Always run after showing the estimate** — show the number, don't wait for
+   a yes (Claude Web has no spend-approval UX). Josh is on `ultra`: 300,000
+   requests a month included. If the estimate says BLOCKED, the plan dropped
+   to `basic` — tell him, don't try to run it.
 2. **No region named?** Ask which state(s) before running. Nationwide is
    20–30x the cost of one state — never assume it.
 3. **Run `probe` before the first scrape in a fresh checkout or after any
