@@ -278,12 +278,53 @@ def find_active_by_queue_key(queue_key: str) -> Job | None:
     return None
 
 
+_RESUMABLE_KINDS = frozenset(
+    {
+        "run_leads",
+        "scrape_maps",
+        "enrich_sites",
+        "resolve_places",
+        "pipeline_run",
+        "crawl_team_pages",
+    }
+)
+
+
 def sweep_orphaned_jobs() -> dict[str, Any]:
-    """On process start, no in-process workers exist — flip leftovers to interrupted."""
+    """On process start, no in-process workers exist — flip leftovers to interrupted.
+
+    Also returns previously interrupted resumable jobs that have not yet been
+    auto-resume-attempted (so a deploy that ships auto-resume can reclaim work
+    killed by earlier restarts).
+    """
     global _running_id, _wait_queue
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     flipped: list[str] = []
     records: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    now = time.time()
+
+    def _record(job: Job, *, mark_attempt: bool = False) -> None:
+        meta = dict(job.meta or {})
+        key = str(meta.get("queue_key") or make_queue_key(job.kind, meta))
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        if mark_attempt:
+            meta["auto_resume_attempted"] = True
+            job.meta = meta
+            with _lock:
+                _jobs[job.id] = job
+            _persist(job)
+        records.append(
+            {
+                "id": job.id,
+                "kind": job.kind,
+                "meta": meta,
+                "progress": dict(job.progress or {}),
+            }
+        )
+
     for path in JOBS_DIR.glob("*.json"):
         try:
             job = _load_from_disk(path.stem)
@@ -292,7 +333,7 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
         if job.status not in ("queued", "running", "stalled"):
             continue
         job.status = "interrupted"
-        job.finished_at = time.time()
+        job.finished_at = now
         job.error = (
             job.error
             or (
@@ -305,14 +346,27 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
             _jobs[job.id] = job
         _persist(job)
         flipped.append(job.id)
-        records.append(
-            {
-                "id": job.id,
-                "kind": job.kind,
-                "meta": dict(job.meta or {}),
-                "progress": dict(job.progress or {}),
-            }
-        )
+        _record(job, mark_attempt=True)
+
+    # Reclaim interrupted jobs from prior boots that never got auto-resume.
+    max_age = float(os.environ.get("MCP_AUTO_RESUME_MAX_AGE_SEC", str(7 * 86400)))
+    for path in JOBS_DIR.glob("*.json"):
+        try:
+            job = _load_from_disk(path.stem)
+        except Exception:
+            continue
+        if job.status != "interrupted":
+            continue
+        if job.kind not in _RESUMABLE_KINDS:
+            continue
+        meta = dict(job.meta or {})
+        if meta.get("auto_resume_attempted") or meta.get("auto_resumed_from"):
+            continue
+        finished = float(job.finished_at or job.heartbeat_at or job.created_at or 0)
+        if finished and (now - finished) > max_age:
+            continue
+        _record(job, mark_attempt=True)
+
     with _lock:
         _running_id = None
         _wait_queue = []
@@ -321,6 +375,7 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
         "interrupted": len(flipped),
         "job_ids": flipped,
         "jobs": records,
+        "reclaim_candidates": len(records),
     }
 
 

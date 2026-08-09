@@ -1582,9 +1582,21 @@ def pipeline_run(
         meta = {
             "schema": schema,
             "table": table,
+            "key_column": key_column,
+            "address_column": address_column,
+            "name_column": name_column,
+            "city_column": city_column,
+            "where": where,
+            "order_by": order_by,
             "stages": stages,
             "max_tier": max_tier,
             "limit": limit,
+            "use_llm": bool(use_llm),
+            "strategy": strategy,
+            "min_confidence": float(min_confidence or 0.6),
+            "target_titles": target_titles or "",
+            "project_id": project_id or "",
+            "workers": int(workers or 8),
         }
         before = find_active_by_queue_key(make_queue_key("pipeline_run", meta))
         job = start_job("pipeline_run", _run, meta=meta)
@@ -2637,23 +2649,51 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 from gmscraper import pipeline as pipe
 
                 m = dict(meta)
+                # Infer binding fields when older jobs omitted them.
+                table = m.get("table") or ""
+                key_col = m.get("key_column") or (
+                    "operator_address" if table == "operators" else "id"
+                )
+                addr_col = m.get("address_column") or (
+                    "operator_address" if table == "operators" else ""
+                )
+                name_col = m.get("name_column") or (
+                    "operator_name" if table == "operators" else ""
+                )
 
                 def _pipe() -> dict[str, Any]:
                     return pipe.run(
                         _store(),
                         schema=m.get("schema") or "",
-                        table=m.get("table") or "",
-                        key_column=m.get("key_column") or "id",
+                        table=table,
+                        key_column=key_col,
+                        address_column=addr_col,
+                        name_column=name_col,
+                        city_column=m.get("city_column") or "",
+                        where=m.get("where") or "",
+                        order_by=m.get("order_by") or "",
                         stages=m.get("stages") or "resolve,enrich,extract,contacts",
                         max_tier=m.get("max_tier") or "getleads",
                         limit=int(m.get("limit") or 0),
+                        use_llm=bool(m.get("use_llm", True)),
+                        strategy=m.get("strategy") or "address",
+                        min_confidence=float(m.get("min_confidence") or 0.6),
+                        target_titles=m.get("target_titles") or "",
+                        project_id=m.get("project_id") or "",
+                        workers=int(m.get("workers") or 8),
                         on_progress=lambda **p: _job_progress(**p),
                     )
 
                 job = start_job(
                     "pipeline_run",
                     _pipe,
-                    meta={**meta, "auto_resumed_from": rec.get("id")},
+                    meta={
+                        **meta,
+                        "key_column": key_col,
+                        "address_column": addr_col,
+                        "name_column": name_col,
+                        "auto_resumed_from": rec.get("id"),
+                    },
                     queue_key=make_queue_key("pipeline_run", meta),
                 )
                 resumed.append(job.id)
