@@ -903,6 +903,16 @@ def _default_leads_project_id(table: str = "", project_id: str = "") -> str:
     return ""
 
 
+def _default_source_schema(table: str = "", schema: str = "") -> str:
+    """Parcel/operator tables ship in permit_parcel, not public."""
+    if (schema or "").strip():
+        return schema.strip()
+    t = (table or "").strip().lower()
+    if t in ("operators", "parcels"):
+        return "permit_parcel"
+    return "public"
+
+
 def _started_response(job: Any, *, attached: bool = False) -> dict[str, Any]:
     """Uniform start/queue/attach payload for background tools."""
     from mcp_server.jobs import live_progress, queue_position
@@ -1864,11 +1874,12 @@ def resolve_places(
     from mcp_server.errors import tool_error_from_exception
 
     resolved_project = _default_leads_project_id(table, project_id)
+    resolved_schema = _default_source_schema(table, schema)
 
     def _run() -> dict[str, Any]:
         try:
             return rp.run(
-                schema=schema,
+                schema=resolved_schema,
                 table=table,
                 key_column=key_column,
                 address_column=address_column,
@@ -1892,7 +1903,7 @@ def resolve_places(
         from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
         meta = {
-            "schema": schema,
+            "schema": resolved_schema,
             "table": table,
             "key_column": key_column,
             "address_column": address_column,
@@ -3232,13 +3243,15 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                     priority=int(meta.get("priority") or 10),
                 )
                 resumed.append(job.id)
-            elif kind == "resolve_places" and meta.get("schema") and meta.get("table"):
+            elif kind == "resolve_places" and meta.get("table"):
                 from gmscraper import resolve_places as rp
 
                 m = dict(meta)
                 table = m.get("table") or ""
                 pid = _default_leads_project_id(table, str(m.get("project_id") or ""))
+                schema = _default_source_schema(table, str(m.get("schema") or ""))
                 m["project_id"] = pid
+                m["schema"] = schema
 
                 def _resolve(mm=m) -> dict[str, Any]:
                     return rp.run(

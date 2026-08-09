@@ -465,12 +465,16 @@ def run(
         }
 
     settings.require_rapidapi()
-    rows = sb.fetch_pending(
-        binding, limit=limit or 0, details_only=bool(details_only)
-    )
+    # Process in batches so we never materialize 16k futures at once (that
+    # starved progress heartbeats on the operators run) and so cancel can
+    # land between batches. Pending rows shrink as resolved=true is written.
+    batch_size = max(25, min(200, int(workers or 8) * 25))
+    pending_total = int(est.get("pending_rows") or 0)
+    if limit and limit > 0:
+        pending_total = min(pending_total, int(limit)) if pending_total else int(limit)
     counts = {
         "started": True,
-        "rows": len(rows),
+        "rows": 0,
         "resolved": 0,
         "details_ok": 0,
         "details_empty": 0,
@@ -481,22 +485,34 @@ def run(
         "requests": 0,
         "details_only": bool(details_only),
         "estimated_overage_usd": est.get("estimated_overage_usd"),
+        "batch_size": batch_size,
     }
     lock = threading.Lock()
     done = 0
-    total = len(rows)
-    if on_progress:
+    total = pending_total or 0
+    max_rows = int(limit) if limit and limit > 0 else 0
+
+    def _tick(**extra: Any) -> None:
+        if not on_progress:
+            return
         try:
             on_progress(
                 stage="resolve_places",
-                done=0,
-                total=total,
-                resolved=0,
+                done=done,
+                total=total or done,
+                resolved=counts["resolved"],
+                details_ok=counts["details_ok"],
+                no_match=counts["no_match"],
+                errors=counts["errors"],
+                requests=counts["requests"],
                 project_id=binding.project_id,
                 table=binding.table,
+                **extra,
             )
         except Exception:  # noqa: BLE001
             pass
+
+    _tick(batch=0)
 
     def work(row: dict[str, Any]) -> None:
         nonlocal done
@@ -534,27 +550,59 @@ def run(
             else:
                 counts["errors"] += 1
             done += 1
-            if on_progress and (done % 10 == 0 or done == total):
+            if done <= 20 or done % 10 == 0 or (total and done >= total):
+                _tick()
+
+    batch_n = 0
+    while True:
+        try:
+            from mcp_server.jobs import is_cancel_requested
+
+            if is_cancel_requested():
+                counts["cancelled"] = True
+                break
+        except Exception:  # noqa: BLE001
+            pass
+
+        remaining_cap = 0
+        if max_rows:
+            remaining_cap = max_rows - counts["rows"]
+            if remaining_cap <= 0:
+                break
+        fetch_lim = batch_size if not remaining_cap else min(batch_size, remaining_cap)
+        rows = sb.fetch_pending(
+            binding, limit=fetch_lim, details_only=bool(details_only)
+        )
+        if not rows:
+            break
+        if not total:
+            total = len(rows) if max_rows else (pending_total or len(rows))
+        batch_n += 1
+        counts["rows"] += len(rows)
+        _tick(batch=batch_n, batch_rows=len(rows))
+        with ThreadPoolExecutor(max_workers=max(1, int(workers or 8))) as pool:
+            futs = [pool.submit(work, r) for r in rows]
+            for f in as_completed(futs):
+                f.exception()
                 try:
-                    on_progress(
-                        stage="resolve_places",
-                        done=done,
-                        total=total,
-                        resolved=counts["resolved"],
-                        details_ok=counts["details_ok"],
-                        no_match=counts["no_match"],
-                        errors=counts["errors"],
-                        requests=counts["requests"],
-                        project_id=binding.project_id,
-                        table=binding.table,
-                    )
+                    from mcp_server.jobs import is_cancel_requested
+
+                    if is_cancel_requested():
+                        counts["cancelled"] = True
+                        break
                 except Exception:  # noqa: BLE001
                     pass
+        if counts.get("cancelled"):
+            break
+        # If the RPC ignored limit and returned a huge page, don't loop forever
+        # on the same pending set — resolved rows drop out of pending_where.
+        if len(rows) < fetch_lim:
+            break
 
-    with ThreadPoolExecutor(max_workers=max(1, int(workers or 8))) as pool:
-        futs = [pool.submit(work, r) for r in rows]
-        for f in as_completed(futs):
-            f.exception()
+    if total and done > total:
+        total = done
+    counts["rows"] = done
+    _tick(batch=batch_n, finished=True)
 
     return {
         **counts,
