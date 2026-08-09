@@ -348,6 +348,7 @@ def enrich_waterfall(
     write_supabase: bool = True,
     max_tier: str = DEFAULT_MAX_TIER,
     run_apify: bool = True,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     """Walk tiers per row; upsert companies/contacts to Supabase; return counts only.
 
@@ -368,6 +369,24 @@ def enrich_waterfall(
             "need": need,
             "max_tier": max_tier_n,
         }
+
+    def _tick(**extra: Any) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(**extra)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _tick(
+        done=0,
+        total=len(parsed),
+        jobs_total=len(parsed),
+        jobs_done=0,
+        jobs_pending=len(parsed),
+        businesses_found=0,
+        emails_found=0,
+    )
 
     wf = Waterfall(store=store, max_tier=max_tier_n)
     company_rows: list[dict[str, Any]] = []
@@ -453,6 +472,18 @@ def enrich_waterfall(
                 "person": person,
             }
         )
+        done_n = idx + 1
+        if done_n == 1 or done_n % 5 == 0 or done_n == len(parsed):
+            _tick(
+                done=done_n,
+                total=len(parsed),
+                jobs_total=len(parsed),
+                jobs_done=done_n,
+                jobs_pending=max(0, len(parsed) - done_n),
+                businesses_found=done_n,
+                emails_found=emails_found,
+                dms_found=dms_found,
+            )
 
     # FullEnrich bulk for remaining email misses (only when max_tier allows).
     if pending_fe and wf.fullenrich.enabled and wf._allowed("fullenrich"):

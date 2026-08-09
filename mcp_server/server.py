@@ -638,6 +638,40 @@ def _job_progress(stage: str, **extra: Any) -> None:
         pass
 
 
+def _started_response(job: Any, *, attached: bool = False) -> dict[str, Any]:
+    """Uniform start/queue/attach payload for background tools."""
+    from mcp_server.jobs import live_progress, queue_position
+
+    pos = queue_position(job.id)
+    status = "already_running" if attached or (job.progress or {}).get("attached") else (
+        "started" if job.status == "running" else "queued"
+    )
+    if job.status == "queued" and not attached:
+        status = "queued"
+    msg = {
+        "already_running": (
+            f"Identical work already active as job_id={job.id}. "
+            "Attached — poll get_job_status (does not start a duplicate)."
+        ),
+        "queued": (
+            f"Queued behind other jobs (position {pos}). "
+            f"Poll get_job_status with job_id={job.id}."
+        ),
+        "started": (
+            f"Pipeline started in the background. Poll get_job_status "
+            f"with job_id={job.id} until completed/failed/stalled/interrupted."
+        ),
+    }[status]
+    return {
+        "status": status,
+        "job_id": job.id,
+        "queue_position": pos,
+        "queue_key": (job.meta or {}).get("queue_key"),
+        "live": live_progress(job),
+        "message": msg,
+    }
+
+
 def _execute_run_leads(
     plan_path: str,
     out_path: str,
@@ -665,7 +699,43 @@ def _execute_run_leads(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # Maps scrape resumes automatically: SQLite jobs table skips status='done'.
-    _job_progress("scrape", zip_count=len(zip_rows), categories=len(plan.categories))
+    cats = list(plan.categories)
+    zips = [r["zip"] for r in zip_rows]
+    grid0 = store.grid_stats(categories=cats, zips=zips)
+    _job_progress(
+        "scrape",
+        zip_count=len(zip_rows),
+        categories=len(cats),
+        categories_list=cats,
+        zips_list=zips[:50],  # sample for status; full scope via meta
+        jobs_total=grid0["jobs_total"] or len(zips) * len(cats),
+        jobs_done=grid0["jobs_done"],
+        jobs_pending=grid0["jobs_pending"] or len(zips) * len(cats),
+        businesses_found=0,
+        jobs_done_at_start=grid0["jobs_done"],
+    )
+
+    from mcp_server.jobs import current_job_id, get_job
+
+    started_at = None
+    try:
+        jid = current_job_id()
+        if jid:
+            started_at = get_job(jid).started_at
+    except Exception:  # noqa: BLE001
+        started_at = None
+
+    def _on_scrape_progress(p: dict[str, Any]) -> None:
+        grid = store.grid_stats(categories=cats, zips=zips)
+        bf = store.businesses_found_since(started_at)
+        _job_progress(
+            **p,
+            jobs_total=grid["jobs_total"],
+            jobs_done=grid["jobs_done"],
+            jobs_pending=grid["jobs_pending"],
+            businesses_found=bf,
+        )
+
     scrape_res = scrape.run(
         store,
         client,
@@ -673,7 +743,8 @@ def _execute_run_leads(
         plan.categories,
         workers=workers,
         price_per_request=settings.price_per_request,
-        on_progress=lambda p: _job_progress(**p),
+        on_progress=_on_scrape_progress,
+        heartbeat_every=10,
     )
 
     _job_progress("enrich")
@@ -787,27 +858,32 @@ def run_leads(
 
     run_bg = background if background is not None else _http_mode()
     if run_bg and _http_mode():
-        from mcp_server.jobs import start_job
+        from gmscraper import brief as brief_mod
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
+        record = resolve_plan(plan_path=plan_path)
+        plan = brief_mod.load(record.plan_path)
+        meta = {
+            "plan_path": record.plan_path,
+            "resumable_scrape": True,
+            "categories": list(plan.categories),
+        }
+        before = find_active_by_queue_key(make_queue_key("run_leads", meta))
         job = start_job(
             "run_leads",
             lambda: _execute_run_leads(
                 plan_path, out_path, include_owner_fallback, workers
             ),
-            meta={"plan_path": plan_path or None, "resumable_scrape": True},
+            meta=meta,
         )
-        return _json(
-            {
-                "status": "started",
-                "job_id": job.id,
-                "message": (
-                    "Pipeline started in the background. Poll get_job_status "
-                    f"with job_id={job.id} until status is completed/failed/"
-                    "stalled/interrupted. If stalled/interrupted, re-call "
-                    "run_leads with the same plan_path to resume the scrape."
-                ),
-            }
+        attached = before is not None and before.id == job.id
+        out = _started_response(job, attached=attached)
+        out["resume_note"] = (
+            "If stalled/interrupted, re-call run_leads with the same "
+            "plan_path — Maps scrape resumes from unfinished ZIP×category pairs. "
+            "Identical plan_path while a job is live attaches (no duplicate)."
         )
+        return _json(out)
 
     return _json(
         _execute_run_leads(plan_path, out_path, include_owner_fallback, workers)
@@ -871,19 +947,18 @@ def scrape_maps(
     resolve_plan(plan_path=plan_path)
 
     if background and _http_mode():
-        from mcp_server.jobs import start_job
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
+        record = resolve_plan(plan_path=plan_path)
+        meta = {"plan_path": record.plan_path}
+        before = find_active_by_queue_key(make_queue_key("scrape_maps", meta))
         job = start_job(
             "scrape_maps",
             lambda: _execute_scrape_maps(plan_path, workers, max_jobs),
-            meta={"plan_path": plan_path or None},
+            meta=meta,
         )
         return _json(
-            {
-                "status": "started",
-                "job_id": job.id,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
+            _started_response(job, attached=before is not None and before.id == job.id)
         )
 
     return _json(_execute_scrape_maps(plan_path, workers, max_jobs))
@@ -897,28 +972,58 @@ def scrape_maps(
     )
 )
 def get_job_status(job_id: str) -> str:
-    """Poll a background run_leads / scrape_maps job. Use after run_leads returns job_id.
+    """Poll a background job. Use after run_leads / pipeline_run / enrich_* return job_id.
 
     status may be queued|running|completed|failed|stalled|interrupted.
-    stalled = no heartbeat for ~5 minutes (worker likely dead after restart).
-    interrupted = orphaned on process boot. For either, re-call run_leads with
-    the same plan_path — Maps scrape resumes from unfinished ZIP×category pairs.
+    Always includes `live` progress: jobs_total, jobs_done, jobs_pending,
+    businesses_found, percent_complete, updated_at, eta_seconds, queue_position.
+    stalled = no heartbeat for ~5 minutes. interrupted = orphaned on process boot.
+    Same plan_path / queue_key re-calls attach instead of duplicating.
     """
-    from mcp_server.jobs import STALL_SECONDS, get_job
+    from mcp_server.jobs import STALL_SECONDS, get_job, live_progress, queue_position
 
     job = get_job(job_id)
     public = job.to_public()
+    store = None
+    try:
+        if job.kind in ("run_leads", "scrape_maps", "enrich_sites"):
+            store = _store()
+    except Exception:  # noqa: BLE001
+        store = None
+    live = live_progress(job, store=store)
+    public["live"] = live
+    # Flatten the key counters at top level for easy Claude polling.
+    for key in (
+        "jobs_total",
+        "jobs_done",
+        "jobs_pending",
+        "businesses_found",
+        "percent_complete",
+        "updated_at",
+        "eta_seconds",
+        "queue_position",
+        "stage",
+    ):
+        public[key] = live.get(key)
+    public["queue_position"] = queue_position(job.id)
     if job.status in ("stalled", "interrupted"):
         public["next_step"] = (
-            "Re-call run_leads(plan_path=…) or scrape_maps(plan_path=…) with the "
-            "same plan. Finished ZIP×category pairs are skipped automatically."
+            "Re-call the same tool with the same plan_path / table args. "
+            "Identical queue_key attaches to a live job; finished ZIP×category "
+            "pairs are skipped automatically for Maps scrapes."
         )
     elif job.status == "running":
         public["liveness"] = {
             "heartbeat_at": job.heartbeat_at,
             "stall_after_seconds": STALL_SECONDS,
             "progress": job.progress,
+            "live": live,
         }
+    elif job.status == "queued":
+        public["next_step"] = (
+            f"Waiting in queue (position {public['queue_position']}). "
+            "Do not start a duplicate — keep polling this job_id."
+        )
     return _json(public)
 
 
@@ -931,9 +1036,62 @@ def get_job_status(job_id: str) -> str:
 )
 def list_background_jobs(limit: int = 20) -> str:
     """List recent background pipeline jobs on this MCP server."""
-    from mcp_server.jobs import list_jobs
+    from mcp_server.jobs import list_jobs, live_progress, queue_position
 
-    return _json([j.to_public() for j in list_jobs(limit=limit)])
+    out = []
+    for j in list_jobs(limit=limit):
+        row = j.to_public()
+        row["queue_position"] = queue_position(j.id)
+        row["live"] = live_progress(j)
+        out.append(row)
+    return _json(out)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List job queue",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def list_job_queue() -> str:
+    """Show the serial background queue: running job + waiting jobs in order.
+
+    Multiple Claude chats can enqueue work safely. Same queue_key attaches to
+    the existing job instead of duplicating. Nothing is killed when a new job
+    is queued — it waits its turn.
+    """
+    from mcp_server.jobs import list_jobs, live_progress, queue_position
+
+    jobs = list_jobs(limit=50)
+    running = [j for j in jobs if j.status == "running"]
+    queued = sorted(
+        [j for j in jobs if j.status == "queued"],
+        key=lambda j: queue_position(j.id) or 9999,
+    )
+
+    def _row(j: Any) -> dict[str, Any]:
+        return {
+            "job_id": j.id,
+            "kind": j.kind,
+            "status": j.status,
+            "queue_position": queue_position(j.id),
+            "queue_key": (j.meta or {}).get("queue_key"),
+            "live": live_progress(j),
+            "meta": j.meta,
+        }
+
+    return _json(
+        {
+            "running": [_row(j) for j in running],
+            "queued": [_row(j) for j in queued],
+            "note": (
+                "Re-calling a tool with the same plan_path / table / rows "
+                "attaches to the active job_id — it does not start a duplicate "
+                "or kill the current run."
+            ),
+        }
+    )
 
 
 def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
@@ -1027,19 +1185,13 @@ def enrich_sites(
         return {"result": res, "stats": store.stats(), "domains": len(domains)}
 
     if _http_mode() and background:
-        from mcp_server.jobs import start_job
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
-        job = start_job(
-            "enrich_sites",
-            _run,
-            meta={"limit": limit, "workers": max(1, min(int(workers or 3), 3))},
-        )
+        meta = {"limit": limit, "workers": max(1, min(int(workers or 3), 3))}
+        before = find_active_by_queue_key(make_queue_key("enrich_sites", meta))
+        job = start_job("enrich_sites", _run, meta=meta)
         return _json(
-            {
-                "status": "started",
-                "job_id": job.id,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
+            _started_response(job, attached=before is not None and before.id == job.id)
         )
     return _json(_run())
 
@@ -1380,28 +1532,23 @@ def pipeline_run(
             min_confidence=float(min_confidence or 0.6),
             target_titles=target_titles or "",
             workers=int(workers or 8),
+            on_progress=lambda **p: _job_progress(**p),
         )
 
     if background and _http_mode() and not estimate_only:
-        from mcp_server.jobs import start_job
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
-        job = start_job(
-            "pipeline_run",
-            _run,
-            meta={
-                "schema": schema,
-                "table": table,
-                "stages": stages,
-                "max_tier": max_tier,
-                "limit": limit,
-            },
-        )
+        meta = {
+            "schema": schema,
+            "table": table,
+            "stages": stages,
+            "max_tier": max_tier,
+            "limit": limit,
+        }
+        before = find_active_by_queue_key(make_queue_key("pipeline_run", meta))
+        job = start_job("pipeline_run", _run, meta=meta)
         return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
+            _started_response(job, attached=before is not None and before.id == job.id)
         )
     return _json(_run())
 
@@ -1891,26 +2038,24 @@ def enrich_waterfall(
             write_supabase=True,
             max_tier=max_tier_n,
             run_apify=bool(run_apify),
+            on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
         )
 
     if background and _http_mode() and len(rows or "") > 2000:
-        from mcp_server.jobs import start_job
+        import hashlib
 
-        job = start_job(
-            "enrich_waterfall",
-            _run,
-            meta={
-                "need": need_norm,
-                "max_tier": max_tier_n,
-                "rows_chars": len(rows or ""),
-            },
-        )
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
+
+        meta = {
+            "need": need_norm,
+            "max_tier": max_tier_n,
+            "rows_chars": len(rows or ""),
+            "rows_fingerprint": hashlib.sha1((rows or "").encode()).hexdigest()[:16],
+        }
+        before = find_active_by_queue_key(make_queue_key("enrich_waterfall", meta))
+        job = start_job("enrich_waterfall", _run, meta=meta)
         return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
+            _started_response(job, attached=before is not None and before.id == job.id)
         )
     return _json(_run())
 

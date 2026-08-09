@@ -46,6 +46,7 @@ def run(
     min_confidence: float = 0.6,
     target_titles: str = "",
     workers: int = 8,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     stage_list = _parse_stages(stages)
     out: dict[str, Any] = {
@@ -55,6 +56,25 @@ def run(
         "per_stage": {},
         "cumulative_cost_usd": 0.0,
     }
+
+    def _tick(stage: str, **extra: Any) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(stage=stage, **extra)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _tick(
+        "pipeline",
+        done=0,
+        total=len(stage_list),
+        jobs_total=len(stage_list),
+        jobs_done=0,
+        jobs_pending=len(stage_list),
+        businesses_found=0,
+        stages=stage_list,
+    )
 
     binding = None
     if any(s in stage_list for s in ("resolve", "enrich", "extract", "contacts")):
@@ -75,6 +95,7 @@ def run(
 
     # ---- resolve ----
     if "resolve" in stage_list:
+        _tick("resolve", done=0, total=1, jobs_total=len(stage_list), jobs_done=0)
         res = resolve_places.run(
             schema=schema,
             table=table,
@@ -101,6 +122,16 @@ def run(
         }
         cost = float(res.get("estimated_overage_usd") or 0)
         out["cumulative_cost_usd"] = round(out["cumulative_cost_usd"] + cost, 4)
+        done_stages = 1
+        _tick(
+            "resolve",
+            done=1,
+            total=1,
+            jobs_total=len(stage_list),
+            jobs_done=done_stages,
+            jobs_pending=max(0, len(stage_list) - done_stages),
+            businesses_found=int(res.get("resolved") or 0),
+        )
         if estimate_only or res.get("blocked"):
             out["started"] = False
             out["blocked"] = bool(res.get("blocked"))
@@ -142,7 +173,17 @@ def run(
                     domains.append(d)
 
     # ---- enrich (site crawl into local SQLite) ----
+    stages_done = sum(1 for s in ("resolve",) if s in stage_list and s in out["per_stage"])
     if "enrich" in stage_list:
+        _tick(
+            "enrich",
+            done=0,
+            total=max(len(domains), 1),
+            jobs_total=len(stage_list),
+            jobs_done=stages_done,
+            jobs_pending=max(0, len(stage_list) - stages_done),
+            businesses_found=len(domains),
+        )
         if not domains:
             out["per_stage"]["enrich"] = {"domains": 0, "skipped": True, "reason": "no_domains"}
         else:
@@ -160,12 +201,17 @@ def run(
             store.queue_sites()
             pending = [s for s in store.pending_sites() if s in domains]
             if pending:
-                enrich_res = enrich_site.run(store, pending, workers=max(workers, 8))
+                enrich_res = enrich_site.run(
+                    store,
+                    pending,
+                    workers=max(1, min(int(workers or 8), 3)),
+                    on_progress=lambda **p: _tick("enrich", **p),
+                )
             else:
                 enrich_res = {"fetched": 0, "skipped": len(domains)}
             # Always try team/about backfill for these domains.
             team_res = enrich_site.crawl_team_pages(
-                store, domains=domains, workers=max(workers, 8), force=False
+                store, domains=domains, workers=max(1, min(int(workers or 8), 3)), force=False
             )
             out["per_stage"]["enrich"] = {
                 "domains": len(domains),
@@ -173,9 +219,26 @@ def run(
                 "team_crawl": team_res,
                 "cost_usd": 0.0,
             }
+        stages_done += 1
+        _tick(
+            "enrich",
+            done=1,
+            total=1,
+            jobs_total=len(stage_list),
+            jobs_done=stages_done,
+            jobs_pending=max(0, len(stage_list) - stages_done),
+            businesses_found=len(domains),
+        )
 
     # ---- extract people ----
     if "extract" in stage_list:
+        _tick(
+            "extract",
+            jobs_total=len(stage_list),
+            jobs_done=stages_done,
+            jobs_pending=max(0, len(stage_list) - stages_done),
+            businesses_found=len(domains),
+        )
         if not domains:
             out["per_stage"]["extract"] = {"domains": 0, "skipped": True, "reason": "no_domains"}
         else:
@@ -190,9 +253,26 @@ def run(
                 target_titles=titles or None,
             )
             out["per_stage"]["extract"] = {**ext, "use_llm": use_llm, "cost_usd": 0.0}
+        stages_done += 1
+        _tick(
+            "extract",
+            done=1,
+            total=1,
+            jobs_total=len(stage_list),
+            jobs_done=stages_done,
+            jobs_pending=max(0, len(stage_list) - stages_done),
+            businesses_found=len(domains),
+        )
 
     # ---- contacts waterfall ----
     if "contacts" in stage_list:
+        _tick(
+            "contacts",
+            jobs_total=len(stage_list),
+            jobs_done=stages_done,
+            jobs_pending=max(0, len(stage_list) - stages_done),
+            businesses_found=len(domains),
+        )
         if not domains:
             out["per_stage"]["contacts"] = {"rows_in": 0, "skipped": True, "reason": "no_domains"}
         else:
@@ -223,6 +303,7 @@ def run(
                 write_supabase=True,
                 max_tier=max_tier,
                 run_apify=False,  # discovery already handled by extract/resolve
+                on_progress=lambda **p: _tick("contacts", **p),
             )
             out["per_stage"]["contacts"] = {
                 k: wf.get(k)
@@ -231,6 +312,17 @@ def run(
                     "emails_found", "dms_found", "tier_stats", "max_tier",
                 )
             }
+        stages_done += 1
+        _tick(
+            "contacts",
+            done=1,
+            total=1,
+            jobs_total=len(stage_list),
+            jobs_done=stages_done,
+            jobs_pending=0,
+            businesses_found=len(domains),
+            percent_complete=100.0,
+        )
 
     out["started"] = True
     out["domains"] = len(domains)

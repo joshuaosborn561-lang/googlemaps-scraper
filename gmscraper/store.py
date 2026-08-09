@@ -839,6 +839,63 @@ class Store:
 
     # ---------------------------------------------------------------- stats
 
+    def grid_stats(
+        self,
+        *,
+        categories: Sequence[str] | None = None,
+        zips: Sequence[str] | None = None,
+    ) -> dict[str, int]:
+        """ZIP×category scrape-grid counters, optionally scoped to a plan."""
+        filters: list[str] = []
+        params: list[Any] = []
+        if categories:
+            cats = [c for c in categories if c]
+            if cats:
+                filters.append(f"category IN ({','.join('?' for _ in cats)})")
+                params.extend(cats)
+        if zips:
+            zs = [z for z in zips if z]
+            if zs:
+                filters.append(f"zip IN ({','.join('?' for _ in zs)})")
+                params.extend(zs)
+
+        def count(status: str | None = None, *, not_status: str | None = None) -> int:
+            parts = list(filters)
+            p = list(params)
+            if status is not None:
+                parts.append("status = ?")
+                p.append(status)
+            if not_status is not None:
+                parts.append("status != ?")
+                p.append(not_status)
+            where = f" WHERE {' AND '.join(parts)}" if parts else ""
+            row = self.conn.execute(
+                f"SELECT COUNT(*) FROM jobs{where}", p
+            ).fetchone()
+            return int(row[0] if row else 0)
+
+        return {
+            "jobs_total": count(),
+            "jobs_done": count("done"),
+            "jobs_error": count("error"),
+            "jobs_pending": count("pending"),
+            "jobs_not_done": count(not_status="done"),
+        }
+
+    def businesses_found_since(self, started_at: float | None) -> int:
+        """Count businesses first_seen at/after a unix timestamp (job start)."""
+        if not started_at:
+            return int(
+                self.conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
+            )
+        # first_seen is SQLite CURRENT_TIMESTAMP text; compare via unixepoch.
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM businesses "
+            "WHERE unixepoch(first_seen) >= ?",
+            (int(started_at),),
+        ).fetchone()
+        return int(row[0] if row else 0)
+
     def stats(self) -> dict[str, Any]:
         q = lambda sql: self.conn.execute(sql).fetchone()[0]  # noqa: E731
         businesses = q("SELECT COUNT(*) FROM businesses")
@@ -861,11 +918,12 @@ class Store:
                 "FROM businesses GROUP BY 1 ORDER BY n DESC"
             )
         }
+        grid = self.grid_stats()
         return {
-            "jobs_total": q("SELECT COUNT(*) FROM jobs"),
-            "jobs_done": q("SELECT COUNT(*) FROM jobs WHERE status='done'"),
-            "jobs_error": q("SELECT COUNT(*) FROM jobs WHERE status='error'"),
-            "jobs_pending": q("SELECT COUNT(*) FROM jobs WHERE status='pending'"),
+            "jobs_total": grid["jobs_total"],
+            "jobs_done": grid["jobs_done"],
+            "jobs_error": grid["jobs_error"],
+            "jobs_pending": grid["jobs_pending"],
             "businesses": businesses,
             "businesses_by_source": by_source,
             "with_website": q(

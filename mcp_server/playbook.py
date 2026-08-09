@@ -39,9 +39,13 @@ Do NOT use this for:
    it; otherwise omit args and the latest plan is used. Do NOT ask the user to
    approve spend.
    Only stop if the plan is BLOCKED (Maps hard limit).
-5. On the Railway/HTTP server, runs are background jobs. Poll `get_job_status`
-   until completed/failed/stalled/interrupted. If stalled or interrupted
-   (container restart killed the worker), re-call `run_leads` with the same
+5. On the Railway/HTTP server, runs are a **serial background queue**. Poll
+   `get_job_status` — it returns live `jobs_total` / `jobs_done` /
+   `jobs_pending` / `businesses_found` / `percent_complete` / `eta_seconds` /
+   `updated_at`. Use `list_job_queue` to see running + waiting jobs.
+   Re-calling the same plan while a job is live **attaches** (same job_id) —
+   it does not kill or duplicate. Different chats can enqueue different work;
+   jobs wait their turn. If stalled/interrupted, re-call with the same
    `plan_path` — Maps scrape resumes from unfinished ZIP×category pairs.
    Then QA with `sample_leads`, and sync with `sync_to_supabase(run_label=...)`.
 6. Deliver the outcome: how many leads, sample quality notes, Supabase table /
@@ -79,7 +83,7 @@ Do NOT use this for:
 | "load Shovels / external CSV rows" | `ingest_external_leads` (set source_tag; counts only) |
 | "these rows have no website" | `estimate_resolve_domains` → `resolve_domains` → `enrich_sites` |
 | "classify only shovels / re-run" | `classify_leads(source=…, force=…, limit=…)` |
-| "job status?" | `get_job_status` / `list_background_jobs` |
+| "job status?" | `get_job_status` (live counters + ETA) / `list_job_queue` |
 | "history on the website?" | `list_remote_jobs` / `download_remote_csv` |
 | config check | `health` |
 
