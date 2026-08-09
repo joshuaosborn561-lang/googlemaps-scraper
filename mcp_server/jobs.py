@@ -536,15 +536,11 @@ def live_progress(job: Job, store: Any | None = None) -> dict[str, Any]:
             sites_ok = int(stats.get("sites_ok") or 0)
             sites_pending = int(stats.get("sites_pending") or 0)
             domains = int(stats.get("domains") or 0)
-            # Prefer stage ticks when present; else derive from sites table.
-            if stage_total is None:
-                jobs_total = domains or (sites_ok + sites_pending)
-            if stage_done is None:
-                jobs_done = sites_ok
-            if jobs_pending is None:
-                jobs_pending = sites_pending
-            if businesses_found is None:
-                businesses_found = int(stats.get("domains_with_email") or 0)
+            # Subprocess enrich only heartbeats liveness — always prefer sites table.
+            jobs_total = domains or (sites_ok + sites_pending) or int(jobs_total or 0)
+            jobs_done = sites_ok
+            jobs_pending = sites_pending
+            businesses_found = int(stats.get("businesses") or 0)
         except Exception:  # noqa: BLE001
             pass
 
