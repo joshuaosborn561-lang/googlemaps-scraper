@@ -12,6 +12,7 @@ status="running" on disk. Mitigations:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import traceback
@@ -58,9 +59,19 @@ def _path(job_id: str) -> Path:
 
 
 def _persist(job: Job) -> None:
-    _path(job.id).write_text(
-        json.dumps(job.to_public(), indent=2, default=str), encoding="utf-8"
-    )
+    """Atomic write so a crash mid-persist never leaves a 0-byte job file."""
+    path = _path(job.id)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    payload = json.dumps(job.to_public(), indent=2, default=str)
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def current_job_id() -> str:
@@ -71,7 +82,10 @@ def _load_from_disk(job_id: str) -> Job:
     path = _path(job_id)
     if not path.exists():
         raise ValueError(f"Unknown job_id {job_id!r}")
-    data = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+        raise ValueError(f"Corrupt empty job file for {job_id!r}")
+    data = json.loads(raw)
     # Backward-compatible defaults for older job files.
     data.setdefault("heartbeat_at", None)
     data.setdefault("progress", {})
@@ -86,10 +100,15 @@ def heartbeat(
     stage: str = "",
     **progress: Any,
 ) -> None:
-    """Touch heartbeat_at (and optional progress) for a running job."""
+    """Touch heartbeat_at (and optional progress) for a running job.
+
+    Disk I/O runs outside the lock so a stuck volume write cannot freeze
+    stall detection / other tickers.
+    """
     jid = (job_id or current_job_id()).strip()
     if not jid:
         return
+    snapshot: Job | None = None
     with _lock:
         job = _jobs.get(jid)
         if job is None:
@@ -105,7 +124,13 @@ def heartbeat(
             job.progress = {**job.progress, "stage": stage, **progress}
         elif progress:
             job.progress = {**job.progress, **progress}
-        _persist(job)
+        # Copy fields for persist without holding the lock during I/O.
+        snapshot = Job(**asdict(job))
+    if snapshot is not None:
+        try:
+            _persist(snapshot)
+        except OSError:
+            pass
 
 
 def _maybe_mark_stalled(job: Job, *, persist: bool = True) -> Job:
@@ -126,7 +151,10 @@ def _maybe_mark_stalled(job: Job, *, persist: bool = True) -> Job:
         )
     )
     if persist:
-        _persist(job)
+        try:
+            _persist(job)
+        except OSError:
+            pass
     return job
 
 
@@ -137,8 +165,19 @@ def get_job(job_id: str) -> Job:
         job = _load_from_disk(job_id)
         with _lock:
             _jobs[job_id] = job
+    persist_snap: Job | None = None
     with _lock:
-        return _maybe_mark_stalled(job)
+        before = job.status
+        _maybe_mark_stalled(job, persist=False)
+        if job.status != before:
+            persist_snap = Job(**asdict(job))
+        out = Job(**asdict(job))
+    if persist_snap is not None:
+        try:
+            _persist(persist_snap)
+        except OSError:
+            pass
+    return out
 
 
 def list_jobs(limit: int = 20) -> list[Job]:
@@ -202,34 +241,48 @@ def start_job(
 
     def worker() -> None:
         _tls.job_id = job.id
-        job.status = "running"
-        job.started_at = time.time()
-        job.heartbeat_at = time.time()
-        _persist(job)
+        with _lock:
+            job.status = "running"
+            job.started_at = time.time()
+            job.heartbeat_at = time.time()
+            snap = Job(**asdict(job))
+        _persist(snap)
 
         stop_hb = threading.Event()
 
         def ticker() -> None:
             while not stop_hb.wait(HEARTBEAT_INTERVAL_SEC):
-                heartbeat(job.id)
+                try:
+                    heartbeat(job.id)
+                except Exception:  # noqa: BLE001
+                    # Never let the liveness ticker die on a transient error.
+                    continue
 
         threading.Thread(
             target=ticker, name=f"mcp-job-hb-{job.id}", daemon=True
         ).start()
 
         try:
-            job.result = fn() or {}
-            job.status = "completed"
-            job.error = None
+            result = fn() or {}
+            with _lock:
+                job.result = result
+                job.status = "completed"
+                job.error = None
         except Exception as exc:  # noqa: BLE001
-            job.status = "failed"
-            job.error = f"{type(exc).__name__}: {exc}"
-            job.result = {"traceback": traceback.format_exc()[-4000:]}
+            with _lock:
+                job.status = "failed"
+                job.error = f"{type(exc).__name__}: {exc}"
+                job.result = {"traceback": traceback.format_exc()[-4000:]}
         finally:
             stop_hb.set()
-            job.heartbeat_at = time.time()
-            job.finished_at = time.time()
-            _persist(job)
+            with _lock:
+                job.heartbeat_at = time.time()
+                job.finished_at = time.time()
+                snap = Job(**asdict(job))
+            try:
+                _persist(snap)
+            except OSError:
+                pass
             _tls.job_id = ""
 
     threading.Thread(target=worker, name=f"mcp-job-{job.id}", daemon=True).start()

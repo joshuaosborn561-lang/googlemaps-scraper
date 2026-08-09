@@ -83,3 +83,33 @@ def test_start_job_completes(tmp_path: Path, monkeypatch) -> None:
     got = jobs.get_job(job.id)
     assert got.status == "completed"
     assert got.result == {"ok": True}
+
+
+def test_persist_is_atomic(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(jobs, "JOBS_DIR", tmp_path)
+    job = jobs.Job(
+        id="atomicwrite01",
+        kind="probe",
+        status="running",
+        created_at=time.time(),
+        heartbeat_at=time.time(),
+    )
+    jobs._persist(job)
+    path = tmp_path / "atomicwrite01.json"
+    assert path.exists()
+    assert path.stat().st_size > 0
+    assert not list(tmp_path.glob("*.tmp"))
+    loaded = jobs._load_from_disk(job.id)
+    assert loaded.id == job.id
+    assert loaded.status == "running"
+
+
+def test_load_rejects_empty_job_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(jobs, "JOBS_DIR", tmp_path)
+    path = tmp_path / "emptyjob00001.json"
+    path.write_text("", encoding="utf-8")
+    try:
+        jobs._load_from_disk("emptyjob00001")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "empty" in str(exc).lower()

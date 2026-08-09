@@ -678,7 +678,15 @@ def _execute_run_leads(
 
     _job_progress("enrich")
     store.queue_sites()
-    enrich_site.run(store, store.pending_sites(), workers=max(workers, 12))
+    pending = store.pending_sites()
+    _job_progress("enrich", done=0, total=len(pending))
+    # Cap workers so site-fetch CPU work cannot starve the MCP HTTP loop.
+    enrich_site.run(
+        store,
+        pending,
+        workers=max(1, min(int(workers or 8), 8)),
+        on_progress=lambda **p: _job_progress("enrich", **p),
+    )
 
     _job_progress("classify")
     classify.run(

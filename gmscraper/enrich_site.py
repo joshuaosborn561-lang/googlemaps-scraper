@@ -266,6 +266,7 @@ def run(
     timeout: int = 15,
     respect_robots: bool = True,
     delay: float = 0.0,
+    on_progress: Any | None = None,
 ) -> dict[str, int]:
     if not domains:
         print("No pending domains.")
@@ -308,6 +309,18 @@ def run(
                     f"| with email {counts['emails']:,}   "
                 )
                 sys.stderr.flush()
+                if on_progress is not None:
+                    try:
+                        on_progress(
+                            done=done,
+                            total=len(domains),
+                            ok=counts["ok"],
+                            error=counts["error"],
+                            skipped=counts["skipped"],
+                            emails=counts["emails"],
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(work, d) for d in domains]
