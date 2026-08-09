@@ -163,7 +163,7 @@ class FullEnrichClient:
                 payload.get("status")
                 or payload.get("enrichment_status")
                 or ""
-            ).lower()
+            ).upper()
             contacts = (
                 payload.get("datas")
                 or payload.get("data")
@@ -173,19 +173,11 @@ class FullEnrichClient:
             )
             if isinstance(contacts, dict):
                 contacts = contacts.get("contacts") or contacts.get("results") or []
-            if status in {"finished", "done", "completed", "success"} or (
-                contacts and status in {"", "ok"}
-            ):
-                # Wait until each contact is terminal when status field present.
-                if contacts and all(
-                    str(c.get("enrichment_status") or c.get("status") or "DONE").upper()
-                    in {"DONE", "FINISHED", "COMPLETED", "SUCCESS", "FAILED", "ERROR"}
-                    for c in contacts
-                    if isinstance(c, dict)
-                ):
-                    return [c for c in contacts if isinstance(c, dict)]
-                if status in {"finished", "done", "completed", "success"}:
-                    return [c for c in contacts if isinstance(c, dict)]
+            # FullEnrich bulk GET returns status FINISHED|IN_PROGRESS and data=[...]
+            if status in {"FINISHED", "DONE", "COMPLETED", "SUCCESS"}:
+                return [c for c in contacts if isinstance(c, dict)]
+            if status in {"FAILED", "ERROR", "CANCELED", "CANCELLED"}:
+                return []
             time.sleep(poll_seconds)
         return []
 
