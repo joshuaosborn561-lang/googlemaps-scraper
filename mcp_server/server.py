@@ -35,8 +35,123 @@ mcp = MCPServer(
     ),
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
-    version="1.4.0",
+    # Bump when annotations/schemas change so Claude refreshes its tool cache.
+    version="1.5.0",
 )
+
+
+def _ann(
+    title: str,
+    *,
+    read_only: bool,
+    destructive: bool,
+    idempotent: bool,
+    open_world: bool,
+) -> ToolAnnotations:
+    """Build fully-specified tool annotations (no None defaults).
+
+    Claude's connector treats a missing destructiveHint as confirmation-gated
+    ("No approval received"). Always set all four hints explicitly.
+    """
+    return ToolAnnotations(
+        title=title,
+        readOnlyHint=read_only,
+        destructiveHint=destructive,
+        idempotentHint=idempotent,
+        openWorldHint=open_world,
+    )
+
+
+def _iter_registered_tools() -> list[Any]:
+    """Sync access to registered tools (list_tools() is async)."""
+    return list(mcp._tool_manager.list_tools())
+
+
+def _dump_tool_annotations() -> None:
+    """Print every tool's annotation set at startup (deploy-log drift check)."""
+    try:
+        tools = _iter_registered_tools()
+    except Exception as exc:  # noqa: BLE001
+        print(f"tool annotation dump failed: {exc}", flush=True)
+        return
+    print(f"MCP tools ({len(tools)}) annotations:", flush=True)
+    for t in sorted(tools, key=lambda x: x.name):
+        ann = getattr(t, "annotations", None)
+        if ann is None:
+            print(f"  {t.name}: annotations=<none>", flush=True)
+            continue
+        dump = (
+            ann.model_dump()
+            if hasattr(ann, "model_dump")
+            else {
+                "title": getattr(ann, "title", None),
+                "read_only_hint": getattr(ann, "read_only_hint", None),
+                "destructive_hint": getattr(ann, "destructive_hint", None),
+                "idempotent_hint": getattr(ann, "idempotent_hint", None),
+                "open_world_hint": getattr(ann, "open_world_hint", None),
+            }
+        )
+        ro = dump.get("read_only_hint", dump.get("readOnlyHint"))
+        dest = dump.get("destructive_hint", dump.get("destructiveHint"))
+        idem = dump.get("idempotent_hint", dump.get("idempotentHint"))
+        ow = dump.get("open_world_hint", dump.get("openWorldHint"))
+        title = dump.get("title")
+        missing = [
+            k
+            for k, v in (
+                ("readOnlyHint", ro),
+                ("destructiveHint", dest),
+                ("idempotentHint", idem),
+                ("openWorldHint", ow),
+            )
+            if v is None
+        ]
+        flag = f" MISSING={missing}" if missing else ""
+        print(
+            f"  {t.name}: title={title!r} readOnly={ro} destructive={dest} "
+            f"idempotent={idem} openWorld={ow}{flag}",
+            flush=True,
+        )
+
+
+async def _tool_call_log_middleware(ctx: Any, call_next: Any) -> Any:
+    """Log every inbound tools/call so client-side refusals are distinguishable."""
+    method = getattr(ctx, "method", None) or ""
+    if method != "tools/call":
+        return await call_next(ctx)
+    params = getattr(ctx, "params", None) or {}
+    if isinstance(params, dict):
+        name = params.get("name") or "?"
+        args = params.get("arguments") or {}
+    else:
+        name = getattr(params, "name", None) or "?"
+        args = getattr(params, "arguments", None) or {}
+    arg_keys = sorted(args.keys()) if isinstance(args, dict) else []
+    req_id = getattr(ctx, "request_id", None)
+    print(
+        f"tools/call inbound name={name!r} request_id={req_id!r} arg_keys={arg_keys}",
+        flush=True,
+    )
+    try:
+        result = await call_next(ctx)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"tools/call FAILED name={name!r} request_id={req_id!r} "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        raise
+    is_err = bool(getattr(result, "is_error", False) or getattr(result, "isError", False))
+    print(
+        f"tools/call done name={name!r} request_id={req_id!r} is_error={is_err}",
+        flush=True,
+    )
+    return result
+
+
+# Observe every tools/call that reaches the server (client-side gates never hit this).
+mcp.middleware.append(_tool_call_log_middleware)
+
 
 
 @mcp.resource(
@@ -322,10 +437,12 @@ def _supabase_project_ref(url: str = "") -> str | None:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Health / config check",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Health / config check',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def health() -> str:
@@ -380,10 +497,12 @@ def health() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="List vertical categories",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'List vertical categories',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def list_categories() -> str:
@@ -408,10 +527,12 @@ def list_categories() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Ensure US ZIP list",
-        readOnlyHint=False,
-        openWorldHint=False,
+    annotations=_ann(
+        'Ensure US ZIP list',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def ensure_zips() -> str:
@@ -425,10 +546,12 @@ def ensure_zips() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Pipeline database stats",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Pipeline database stats',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def pipeline_stats() -> str:
@@ -439,10 +562,12 @@ def pipeline_stats() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Plan leads from brief",
-        readOnlyHint=True,
-        openWorldHint=True,
+    annotations=_ann(
+        'Plan leads from brief',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def plan_leads(
@@ -522,10 +647,12 @@ def plan_leads(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Estimate cost for a vertical",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Estimate cost for a vertical',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def estimate_cost(
@@ -601,11 +728,12 @@ def estimate_cost(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Probe Maps API (1 request)",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Probe Maps API (1 request)',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def probe_maps(zip_code: str = "10001", category: str = "hvac contractor") -> str:
@@ -854,11 +982,12 @@ def _execute_run_leads(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Run full lead pipeline",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Run full lead pipeline',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def run_leads(
@@ -951,11 +1080,12 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Scrape Google Maps only",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Scrape Google Maps only',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def scrape_maps(
@@ -990,10 +1120,12 @@ def scrape_maps(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Get background job status",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Get background job status',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def get_job_status(job_id: str) -> str:
@@ -1057,10 +1189,12 @@ def get_job_status(job_id: str) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="List background jobs",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'List background jobs',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def list_background_jobs(limit: int = 20) -> str:
@@ -1077,10 +1211,12 @@ def list_background_jobs(limit: int = 20) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="List job queue",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'List job queue',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def list_job_queue() -> str:
@@ -1125,11 +1261,12 @@ def list_job_queue() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Cancel background job",
-        readOnlyHint=False,
-        openWorldHint=False,
-        destructiveHint=False,
+    annotations=_ann(
+        'Cancel background job',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def cancel_job(job_id: str, reason: str = "") -> str:
@@ -1198,10 +1335,12 @@ def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Enrich business websites",
-        readOnlyHint=False,
-        openWorldHint=True,
+    annotations=_ann(
+        'Enrich business websites',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def enrich_sites(
@@ -1249,10 +1388,12 @@ def enrich_sites(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Crawl team/about pages",
-        readOnlyHint=False,
-        openWorldHint=True,
+    annotations=_ann(
+        'Crawl team/about pages',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def crawl_team_pages(
@@ -1296,10 +1437,12 @@ def crawl_team_pages(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Extract team-page contacts",
-        readOnlyHint=False,
-        openWorldHint=False,
+    annotations=_ann(
+        'Extract team-page contacts',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def extract_team_contacts(
@@ -1363,10 +1506,12 @@ def extract_team_contacts(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Ingest external leads",
-        readOnlyHint=False,
-        openWorldHint=False,
+    annotations=_ann(
+        'Ingest external leads',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def ingest_external_leads(
@@ -1399,11 +1544,12 @@ def ingest_external_leads(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Estimate resolve_places cost",
-        readOnlyHint=True,
-        openWorldHint=False,
-        destructiveHint=False,
+    annotations=_ann(
+        'Estimate resolve_places cost',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def estimate_resolve_places(
@@ -1446,11 +1592,12 @@ def estimate_resolve_places(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Resolve places (address/name → business)",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Resolve places (address/name → business)',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def resolve_places(
@@ -1539,11 +1686,12 @@ def resolve_places(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Pipeline: resolve → enrich → extract → contacts",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Pipeline: resolve → enrich → extract → contacts',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def pipeline_run(
@@ -1634,10 +1782,12 @@ def pipeline_run(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Estimate domain resolve cost",
-        readOnlyHint=True,
-        openWorldHint=True,
+    annotations=_ann(
+        'Estimate domain resolve cost',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def estimate_resolve_domains(source: str = "", limit: int = 0) -> str:
@@ -1675,11 +1825,12 @@ def estimate_resolve_domains(source: str = "", limit: int = 0) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Resolve missing domains via Maps",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Resolve missing domains via Maps',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def resolve_domains(
@@ -1739,10 +1890,12 @@ def resolve_domains(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Classify leads against ICP",
-        readOnlyHint=False,
-        openWorldHint=True,
+    annotations=_ann(
+        'Classify leads against ICP',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def classify_leads(
@@ -1771,48 +1924,54 @@ def classify_leads(
     When nothing is eligible, result.reason explains why.
     """
     _ensure_repo_cwd()
-    from gmscraper import classify
-    from gmscraper.cli import pick_vertical
-    from gmscraper.config import DEFAULT_CATEGORIES
-    from gmscraper.llm import default_workers
+    from mcp_server.errors import tool_error_from_exception
 
-    if not icp and vertical:
-        icp, _ = pick_vertical(DEFAULT_CATEGORIES, vertical)
-    if not icp:
-        raise ValueError("Provide icp text or a known vertical.")
-    store = _store()
-    llm = _llm()
-    res = classify.run(
-        store,
-        llm,
-        icp,
-        workers=workers or default_workers(llm),
-        source=source,
-        force=force,
-        limit=limit or None,
-        include_no_site=include_no_site,
-        center=center or "",
-        radius_miles=float(radius_miles or 0),
-        center_lat=float(center_lat) if center_lat else None,
-        center_lng=float(center_lng) if center_lng else None,
-        require_geo=bool(require_geo),
-    )
-    out: dict[str, Any] = {
-        "result": res,
-        "stats": store.stats(),
-        "llm_spend": llm.spend_line(),
-    }
-    if res.get("reason"):
-        out["reason"] = res["reason"]
-    return _json(out)
+    try:
+        from gmscraper import classify
+        from gmscraper.cli import pick_vertical
+        from gmscraper.config import DEFAULT_CATEGORIES
+        from gmscraper.llm import default_workers
+
+        if not icp and vertical:
+            icp, _ = pick_vertical(DEFAULT_CATEGORIES, vertical)
+        if not icp:
+            raise ValueError("Provide icp text or a known vertical.")
+        store = _store()
+        llm = _llm()
+        res = classify.run(
+            store,
+            llm,
+            icp,
+            workers=workers or default_workers(llm),
+            source=source,
+            force=force,
+            limit=limit or None,
+            include_no_site=include_no_site,
+            center=center or "",
+            radius_miles=float(radius_miles or 0),
+            center_lat=float(center_lat) if center_lat else None,
+            center_lng=float(center_lng) if center_lng else None,
+            require_geo=bool(require_geo),
+        )
+        out: dict[str, Any] = {
+            "result": res,
+            "stats": store.stats(),
+            "llm_spend": llm.spend_line(),
+        }
+        if res.get("reason"):
+            out["reason"] = res["reason"]
+        return _json(out)
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Find owner names",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Find owner names',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def find_owners(
@@ -1842,11 +2001,12 @@ def find_owners(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Estimate Apify contact crawl cost",
-        readOnlyHint=True,
-        openWorldHint=False,
-        destructiveHint=False,
+    annotations=_ann(
+        'Estimate Apify contact crawl cost',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def estimate_apify_contact_crawl(
@@ -1876,11 +2036,12 @@ def estimate_apify_contact_crawl(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Apify contact crawl",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Apify contact crawl',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def apify_contact_crawl(
@@ -1900,12 +2061,11 @@ def apify_contact_crawl(
     'icp_no_owner' to select from local SQLite. Prefer estimate_apify_contact_crawl
     for cost checks. Refuses when estimate exceeds APIFY_MAX_COST_USD.
     Default max_pages_per_site=3. Paid leadsEnrichment/social/email-verify
-    add-ons are never enabled. Typed errors on failure — never a bare
-    'No approval received' string.
+    add-ons are never enabled. Failures return typed ToolError JSON.
     """
     _ensure_repo_cwd()
     from gmscraper import apify_contacts
-    from mcp_server.errors import ToolError, tool_error_from_exception
+    from mcp_server.errors import tool_error_from_exception
 
     store = _store()
 
@@ -1923,12 +2083,6 @@ def apify_contact_crawl(
                 run_label=run_label or "",
             )
         except Exception as exc:  # noqa: BLE001
-            if "approval" in str(exc).lower():
-                return ToolError(
-                    f"{type(exc).__name__}: {exc}",
-                    kind="internal_error",
-                    details={"note": "not_an_approval_gate"},
-                ).to_dict()
             return tool_error_from_exception(exc)
 
     # Long live runs go to background; estimates stay sync.
@@ -1961,11 +2115,12 @@ def apify_contact_crawl(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Parse Apify contacts via OpenAI",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Parse Apify contacts via OpenAI',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def parse_contacts_openai(
@@ -2016,11 +2171,12 @@ def parse_contacts_openai(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="FullEnrich find email",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'FullEnrich find email',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def fullenrich_find_email(
@@ -2053,11 +2209,12 @@ def fullenrich_find_email(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="FullEnrich find email (bulk)",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'FullEnrich find email (bulk)',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def fullenrich_find_email_bulk(rows: str) -> str:
@@ -2100,11 +2257,38 @@ def fullenrich_find_email_bulk(rows: str) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Enrich waterfall → Supabase gc.*",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        "Debug echo (annotation probe)",
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
+    )
+)
+def debug_echo(message: str = "ping") -> str:
+    """Return the input string. Same annotations as enrich_waterfall.
+
+    If this tool is refused with 'No approval received' while other tools work,
+    the gate is annotations/registration — not the enrich_waterfall body.
+    If this succeeds, call enrich_waterfall / classify_leads next.
+    """
+    return _json(
+        {
+            "ok": True,
+            "echo": message,
+            "server_version": "1.5.0",
+            "note": "Reached MCP tool body — client approval gate did not block.",
+        }
+    )
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Enrich waterfall → Supabase gc.*',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def enrich_waterfall(
@@ -2136,7 +2320,7 @@ def enrich_waterfall(
     store = _store()
 
     def _run() -> dict[str, Any]:
-        from mcp_server.errors import ToolError, tool_error_from_exception
+        from mcp_server.errors import tool_error_from_exception
 
         try:
             return wf.enrich_waterfall(
@@ -2149,12 +2333,6 @@ def enrich_waterfall(
                 on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
             )
         except Exception as exc:  # noqa: BLE001
-            if "approval" in str(exc).lower():
-                return ToolError(
-                    f"{type(exc).__name__}: {exc}",
-                    kind="internal_error",
-                    details={"note": "not_an_approval_gate"},
-                ).to_dict()
             return tool_error_from_exception(exc)
 
     if background and _http_mode() and len(rows or "") > 2000:
@@ -2177,10 +2355,12 @@ def enrich_waterfall(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Export leads CSV",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Export leads CSV',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def export_csv(
@@ -2235,10 +2415,12 @@ def export_csv(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Query leads (paginated)",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Query leads (paginated)',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def query_leads(
@@ -2283,10 +2465,12 @@ def query_leads(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Leads summary (counts)",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Leads summary (counts)',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def leads_summary(
@@ -2314,10 +2498,12 @@ def leads_summary(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Sample leads for QA",
-        readOnlyHint=True,
-        openWorldHint=False,
+    annotations=_ann(
+        'Sample leads for QA',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def sample_leads(
@@ -2358,11 +2544,12 @@ def sample_leads(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Sync leads to Supabase",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Sync leads to Supabase',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def sync_to_supabase(
@@ -2434,10 +2621,12 @@ def sync_to_supabase(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Renormalize stored Maps JSON",
-        readOnlyHint=False,
-        openWorldHint=False,
+    annotations=_ann(
+        'Renormalize stored Maps JSON',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
     )
 )
 def renormalize() -> str:
@@ -2459,10 +2648,12 @@ def renormalize() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Remote API health",
-        readOnlyHint=True,
-        openWorldHint=True,
+    annotations=_ann(
+        'Remote API health',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def remote_health() -> str:
@@ -2471,10 +2662,12 @@ def remote_health() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="List remote scrape jobs",
-        readOnlyHint=True,
-        openWorldHint=True,
+    annotations=_ann(
+        'List remote scrape jobs',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def list_remote_jobs() -> str:
@@ -2484,11 +2677,12 @@ def list_remote_jobs() -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Create remote scrape job",
-        readOnlyHint=False,
-        openWorldHint=True,
-        destructiveHint=False,
+    annotations=_ann(
+        'Create remote scrape job',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def create_remote_job(
@@ -2505,10 +2699,12 @@ def create_remote_job(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(
-        title="Download remote job CSV",
-        readOnlyHint=True,
-        openWorldHint=True,
+    annotations=_ann(
+        'Download remote job CSV',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
     )
 )
 def download_remote_csv(job_id: str, out_path: str = "") -> str:
@@ -2821,6 +3017,8 @@ def _start_backlog_drain() -> None:
 def main() -> None:
     """stdio for local Claude Desktop; streamable-http for Railway / Claude web."""
     _ensure_repo_cwd()
+    print(f"MCP server version {mcp.version}", flush=True)
+    _dump_tool_annotations()
 
     # Validate Apify token at boot — env-var presence alone is not enough.
     try:

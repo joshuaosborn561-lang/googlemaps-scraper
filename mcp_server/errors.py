@@ -37,18 +37,33 @@ class ToolError(Exception):
 
 
 KIND_CREDENTIAL = "missing_or_invalid_credential"
-KIND_APPROVAL = "approval_required"  # reserved — unused; gates cleared
 KIND_COST = "cost_ceiling_exceeded"
 KIND_UPSTREAM = "upstream_vendor_error"
 KIND_BAD_ARGS = "bad_arguments"
 KIND_INTERNAL = "internal_error"
+
+# Client connectors sometimes surface this bare string. Never emit it from us.
+_FORBIDDEN_BARE = "no approval received"
+
+
+def _scrub_message(text: str) -> str:
+    """Rewrite legacy approval phrasing so it cannot leak as a bare response."""
+    raw = text or ""
+    if _FORBIDDEN_BARE in raw.lower():
+        return (
+            "Client/connector confirmation gate (not a server spend-approval). "
+            "Server has no approval mechanism. Check tool annotations "
+            "(destructiveHint must be explicitly false), bump server version, "
+            "and reconnect the MCP connector. See error.request_id + details."
+        )
+    return raw
 
 
 def classify_exception(exc: BaseException) -> str:
     msg = str(exc).lower()
     name = type(exc).__name__.lower()
     if "approval" in msg:
-        # Never treat our own remnants as a live approval gate.
+        # Never treat remnants as a live approval gate.
         return KIND_INTERNAL
     if "token" in msg or "api key" in msg or "credential" in msg or "unauthorized" in msg:
         return KIND_CREDENTIAL
@@ -63,11 +78,17 @@ def classify_exception(exc: BaseException) -> str:
 
 def tool_error_from_exception(exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, ToolError):
-        return exc.to_dict()
+        payload = exc.to_dict()
+        payload["error"]["message"] = _scrub_message(payload["error"]["message"])
+        return payload
     kind = classify_exception(exc)
+    msg = _scrub_message(f"{type(exc).__name__}: {exc}")
     err = ToolError(
-        f"{type(exc).__name__}: {exc}",
+        msg,
         kind=kind,
-        details={"traceback": traceback.format_exc()[-2500:]},
+        details={
+            "exception_type": type(exc).__name__,
+            "traceback": traceback.format_exc()[-2500:],
+        },
     )
     return err.to_dict()

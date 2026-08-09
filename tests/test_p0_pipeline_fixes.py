@@ -68,6 +68,7 @@ def test_tool_error_never_approval_kind() -> None:
     assert err["ok"] is False
     assert err["error"]["kind"] == "internal_error"
     assert "request_id" in err["error"]
+    assert "No approval received" not in err["error"]["message"]
     assert classify_exception(ValueError("bad")) == "bad_arguments"
     te = ToolError("token bad", kind="missing_or_invalid_credential")
     assert te.to_dict()["error"]["kind"] == "missing_or_invalid_credential"
