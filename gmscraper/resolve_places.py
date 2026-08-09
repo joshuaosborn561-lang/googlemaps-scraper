@@ -328,10 +328,12 @@ def run(
         confidence_column=confidence_column,
     )
     sb.validate_binding(binding)
+    # Estimates are read-only — never ALTER TABLE / ensure columns.
+    if estimate_only:
+        est = estimate(binding, limit=limit)
+        return {**est, "started": False, "estimate_only": True, "ensured": {}}
     ensured = sb.ensure_writeback_columns(binding)
     est = estimate(binding, limit=limit)
-    if estimate_only:
-        return {**est, "started": False, "estimate_only": True, "ensured": ensured}
     if est.get("blocked"):
         return {
             **est,

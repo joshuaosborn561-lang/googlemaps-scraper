@@ -705,7 +705,7 @@ def _execute_run_leads(
         title="Run full lead pipeline",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def run_leads(
@@ -789,7 +789,7 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
         title="Scrape Google Maps only",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def scrape_maps(
@@ -1027,10 +1027,55 @@ def ingest_external_leads(
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Estimate resolve_places cost",
+        readOnlyHint=True,
+        openWorldHint=False,
+        destructiveHint=False,
+    )
+)
+def estimate_resolve_places(
+    schema: str,
+    table: str,
+    key_column: str,
+    address_column: str = "",
+    name_column: str = "",
+    city_column: str = "",
+    where: str = "",
+    order_by: str = "",
+    limit: int = 0,
+    project_id: str = "",
+) -> str:
+    """Read-only Maps cost estimate for resolve_places. No spend, no schema writes.
+
+    Prefer this over resolve_places(estimate_only=true). No approval required.
+    Then call resolve_places with the same binding to run.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import resolve_places as rp
+
+    return _json(
+        rp.run(
+            schema=schema,
+            table=table,
+            key_column=key_column,
+            address_column=address_column,
+            name_column=name_column,
+            city_column=city_column,
+            where=where,
+            order_by=order_by,
+            limit=int(limit or 0),
+            estimate_only=True,
+            project_id=project_id or "",
+        )
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Resolve places (address/name → business)",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def resolve_places(
@@ -1056,8 +1101,8 @@ def resolve_places(
     strategy = 'address' | 'name' | 'address_then_name'.
     Writes domain/phone/place_id/confidence/resolved per row as each completes
     (resumable). Low-confidence multi-tenant hits are stored but do not overwrite
-    stronger values. estimate_only returns request/cost projection and starts nothing.
-    Response is counts only.
+    stronger values. For a cost check prefer estimate_resolve_places (read-only).
+    No approval / spend confirmation required. Response is counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_places as rp
@@ -1108,7 +1153,7 @@ def resolve_places(
         title="Pipeline: resolve → enrich → extract → contacts",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def pipeline_run(
@@ -1237,7 +1282,7 @@ def estimate_resolve_domains(source: str = "", limit: int = 0) -> str:
         title="Resolve missing domains via Maps",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def resolve_domains(
@@ -1355,7 +1400,7 @@ def classify_leads(
         title="Find owner names",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def find_owners(
@@ -1386,10 +1431,44 @@ def find_owners(
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Estimate Apify contact crawl cost",
+        readOnlyHint=True,
+        openWorldHint=False,
+        destructiveHint=False,
+    )
+)
+def estimate_apify_contact_crawl(
+    domains: str = "",
+    source: str = "",
+    limit: int = 0,
+    verify_emails: bool = False,
+) -> str:
+    """Read-only Apify cost estimate. No crawl starts. No approval required.
+
+    Prefer this over apify_contact_crawl(estimate_only=true). Then call
+    apify_contact_crawl to run.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import apify_contacts
+
+    return _json(
+        apify_contacts.crawl(
+            _store(),
+            domains=domains or "",
+            source=source or "",
+            limit=int(limit or 0),
+            verify_emails=bool(verify_emails),
+            estimate_only=True,
+        )
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Apify contact crawl",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def apify_contact_crawl(
@@ -1406,9 +1485,9 @@ def apify_contact_crawl(
     """Run automation-lab/website-contact-finder; persist raw items locally.
 
     Pass domains as comma-separated hosts/URLs, or source='maps_no_owner' /
-    'icp_no_owner' to select from local SQLite. Always estimates cost first;
-    refuses when estimate exceeds APIFY_MAX_COST_USD. estimate_only=True
-    returns the estimate and starts nothing.
+    'icp_no_owner' to select from local SQLite. Prefer estimate_apify_contact_crawl
+    for cost checks. Refuses when estimate exceeds APIFY_MAX_COST_USD.
+    No approval / spend confirmation required.
 
     Response is counts + run_id only — never row payloads.
     """
@@ -1464,7 +1543,7 @@ def apify_contact_crawl(
         title="Parse Apify contacts via OpenAI",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def parse_contacts_openai(
@@ -1479,6 +1558,7 @@ def parse_contacts_openai(
 
     Rejects job titles and company names in name fields. Never invents emails.
     Writes gc.companies / gc.contacts server-side. Response is counts only.
+    No approval / spend confirmation required.
     """
     _ensure_repo_cwd()
     from gmscraper import apify_contacts
@@ -1518,7 +1598,7 @@ def parse_contacts_openai(
         title="FullEnrich find email",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def fullenrich_find_email(
@@ -1555,7 +1635,7 @@ def fullenrich_find_email(
         title="FullEnrich find email (bulk)",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def fullenrich_find_email_bulk(rows: str) -> str:
@@ -1602,7 +1682,7 @@ def fullenrich_find_email_bulk(rows: str) -> str:
         title="Enrich waterfall → Supabase gc.*",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def enrich_waterfall(
@@ -1621,7 +1701,7 @@ def enrich_waterfall(
 
     Apify+OpenAI is discovery tier 1; AI Ark is people-discovery tier 2.
     Stops at first success per field. Records source_tier for hit-rate math.
-    Response is counts only.
+    No approval / spend confirmation required. Response is counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import waterfall as wf
@@ -1851,7 +1931,7 @@ def sample_leads(
         title="Sync leads to Supabase",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def sync_to_supabase(
@@ -1977,7 +2057,7 @@ def list_remote_jobs() -> str:
         title="Create remote scrape job",
         readOnlyHint=False,
         openWorldHint=True,
-        destructiveHint=True,
+        destructiveHint=False,
     )
 )
 def create_remote_job(

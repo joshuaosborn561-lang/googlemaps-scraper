@@ -57,6 +57,44 @@ def test_virtual_office_penalty() -> None:
     assert resolve_places.score_candidate(query, result) < 0.5
 
 
+def test_estimate_only_skips_schema_writes(monkeypatch) -> None:
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(
+        project_id="x",
+        schema="s",
+        table="t",
+        key_column="id",
+        address_column="addr",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    monkeypatch.setattr(resolve_places.sb, "resolve_binding", lambda **kw: binding)
+    monkeypatch.setattr(resolve_places.sb, "validate_binding", lambda b: b)
+    called = {"ensure": 0}
+
+    def _ensure(_b):
+        called["ensure"] += 1
+        return {"added": []}
+
+    monkeypatch.setattr(resolve_places.sb, "ensure_writeback_columns", _ensure)
+    monkeypatch.setattr(
+        resolve_places,
+        "estimate",
+        lambda b, limit=0: {"pending_rows": 3, "blocked": False, "requests": 3},
+    )
+    out = resolve_places.run(
+        schema="s",
+        table="t",
+        key_column="id",
+        address_column="addr",
+        estimate_only=True,
+    )
+    assert called["ensure"] == 0
+    assert out["estimate_only"] is True
+    assert out["ensured"] == {}
+
+
 def test_llm_extract_rejects_junk_names() -> None:
     class FakeLLM:
         model = "gpt-4o-mini"

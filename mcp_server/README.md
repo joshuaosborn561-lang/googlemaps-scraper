@@ -45,6 +45,11 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `extract_team_contacts` | optional LLM | Person+title → local `contacts` |
 | `classify_leads` | LLM | ICP filter |
 | `find_owners` | optional Apify | Team contacts + owner; paid fallback needs no approval |
+| `estimate_resolve_places` | no | Read-only cost estimate for resolve_places |
+| `resolve_places` | **yes** | Address/name → business writeback (no approval) |
+| `estimate_apify_contact_crawl` | no | Read-only Apify cost estimate |
+| `apify_contact_crawl` | Apify | Website contact crawl (no approval) |
+| `parse_contacts_openai` | LLM | Parse Apify raw → people in `gc.*` (no approval) |
 | `enrich_waterfall` | paid vendors | apify→AI Ark→getleads→LeadMagic (`max_tier` default leadmagic) → `gc.*` |
 | `fullenrich_find_email` | FullEnrich | Last-tier email only |
 | `export_csv` | no | CSV text in response (`total_matching`, `capped_at`, `csv`); optional `out_path` |
