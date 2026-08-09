@@ -570,6 +570,22 @@ def enrich_waterfall(
         wf.tier_stats[name]["vendor_calls"] = getattr(client, "calls", 0)
         wf.tier_stats[name]["vendor_hits"] = getattr(client, "hits", 0)
 
+    # Per-tier breakdown: attempts / hits / rough cost (vendor pricing opaque → 0).
+    tier_breakdown = {}
+    for tier_name, stats in wf.tier_stats.items():
+        allowed = tier_allowed(
+            "aiark" if tier_name == "ai_ark" else tier_name, max_tier_n
+        ) if tier_name in TIER_RANK or tier_name == "ai_ark" else True
+        tier_breakdown[tier_name] = {
+            "attempts": int(stats.get("calls") or 0),
+            "email_hits": int(stats.get("email_hits") or 0),
+            "dm_hits": int(stats.get("dm_hits") or 0),
+            "vendor_calls": int(stats.get("vendor_calls") or 0),
+            "vendor_hits": int(stats.get("vendor_hits") or 0),
+            "allowed_by_max_tier": allowed,
+            "estimated_cost_usd": 0.0,
+        }
+
     return {
         "rows_in": len(parsed),
         "companies_upserted": companies_upserted,
@@ -577,14 +593,15 @@ def enrich_waterfall(
         "emails_found": emails_found,
         "dms_found": dms_found,
         "tier_stats": wf.tier_stats,
+        "tier_breakdown": tier_breakdown,
         "need": need,
         "max_tier": max_tier_n,
         "apify": apify_result or None,
         "vendors_enabled": {
-            "apify": bool(settings.apify_token),
-            "getleads": wf.getleads.enabled,
-            "ai_ark": wf.ai_ark.enabled,
-            "leadmagic": wf.leadmagic.enabled,
+            "apify": bool(settings.apify_token) and wf._allowed("apify"),
+            "getleads": wf.getleads.enabled and wf._allowed("getleads"),
+            "ai_ark": wf.ai_ark.enabled and wf._allowed("aiark"),
+            "leadmagic": wf.leadmagic.enabled and wf._allowed("leadmagic"),
             "fullenrich": wf.fullenrich.enabled and wf._allowed("fullenrich"),
         },
     }

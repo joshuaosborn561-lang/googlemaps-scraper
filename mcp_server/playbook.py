@@ -62,6 +62,9 @@ Do NOT use this for:
 | "crawl team pages on already-fetched sites" | `crawl_team_pages` then `extract_team_contacts` |
 | "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
 | "Apify website contact crawl" | `apify_contact_crawl` then `parse_contacts_openai` |
+| "address → business + domain" | `resolve_places` (generic schema/table binding; estimate_only first) |
+| "raw list → people end-to-end" | `pipeline_run` (resolve,enrich,extract,contacts; max_tier default getleads) |
+| "sync parcels with county + cursor" | `sync_to_supabase(dataset='parcels', county=…, cursor=…)` |
 | "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (apify→getleads→AI Ark→LeadMagic; max_tier default leadmagic) |
 | "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (only if max_tier=fullenrich) |
 | "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |

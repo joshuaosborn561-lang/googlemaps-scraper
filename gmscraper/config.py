@@ -235,6 +235,9 @@ class Settings:
     quota_reset_day: int = field(
         default_factory=lambda: int(_env_float("MAPS_QUOTA_RESET_DAY", 1))
     )
+    maps_max_cost_usd: float = field(
+        default_factory=lambda: _env_float("MAPS_MAX_COST_USD", 25.0)
+    )
 
     # Contact enrichment waterfall (getleads → AI Ark → LeadMagic → FullEnrich)
     getleads_api_key: str = field(default_factory=lambda: _env("GETLEADS_API_KEY"))

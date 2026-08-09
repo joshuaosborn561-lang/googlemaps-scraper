@@ -954,17 +954,21 @@ def extract_team_contacts(
     workers: int = 8,
     icp_only: bool = False,
     use_llm: bool = False,
+    target_titles: str = "",
     background: bool = True,
 ) -> str:
     """Parse person+title pairs from team/about page text into contacts.
 
-    Writes to local contacts (source='team_page'). Also fills empty owners.
-    Heuristic by default (free); use_llm=true spends LLM tokens.
+    Writes to local contacts. Also fills empty owners.
+    Prefer use_llm=true — heuristic path invents title/company "names".
+    target_titles = comma-separated roles to prefer (vertical-agnostic default
+    when empty: owner, founder, president, principal, partner, chief, …).
     """
     _ensure_repo_cwd()
     from gmscraper import team_contacts
 
     store = _store()
+    titles = [t.strip() for t in (target_titles or "").split(",") if t.strip()]
 
     def _run() -> dict[str, Any]:
         llm = _llm() if use_llm else None
@@ -975,6 +979,7 @@ def extract_team_contacts(
             icp_only=icp_only,
             use_llm=use_llm,
             llm=llm,
+            target_titles=titles or None,
         )
         out: dict[str, Any] = {"result": res, "stats": store.stats()}
         if llm:
@@ -987,7 +992,12 @@ def extract_team_contacts(
         job = start_job(
             "extract_team_contacts",
             _run,
-            meta={"limit": limit, "icp_only": icp_only, "use_llm": use_llm},
+            meta={
+                "limit": limit,
+                "icp_only": icp_only,
+                "use_llm": use_llm,
+                "target_titles": titles or None,
+            },
         )
         return _json(
             {
@@ -1033,6 +1043,172 @@ def ingest_external_leads(
     )
     result["stats"] = _store().stats()
     return _json(result)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Resolve places (address/name → business)",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def resolve_places(
+    schema: str,
+    table: str,
+    key_column: str,
+    address_column: str = "",
+    name_column: str = "",
+    city_column: str = "",
+    where: str = "",
+    order_by: str = "",
+    limit: int = 0,
+    strategy: str = "address",
+    min_confidence: float = 0.6,
+    workers: int = 8,
+    project_id: str = "",
+    estimate_only: bool = False,
+    background: bool = True,
+) -> str:
+    """Turn source-table rows into business identities via Maps.
+
+    Generic source binding: pass schema/table/columns — no hardcoded vertical.
+    strategy = 'address' | 'name' | 'address_then_name'.
+    Writes domain/phone/place_id/confidence/resolved per row as each completes
+    (resumable). Low-confidence multi-tenant hits are stored but do not overwrite
+    stronger values. estimate_only returns request/cost projection and starts nothing.
+    Response is counts only.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import resolve_places as rp
+
+    def _run() -> dict[str, Any]:
+        return rp.run(
+            schema=schema,
+            table=table,
+            key_column=key_column,
+            address_column=address_column,
+            name_column=name_column,
+            city_column=city_column,
+            where=where,
+            order_by=order_by,
+            limit=int(limit or 0),
+            strategy=strategy or "address",
+            min_confidence=float(min_confidence or 0.6),
+            workers=int(workers or 8),
+            estimate_only=bool(estimate_only),
+            project_id=project_id or "",
+        )
+
+    if background and _http_mode() and not estimate_only:
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "resolve_places",
+            _run,
+            meta={
+                "schema": schema,
+                "table": table,
+                "limit": limit,
+                "strategy": strategy,
+            },
+        )
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Pipeline: resolve → enrich → extract → contacts",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def pipeline_run(
+    schema: str,
+    table: str,
+    key_column: str,
+    stages: str = "resolve,enrich,extract,contacts",
+    address_column: str = "",
+    name_column: str = "",
+    city_column: str = "",
+    where: str = "",
+    order_by: str = "",
+    limit: int = 0,
+    max_tier: str = "getleads",
+    use_llm: bool = True,
+    strategy: str = "address",
+    min_confidence: float = 0.6,
+    target_titles: str = "",
+    project_id: str = "",
+    workers: int = 8,
+    estimate_only: bool = False,
+    background: bool = True,
+) -> str:
+    """Chain optional stages from a raw list to contactable people.
+
+    stages = comma list of resolve,enrich,extract,contacts.
+    max_tier caps the contacts waterfall (default getleads).
+    target_titles steers LLM extraction (comma-separated).
+    Returns per-stage counts + cumulative cost. Never returns rows.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import pipeline as pipe
+
+    store = _store()
+
+    def _run() -> dict[str, Any]:
+        return pipe.run(
+            store,
+            schema=schema,
+            table=table,
+            key_column=key_column,
+            stages=stages,
+            address_column=address_column,
+            name_column=name_column,
+            city_column=city_column,
+            where=where,
+            order_by=order_by,
+            limit=int(limit or 0),
+            max_tier=max_tier or "getleads",
+            use_llm=bool(use_llm),
+            estimate_only=bool(estimate_only),
+            project_id=project_id or "",
+            strategy=strategy or "address",
+            min_confidence=float(min_confidence or 0.6),
+            target_titles=target_titles or "",
+            workers=int(workers or 8),
+        )
+
+    if background and _http_mode() and not estimate_only:
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "pipeline_run",
+            _run,
+            meta={
+                "schema": schema,
+                "table": table,
+                "stages": stages,
+                "max_tier": max_tier,
+                "limit": limit,
+            },
+        )
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
 
 
 @mcp.tool(
@@ -1714,18 +1890,59 @@ def sample_leads(
 )
 def sync_to_supabase(
     table: str = "maps_leads",
+    dataset: str = "",
+    county: str = "",
+    cursor: int = 0,
+    page_size: int = 1000,
+    max_pages: int = 0,
+    project_id: str = "",
     icp_only: bool = False,
     with_email: bool = False,
     truncate: bool = False,
     run_label: str = "",
+    background: bool = True,
 ) -> str:
-    """Batch-upsert the lead table into Supabase for SQL / downstream joins.
+    """Batch-upsert into Supabase. Counts only — never echoes rows.
 
-    Credentials come from SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (or
-    SUPABASE_ANON_KEY). Upserts on (place_id, run_label). Returns counts only —
-    never echoes rows. Use run_label so multiple scrapes can coexist.
+    dataset='' (default): upsert local leads into `table` (maps_leads) on
+    (place_id, run_label).
+
+    dataset='parcels': page scrape_leads → permit_parcel.parcels with cursor
+    pagination. Honour `county`. Upsert on natural key (county, account_id).
+    Returns has_more + resume_token (cursor) when more pages remain.
     """
     _ensure_repo_cwd()
+    ds = (dataset or "").strip().lower()
+
+    if ds in ("parcels", "parcel"):
+        from gmscraper import parcels_sync
+
+        def _run_parcels() -> dict[str, Any]:
+            return parcels_sync.sync_parcels(
+                county=county or "",
+                project_id=project_id or "",
+                page_size=int(page_size or 1000),
+                max_pages=int(max_pages or 0),
+                cursor=int(cursor or 0),
+            )
+
+        if background and _http_mode():
+            from mcp_server.jobs import start_job
+
+            job = start_job(
+                "sync_parcels",
+                _run_parcels,
+                meta={"county": county or None, "cursor": cursor},
+            )
+            return _json(
+                {
+                    "job_id": job.id,
+                    "status": job.status,
+                    "message": f"Poll get_job_status with job_id={job.id}.",
+                }
+            )
+        return _json(_run_parcels())
+
     from gmscraper import supabase_sync
 
     result = supabase_sync.sync_to_supabase(
