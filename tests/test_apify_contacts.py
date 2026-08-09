@@ -14,14 +14,17 @@ from gmscraper.vendors.base import EmailHit, PersonHit
 
 
 def test_estimate_cost_215_domains() -> None:
-    # FREE tier: 0.001 start + 0.002/page × 215 domains × 5 pages = 2.151
+    # FREE tier: 0.001 start + 0.002/page × domains × pages (default 3)
+    assert apify_contacts.estimate_cost_usd(215) == pytest.approx(
+        0.001 + 0.002 * 215 * 3
+    )
     assert apify_contacts.estimate_cost_usd(215, max_pages_per_site=5) == pytest.approx(
         0.001 + 0.002 * 215 * 5
     )
     # verify_emails does not change estimate (leads-enrichment add-on stays off)
     assert apify_contacts.estimate_cost_usd(
-        215, verify_emails=True, max_pages_per_site=5
-    ) == pytest.approx(0.001 + 0.002 * 215 * 5)
+        215, verify_emails=True, max_pages_per_site=3
+    ) == pytest.approx(0.001 + 0.002 * 215 * 3)
 
 
 def test_estimate_only_does_not_start(tmp_path: Path, monkeypatch) -> None:
@@ -36,7 +39,8 @@ def test_estimate_only_does_not_start(tmp_path: Path, monkeypatch) -> None:
     assert out["started"] is False
     assert out["blocked"] is False
     assert out["domains"] == 215
-    assert out["estimated_cost_usd"] == pytest.approx(0.001 + 0.002 * 215 * 5)
+    assert out["max_pages_per_site"] == 3
+    assert out["estimated_cost_usd"] == pytest.approx(0.001 + 0.002 * 215 * 3)
     assert out.get("run_id") is None
     assert store.apify_contact_raw_rows() == []
 
@@ -54,7 +58,7 @@ def test_cost_ceiling_blocks_run(tmp_path: Path, monkeypatch) -> None:
         )
     assert out["blocked"] is True
     assert out["started"] is False
-    assert out["estimated_cost_usd"] == pytest.approx(0.001 + 0.002 * 215 * 5)
+    assert out["estimated_cost_usd"] == pytest.approx(0.001 + 0.002 * 215 * 3)
 
 
 def test_save_apify_contact_raw(tmp_path: Path) -> None:

@@ -155,18 +155,33 @@ class Waterfall:
         self.store = store
         self.max_tier = normalize_max_tier(max_tier)
         self.tier_stats = {
-            "apify": {"calls": 0, "email_hits": 0, "dm_hits": 0},
-            "getleads": {"calls": 0, "email_hits": 0, "dm_hits": 0},
-            "ai_ark": {"calls": 0, "email_hits": 0, "dm_hits": 0},
-            "leadmagic": {"calls": 0, "email_hits": 0, "dm_hits": 0},
-            "fullenrich": {"calls": 0, "email_hits": 0, "dm_hits": 0},
-            "team_page": {"calls": 0, "email_hits": 0, "dm_hits": 0},
+            "apify": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
+            "getleads": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
+            "ai_ark": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
+            "leadmagic": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
+            "fullenrich": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
+            "team_page": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
         }
         self.apify_meta: dict[str, Any] = {}
 
     def _bump(self, tier: str, field: str) -> None:
-        self.tier_stats.setdefault(tier, {"calls": 0, "email_hits": 0, "dm_hits": 0})
+        self.tier_stats.setdefault(
+            tier, {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []}
+        )
         self.tier_stats[tier][field] = self.tier_stats[tier].get(field, 0) + 1
+
+    def _skip(self, tier: str, reason: str) -> None:
+        """Record why a tier was not attempted or returned nothing useful."""
+        bucket = self.tier_stats.setdefault(
+            tier, {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []}
+        )
+        skips = bucket.setdefault("skips", [])
+        # Cap stored skip reasons so responses stay small.
+        if len(skips) < 20 and reason not in skips:
+            skips.append(reason)
+        bucket["skip_count"] = int(bucket.get("skip_count") or 0) + 1
+        # Also keep the latest reason for easy polling.
+        bucket["last_skip_reason"] = reason
 
     def _allowed(self, tier: str) -> bool:
         return tier_allowed(tier, self.max_tier)
@@ -231,15 +246,33 @@ class Waterfall:
                     source_tier="input",
                 )
 
-        if self.ai_ark.enabled and self._allowed("aiark"):
+        if not self._allowed("aiark"):
+            self._skip("ai_ark", "max_tier_excludes_aiark")
+        elif not self.ai_ark.enabled:
+            self._skip("ai_ark", "vendor_disabled_or_missing_key")
+        else:
             self._bump("ai_ark", "calls")
-            people = self.ai_ark.find_people(domain, company_name=row.get("company_name") or "")
+            try:
+                people = self.ai_ark.find_people(
+                    domain, company_name=row.get("company_name") or ""
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._skip("ai_ark", f"error:{type(exc).__name__}:{exc}"[:180])
+                people = []
             for p in people:
                 if apify_contacts._looks_like_person(p.first_name, p.last_name):
                     self._bump("ai_ark", "dm_hits")
                     return p
+            if people:
+                self._skip("ai_ark", "returned_non_person_names")
+            else:
+                self._skip("ai_ark", "no_people_returned")
 
-        if self.getleads.enabled and self._allowed("getleads"):
+        if not self._allowed("getleads"):
+            self._skip("getleads", "max_tier_excludes_getleads")
+        elif not self.getleads.enabled:
+            self._skip("getleads", "vendor_disabled_or_missing_key")
+        else:
             self._bump("getleads", "calls")
             people = self.getleads.find_people(domain, row.get("company_name") or "")
             for p in people:
@@ -248,7 +281,11 @@ class Waterfall:
                         self._bump("getleads", "dm_hits")
                         return p
 
-        if self.leadmagic.enabled and self._allowed("leadmagic"):
+        if not self._allowed("leadmagic"):
+            self._skip("leadmagic", "max_tier_excludes_leadmagic")
+        elif not self.leadmagic.enabled:
+            self._skip("leadmagic", "vendor_disabled_or_missing_key")
+        else:
             self._bump("leadmagic", "calls")
             people = self.leadmagic.find_people(domain, row.get("company_name") or "")
             for p in people:
@@ -421,7 +458,18 @@ def enrich_waterfall(
         email = row.get("email") or ""
         person: PersonHit | None = None
 
-        if need in ("dm", "both"):
+        has_person_name = bool(
+            row.get("first_name")
+            and row.get("last_name")
+            and apify_contacts._looks_like_person(row["first_name"], row["last_name"])
+        )
+
+        # People discovery (AI Ark / getleads / LeadMagic find_people) whenever
+        # we need a DM, or need an email but have no usable name yet.
+        need_people = need in ("dm", "both") or (
+            need == "email" and not has_person_name and not email
+        )
+        if need_people:
             person = wf.resolve_dm(row)
             if person:
                 dms_found += 1
@@ -430,11 +478,15 @@ def enrich_waterfall(
                     row["first_name"] = person.first_name
                     row["last_name"] = person.last_name
                     row["full_name"] = person.name
+                    has_person_name = True
                 if not row.get("title") and person.title:
                     row["title"] = person.title
                 if person.email and not email:
                     email = person.email
                     email_tier = person.source_tier
+        elif need == "email" and has_person_name:
+            # AI Ark is people-discovery only — explicit skip when names exist.
+            wf._skip("ai_ark", "need=email_with_names; ai_ark_is_people_discovery_only")
 
         if need in ("email", "both") and not email:
             # Inline getleads + leadmagic; defer fullenrich to bulk when allowed.
@@ -448,6 +500,11 @@ def enrich_waterfall(
                     if hit:
                         wf._bump("getleads", "email_hits")
                         email, email_tier = hit.email, hit.source_tier
+                elif not wf._allowed("getleads"):
+                    wf._skip("getleads", "max_tier_excludes_getleads")
+                elif not wf.getleads.enabled:
+                    wf._skip("getleads", "vendor_disabled_or_missing_key")
+
                 if not email and wf.leadmagic.enabled and wf._allowed("leadmagic"):
                     wf._bump("leadmagic", "calls")
                     hit = wf.leadmagic.find_email(
@@ -456,12 +513,22 @@ def enrich_waterfall(
                     if hit:
                         wf._bump("leadmagic", "email_hits")
                         email, email_tier = hit.email, hit.source_tier
+                elif not email and not wf._allowed("leadmagic"):
+                    wf._skip("leadmagic", "max_tier_excludes_leadmagic")
+                elif not email and not wf.leadmagic.enabled:
+                    wf._skip("leadmagic", "vendor_disabled_or_missing_key")
+
                 if (
                     not email
                     and wf.fullenrich.enabled
                     and wf._allowed("fullenrich")
                 ):
                     pending_fe.append((idx, row))
+                elif not email and not wf._allowed("fullenrich"):
+                    wf._skip("fullenrich", "max_tier_excludes_fullenrich")
+            else:
+                wf._skip("getleads", "missing_first_last_for_email_lookup")
+                wf._skip("leadmagic", "missing_first_last_for_email_lookup")
 
         enriched.append(
             {
@@ -613,6 +680,9 @@ def enrich_waterfall(
             "dm_hits": int(stats.get("dm_hits") or 0),
             "vendor_calls": int(stats.get("vendor_calls") or 0),
             "vendor_hits": int(stats.get("vendor_hits") or 0),
+            "skip_count": int(stats.get("skip_count") or 0),
+            "skips": list(stats.get("skips") or [])[:20],
+            "last_skip_reason": stats.get("last_skip_reason"),
             "allowed_by_max_tier": allowed,
             "estimated_cost_usd": 0.0,
         }

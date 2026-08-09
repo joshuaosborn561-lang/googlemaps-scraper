@@ -337,12 +337,16 @@ def run(
     limit: int | None = None,
     workers: int = 8,
     icp_only: bool = False,
-    use_llm: bool = False,
+    use_llm: bool = True,
     llm: Ollama | None = None,
     domains: Sequence[str] | None = None,
     target_titles: Sequence[str] | None = None,
 ) -> dict[str, int]:
-    """Extract contacts from team/about pages for fetched domains."""
+    """Extract contacts from team/about pages for fetched domains.
+
+    Defaults to use_llm=True — heuristic extraction alone produces too many
+    title/company false positives.
+    """
     if domains is None:
         if icp_only:
             sql = """

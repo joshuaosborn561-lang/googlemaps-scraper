@@ -118,6 +118,11 @@ def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
     plan = (meta.get("plan_path") or "").strip()
     if kind in ("run_leads", "scrape_maps") and plan:
         return f"{kind}:{plan}"
+    if kind == "resolve_places":
+        schema = meta.get("schema") or ""
+        table = meta.get("table") or ""
+        details = "details" if meta.get("details_only") else "full"
+        return f"resolve_places:{schema}.{table}:{details}"
     if kind == "pipeline_run":
         schema = meta.get("schema") or ""
         table = meta.get("table") or ""
@@ -278,6 +283,7 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
     global _running_id, _wait_queue
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     flipped: list[str] = []
+    records: list[dict[str, Any]] = []
     for path in JOBS_DIR.glob("*.json"):
         try:
             job = _load_from_disk(path.stem)
@@ -299,10 +305,23 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
             _jobs[job.id] = job
         _persist(job)
         flipped.append(job.id)
+        records.append(
+            {
+                "id": job.id,
+                "kind": job.kind,
+                "meta": dict(job.meta or {}),
+                "progress": dict(job.progress or {}),
+            }
+        )
     with _lock:
         _running_id = None
         _wait_queue = []
-    return {"interrupted": len(flipped), "job_ids": flipped}
+        _fns.clear()
+    return {
+        "interrupted": len(flipped),
+        "job_ids": flipped,
+        "jobs": records,
+    }
 
 
 def _ensure_dispatcher() -> None:

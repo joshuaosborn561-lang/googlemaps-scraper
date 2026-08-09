@@ -338,14 +338,27 @@ def pending_where(binding: SourceBinding) -> str:
     return " AND ".join(parts)
 
 
-def count_pending(binding: SourceBinding) -> int:
+def details_only_where(binding: SourceBinding) -> str:
+    """Rows with a place_id but no website — backfill Place Details only."""
+    parts = [
+        "place_id IS NOT NULL",
+        "place_id != ''",
+        "(website IS NULL OR website = '')",
+    ]
+    if binding.where:
+        parts.append(f"({binding.where})")
+    return " AND ".join(parts)
+
+
+def count_pending(binding: SourceBinding, *, details_only: bool = False) -> int:
+    where = details_only_where(binding) if details_only else pending_where(binding)
     n = rpc(
         binding,
         "pp_count_rows",
         {
             "p_schema": binding.schema,
             "p_table": binding.table,
-            "p_where": pending_where(binding),
+            "p_where": where,
         },
     )
     return int(n or 0)
@@ -356,6 +369,7 @@ def fetch_pending(
     *,
     limit: int = 0,
     offset: int = 0,
+    details_only: bool = False,
 ) -> list[dict[str, Any]]:
     cols = [
         binding.key_column,
@@ -374,9 +388,11 @@ def fetch_pending(
         "longitude",
         "candidates",
         "business_name",
+        "resolve_raw",
     ):
         if c and c not in cols:
             cols.append(c)
+    where = details_only_where(binding) if details_only else pending_where(binding)
     rows = rpc(
         binding,
         "pp_select_rows",
@@ -384,7 +400,7 @@ def fetch_pending(
             "p_schema": binding.schema,
             "p_table": binding.table,
             "p_columns": cols,
-            "p_where": pending_where(binding),
+            "p_where": where,
             "p_order_by": binding.order_by or binding.key_column,
             "p_limit": int(limit) if limit and limit > 0 else 100000,
             "p_offset": int(offset or 0),

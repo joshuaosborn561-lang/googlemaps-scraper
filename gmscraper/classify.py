@@ -13,12 +13,13 @@ from __future__ import annotations
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Sequence
+from typing import Any, Sequence
 
 from .config import settings
 from .evidence import ICP_HINTS, condense
 from .llm import Ollama, OllamaError
 from .store import Store
+from .zips import haversine_miles, parse_center
 
 SYSTEM = (
     "You qualify local businesses for a B2B prospect list. You are given an "
@@ -84,6 +85,46 @@ def _eligible_clauses(
     return where, args
 
 
+def _geo_center(
+    center: str = "",
+    center_lat: float | None = None,
+    center_lng: float | None = None,
+) -> tuple[float, float] | None:
+    if center_lat is not None and center_lng is not None:
+        return float(center_lat), float(center_lng)
+    text = (center or "").strip()
+    if not text:
+        return None
+    try:
+        lat, lng, _label = parse_center(text)
+        return float(lat), float(lng)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _within_radius(
+    row: Any,
+    *,
+    lat: float,
+    lng: float,
+    radius_miles: float,
+) -> bool:
+    try:
+        rlat = row["latitude"] if "latitude" in row.keys() else None
+        rlng = row["longitude"] if "longitude" in row.keys() else None
+    except Exception:  # noqa: BLE001
+        rlat = row.get("latitude") if hasattr(row, "get") else None
+        rlng = row.get("longitude") if hasattr(row, "get") else None
+    if rlat is None or rlng is None:
+        return False
+    try:
+        return haversine_miles(float(lat), float(lng), float(rlat), float(rlng)) <= float(
+            radius_miles
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def run(
     store: Store,
     ollama: Ollama,
@@ -95,12 +136,21 @@ def run(
     max_evidence_chars: int | None = None,
     source: str = "",
     force: bool = False,
-) -> dict[str, int]:
+    center: str = "",
+    radius_miles: float = 0.0,
+    center_lat: float | None = None,
+    center_lng: float | None = None,
+    require_geo: bool = False,
+) -> dict[str, Any]:
     """Classify businesses against an ICP.
 
     By default only unclassified rows with fetched site text are eligible.
     Pass source= to scope (e.g. 'shovels'), force=True to re-classify, and
     limit= to cap the batch.
+
+    When require_geo=True (or center+radius_miles are set), rows outside the
+    radius are rejected deterministically before any LLM call and saved as
+    in_icp=false with reason 'outside_radius'.
     """
     where, args = _eligible_clauses(
         source=source, force=force, include_no_site=include_no_site
@@ -110,6 +160,30 @@ def run(
         sql += f" LIMIT {int(limit)}"
     rows = list(store.conn.execute(sql, args))
     cap = max_evidence_chars or settings.max_evidence_chars
+
+    geo = None
+    use_geo = bool(require_geo) or (
+        float(radius_miles or 0) > 0
+        and bool(center or (center_lat is not None and center_lng is not None))
+    )
+    if use_geo:
+        if float(radius_miles or 0) <= 0:
+            return {
+                "done": 0,
+                "in_icp": 0,
+                "errors": 0,
+                "reason": "require_geo/radius set but radius_miles is missing or <= 0",
+                "geo_rejected": 0,
+            }
+        geo = _geo_center(center, center_lat, center_lng)
+        if geo is None:
+            return {
+                "done": 0,
+                "in_icp": 0,
+                "errors": 0,
+                "reason": "require_geo set but center could not be resolved to lat/lng",
+                "geo_rejected": 0,
+            }
 
     if not rows:
         print("Nothing to classify.")
@@ -167,13 +241,45 @@ def run(
         for row in rows:
             store.clear_verdict(row["place_id"])
 
+    geo_rejected = 0
+    llm_rows = rows
+    if geo is not None:
+        inside: list = []
+        for row in rows:
+            if _within_radius(
+                row, lat=geo[0], lng=geo[1], radius_miles=float(radius_miles)
+            ):
+                inside.append(row)
+            else:
+                store.save_verdict(
+                    row["place_id"],
+                    False,
+                    1.0,
+                    f"outside_radius:{radius_miles:g}mi",
+                    "geo_gate",
+                )
+                geo_rejected += 1
+        llm_rows = inside
+
     scope = f" source={source!r}" if source else ""
     print(
-        f"Classifying {len(rows):,} businesses{scope} with {ollama.model} "
+        f"Classifying {len(llm_rows):,} businesses{scope} with {ollama.model} "
         f"({workers} worker{'s' if workers != 1 else ''}, {cap:,} chars evidence"
-        f"{', force' if force else ''})"
+        f"{', force' if force else ''}"
+        f"{f', geo_rejected={geo_rejected}' if geo_rejected else ''})"
     )
-    counts = {"done": 0, "in_icp": 0, "errors": 0, "source": source or None, "force": force}
+    counts: dict[str, Any] = {
+        "done": 0,
+        "in_icp": 0,
+        "errors": 0,
+        "geo_rejected": geo_rejected,
+        "source": source or None,
+        "force": force,
+        "require_geo": bool(use_geo),
+        "radius_miles": float(radius_miles) if use_geo else None,
+        "center_lat": geo[0] if geo else None,
+        "center_lng": geo[1] if geo else None,
+    }
     lock = threading.Lock()
 
     def work(row) -> None:
@@ -207,15 +313,24 @@ def run(
             counts["done"] += 1
             counts["in_icp"] += int(in_icp)
             counts["errors"] += int(not ok)
-            if counts["done"] % 10 == 0 or counts["done"] == len(rows):
+            if counts["done"] % 10 == 0 or counts["done"] == len(llm_rows):
                 sys.stderr.write(
-                    f"\r  {counts['done']:,}/{len(rows):,} | "
+                    f"\r  {counts['done']:,}/{len(llm_rows):,} | "
                     f"in-ICP {counts['in_icp']:,} | errors {counts['errors']:,}   "
                 )
                 sys.stderr.flush()
 
+    if not llm_rows:
+        counts["done"] = geo_rejected
+        counts["reason"] = (
+            f"all {geo_rejected} eligible rows were outside the geo radius"
+            if geo_rejected
+            else "nothing to classify after filters"
+        )
+        return counts
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(work, r) for r in rows]
+        futures = [pool.submit(work, r) for r in llm_rows]
         try:
             for f in as_completed(futures):
                 f.exception()
@@ -224,4 +339,5 @@ def run(
             for f in futures:
                 f.cancel()
     sys.stderr.write("\n")
+    counts["done"] = int(counts["done"]) + geo_rejected
     return counts

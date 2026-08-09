@@ -93,16 +93,16 @@ PARSE_SCHEMA = {
 def estimate_cost_usd(
     n_urls: int,
     verify_emails: bool = False,
-    max_pages_per_site: int = 5,
+    max_pages_per_site: int = 3,
 ) -> float:
     """Upper-bound FREE-tier estimate: start + pages × maxRequestsPerStartUrl.
 
-    verify_emails is accepted for API compat but does not enable the paid
-    leads-enrichment / email-verification add-ons on this actor.
+    Default depth 3 = homepage + about + team. verify_emails is accepted for
+    API compat but does not enable the paid leads-enrichment add-ons.
     """
     del verify_emails
     n = max(0, int(n_urls))
-    pages_per = max(1, int(max_pages_per_site or 5))
+    pages_per = max(1, int(max_pages_per_site or 3))
     return COST_START_USD + COST_PAGE_USD * n * pages_per
 
 
@@ -235,14 +235,14 @@ def crawl(
     domains: str = "",
     source: str = "",
     limit: int = 0,
-    max_pages_per_site: int = 5,
+    max_pages_per_site: int = 3,
     verify_emails: bool = False,
     use_proxy: bool = True,
     estimate_only: bool = False,
     run_label: str = "",
 ) -> dict[str, Any]:
     urls = resolve_urls(store, domains=domains, source=source, limit=limit)
-    pages_per = max(1, int(max_pages_per_site or 5))
+    pages_per = max(1, int(max_pages_per_site or 3))
     estimated = round(
         estimate_cost_usd(
             len(urls),
@@ -291,9 +291,12 @@ def crawl(
         "maxDepth": 2,
         "sameDomain": True,
         "considerChildFrames": False,
-        # Keep paid leads / email-verify add-ons OFF (default 0 / false).
+        # Keep paid leads / email-verify / social add-ons OFF.
+        # Any of these at ~$0.10/event turns a $64 job into a $1k+ job.
         "maximumLeadsEnrichmentRecords": 0,
         "verifyLeadsEnrichmentEmails": False,
+        "leadsEnrichment": False,
+        "scrapeSocialMediaProfiles": False,
         "useBrowser": False,
         "proxyConfig": {"useApifyProxy": bool(use_proxy)},
     }

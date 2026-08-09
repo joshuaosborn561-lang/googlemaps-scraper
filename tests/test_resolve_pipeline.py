@@ -166,11 +166,16 @@ def test_estimate_counts_two_requests_per_row(monkeypatch) -> None:
     binding = sb.SourceBinding(
         project_id="x", schema="s", table="t", key_column="id"
     )
-    monkeypatch.setattr(resolve_places.sb, "count_pending", lambda b: 10)
+    monkeypatch.setattr(
+        resolve_places.sb, "count_pending", lambda b, details_only=False: 10
+    )
     est = resolve_places.estimate(binding, limit=0)
     assert est["pending_rows"] == 10
     assert est["requests"] == 20
     assert est["requests_per_row"] == 2
+    est_d = resolve_places.estimate(binding, limit=0, details_only=True)
+    assert est_d["requests"] == 10
+    assert est_d["requests_per_row"] == 1
 
 
 def test_estimate_only_skips_schema_writes(monkeypatch) -> None:
@@ -197,7 +202,11 @@ def test_estimate_only_skips_schema_writes(monkeypatch) -> None:
     monkeypatch.setattr(
         resolve_places,
         "estimate",
-        lambda b, limit=0: {"pending_rows": 3, "blocked": False, "requests": 3},
+        lambda b, limit=0, details_only=False: {
+            "pending_rows": 3,
+            "blocked": False,
+            "requests": 3,
+        },
     )
     out = resolve_places.run(
         schema="s",

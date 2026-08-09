@@ -276,12 +276,89 @@ def resolve_one_row(
     }
 
 
+def details_only_one_row(
+    client: MapsDataClient,
+    binding: sb.SourceBinding,
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """Backfill website/phone/domain from an existing place_id (1 Maps request)."""
+    key = row.get(binding.key_column)
+    place_id = str(row.get("place_id") or "").strip()
+    now = datetime.now(timezone.utc).isoformat()
+    if not place_id:
+        return {"key": key, "status": "no_place_id"}
+
+    details = client.place_details(place_id)
+    website = ""
+    phone = ""
+    if details:
+        website = (details.get("website") or "").strip()
+        phone = (details.get("phone") or "").strip()
+    domain = domain_of(website)
+
+    raw_store: dict[str, Any] = {}
+    existing_raw = row.get("resolve_raw")
+    if isinstance(existing_raw, dict):
+        raw_store = dict(existing_raw)
+    elif isinstance(existing_raw, str) and existing_raw.strip():
+        try:
+            parsed = json.loads(existing_raw)
+            if isinstance(parsed, dict):
+                raw_store = parsed
+        except json.JSONDecodeError:
+            raw_store = {}
+    picked = dict(raw_store.get("picked") or {})
+    picked.update(
+        {
+            "place_id": place_id,
+            "website": website,
+            "phone": phone,
+            "domain": domain,
+        }
+    )
+    raw_store["picked"] = picked
+    raw_store["details"] = {
+        "place_id": place_id,
+        "website": website,
+        "phone": phone,
+        "backfill": True,
+    }
+
+    patch = {
+        binding.domain_column: domain or None,
+        binding.resolved_column: True,
+        "website": website or None,
+        "phone": phone or None,
+        "place_id": place_id,
+        "resolved_at": now,
+        "resolve_raw": raw_store,
+    }
+    # Keep prior confidence / business_name if present.
+    if row.get(binding.confidence_column) is not None:
+        patch[binding.confidence_column] = row.get(binding.confidence_column)
+    if details and details.get("name"):
+        patch["business_name"] = details.get("name")
+    if details and details.get("latitude") is not None:
+        patch["latitude"] = details.get("latitude")
+        patch["longitude"] = details.get("longitude")
+    sb.patch_row(binding, key, patch)
+    return {
+        "key": key,
+        "status": "details_ok" if (website or phone) else "details_empty",
+        "domain": domain,
+        "website": website,
+        "phone": phone,
+        "place_id": place_id,
+    }
+
+
 def estimate(
     binding: sb.SourceBinding,
     *,
     limit: int = 0,
+    details_only: bool = False,
 ) -> dict[str, Any]:
-    n = sb.count_pending(binding)
+    n = sb.count_pending(binding, details_only=details_only)
     if limit and limit > 0:
         n = min(n, int(limit))
     used = 0
@@ -292,8 +369,9 @@ def estimate(
         used = Store(str(DEFAULT_DB)).requests_this_cycle(settings.quota_reset_day)
     except Exception:
         used = 0
-    # Worst case: text search + Place Details per pending row.
-    requests = n * 2
+    # Full resolve: search + details. Backfill: details only.
+    per_row = 1 if details_only else 2
+    requests = n * per_row
     overage, billable = settings.plan.cost_for(requests, used)
     blocked = overage == float("inf")
     max_cost = float(getattr(settings, "maps_max_cost_usd", 25.0) or 25.0)
@@ -305,7 +383,8 @@ def estimate(
         "table": binding.table,
         "pending_rows": n,
         "requests": requests,
-        "requests_per_row": 2,
+        "requests_per_row": per_row,
+        "details_only": bool(details_only),
         "maps_plan": settings.plan.name,
         "already_used_this_cycle": used,
         "estimated_overage_usd": est,
@@ -318,8 +397,12 @@ def estimate(
         ),
         "billable_requests": billable,
         "note": (
-            "2 Maps requests/row (search + Place Details). Details only runs when "
-            "a candidate clears min_confidence."
+            "1 Maps request/row (Place Details backfill for place_id without website)."
+            if details_only
+            else (
+                "2 Maps requests/row (search + Place Details). Details only runs when "
+                "a candidate clears min_confidence."
+            )
         ),
     }
 
@@ -339,6 +422,7 @@ def run(
     min_confidence: float = 0.6,
     workers: int = 8,
     estimate_only: bool = False,
+    details_only: bool = False,
     project_id: str = "",
     domain_column: str = "domain",
     resolved_column: str = "resolved",
@@ -361,10 +445,16 @@ def run(
     sb.validate_binding(binding)
     # Estimates are read-only — never ALTER TABLE / ensure columns.
     if estimate_only:
-        est = estimate(binding, limit=limit)
-        return {**est, "started": False, "estimate_only": True, "ensured": {}}
+        est = estimate(binding, limit=limit, details_only=details_only)
+        return {
+            **est,
+            "started": False,
+            "estimate_only": True,
+            "details_only": bool(details_only),
+            "ensured": {},
+        }
     ensured = sb.ensure_writeback_columns(binding)
-    est = estimate(binding, limit=limit)
+    est = estimate(binding, limit=limit, details_only=details_only)
     if est.get("blocked"):
         return {
             **est,
@@ -374,16 +464,21 @@ def run(
         }
 
     settings.require_rapidapi()
-    rows = sb.fetch_pending(binding, limit=limit or 0)
+    rows = sb.fetch_pending(
+        binding, limit=limit or 0, details_only=bool(details_only)
+    )
     counts = {
         "started": True,
         "rows": len(rows),
         "resolved": 0,
+        "details_ok": 0,
+        "details_empty": 0,
         "low_confidence": 0,
         "no_match": 0,
         "kept_existing": 0,
         "errors": 0,
         "requests": 0,
+        "details_only": bool(details_only),
         "estimated_overage_usd": est.get("estimated_overage_usd"),
     }
     lock = threading.Lock()
@@ -391,13 +486,16 @@ def run(
     def work(row: dict[str, Any]) -> None:
         local = MapsDataClient(settings, limit=8)
         try:
-            result = resolve_one_row(
-                local,
-                binding,
-                row,
-                strategy=strategy,
-                min_confidence=float(min_confidence),
-            )
+            if details_only:
+                result = details_only_one_row(local, binding, row)
+            else:
+                result = resolve_one_row(
+                    local,
+                    binding,
+                    row,
+                    strategy=strategy,
+                    min_confidence=float(min_confidence),
+                )
             status = result.get("status") or "errors"
         except Exception:  # noqa: BLE001
             status = "errors"
@@ -406,6 +504,11 @@ def run(
             counts["requests"] += local.request_count
             if status == "resolved":
                 counts["resolved"] += 1
+            elif status == "details_ok":
+                counts["details_ok"] += 1
+                counts["resolved"] += 1
+            elif status == "details_empty":
+                counts["details_empty"] += 1
             elif status == "low_confidence":
                 counts["low_confidence"] += 1
             elif status == "kept_existing":

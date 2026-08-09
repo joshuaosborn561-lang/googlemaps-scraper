@@ -307,6 +307,20 @@ def _remote_json(method: str, path: str, body: dict | None = None) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _supabase_project_ref(url: str = "") -> str | None:
+    raw = (url or os.environ.get("SUPABASE_URL") or "").strip()
+    if not raw:
+        return None
+    # https://<ref>.supabase.co → ref
+    try:
+        host = raw.split("://", 1)[-1].split("/", 1)[0]
+        if host.endswith(".supabase.co"):
+            return host.split(".")[0] or None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Health / config check",
@@ -330,7 +344,10 @@ def health() -> str:
     )
     from gmscraper.apify_contacts import apify_token_valid
 
-    apify_ok = bool(settings.apify_token) and apify_token_valid(settings.apify_token)
+    apify_token_set = bool(settings.apify_token)
+    apify_token_ok = apify_token_set and apify_token_valid(settings.apify_token)
+    project_ref = _supabase_project_ref(supabase_url)
+    leads_ref = (os.environ.get("LEADS_SUPABASE_PROJECT_ID") or "").strip() or None
     return _json(
         {
             "ok": True,
@@ -338,12 +355,20 @@ def health() -> str:
             "rapidapi_configured": bool(settings.rapidapi_key),
             "llm_provider": settings.llm_provider,
             "openai_configured": bool(settings.openai_api_key),
-            "apify_configured": apify_ok,
+            "apify_token_set": apify_token_set,
+            "apify_token_valid": apify_token_ok,
+            "apify_configured": apify_token_ok,
             "apify_contact_actor": settings.apify_contact_actor,
             "apify_content_actor": settings.apify_content_actor,
             "apify_max_cost_usd": settings.apify_max_cost_usd,
             "supabase_configured": bool(supabase_url and supabase_key),
             "supabase_url": supabase_url or None,
+            "supabase_project_ref": project_ref,
+            "leads_supabase_project_id": leads_ref,
+            "auto_resume": os.environ.get("MCP_AUTO_RESUME", "true").lower()
+            not in ("0", "false", "no"),
+            "backlog_drain": os.environ.get("MCP_BACKLOG_DRAIN", "true").lower()
+            not in ("0", "false", "no"),
             "db": str(DEFAULT_DB),
             "zips": str(DEFAULT_ZIPS),
             "zips_ready": Path(DEFAULT_ZIPS).exists(),
@@ -1254,14 +1279,14 @@ def extract_team_contacts(
     limit: int = 0,
     workers: int = 8,
     icp_only: bool = False,
-    use_llm: bool = False,
+    use_llm: bool = True,
     target_titles: str = "",
     background: bool = True,
 ) -> str:
     """Parse person+title pairs from team/about page text into contacts.
 
     Writes to local contacts. Also fills empty owners.
-    Prefer use_llm=true — heuristic path invents title/company "names".
+    Defaults to use_llm=true — heuristic path invents title/company "names".
     target_titles = comma-separated roles to prefer (vertical-agnostic default
     when empty: owner, founder, president, principal, partner, chief, …).
     """
@@ -1365,11 +1390,12 @@ def estimate_resolve_places(
     order_by: str = "",
     limit: int = 0,
     project_id: str = "",
+    details_only: bool = False,
 ) -> str:
     """Read-only Maps cost estimate for resolve_places. No spend, no schema writes.
 
+    details_only=True estimates 1 request/row for place_id-without-website backfill.
     Prefer this over resolve_places(estimate_only=true). No approval required.
-    Then call resolve_places with the same binding to run.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_places as rp
@@ -1386,6 +1412,7 @@ def estimate_resolve_places(
             order_by=order_by,
             limit=int(limit or 0),
             estimate_only=True,
+            details_only=bool(details_only),
             project_id=project_id or "",
         )
     )
@@ -1414,6 +1441,7 @@ def resolve_places(
     workers: int = 8,
     project_id: str = "",
     estimate_only: bool = False,
+    details_only: bool = False,
     background: bool = True,
 ) -> str:
     """Turn source-table rows into business identities via Maps.
@@ -1423,49 +1451,62 @@ def resolve_places(
     Flow: text search → score → on min_confidence pass, Place Details for
     website/phone → write website, domain (host), phone, place_id, confidence.
     Cost is ~2 Maps requests per resolved row (details skipped on rejects).
+
+    details_only=True backfills Place Details for rows that already have
+    place_id but an empty website (ignores resolved=true). Use this after a
+    run that wrote place_id before details were wired.
     For a cost check prefer estimate_resolve_places (read-only).
-    No approval / spend confirmation required. Response is counts only.
+    Response is counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_places as rp
+    from mcp_server.errors import tool_error_from_exception
 
     def _run() -> dict[str, Any]:
-        return rp.run(
-            schema=schema,
-            table=table,
-            key_column=key_column,
-            address_column=address_column,
-            name_column=name_column,
-            city_column=city_column,
-            where=where,
-            order_by=order_by,
-            limit=int(limit or 0),
-            strategy=strategy or "address",
-            min_confidence=float(min_confidence or 0.6),
-            workers=int(workers or 8),
-            estimate_only=bool(estimate_only),
-            project_id=project_id or "",
-        )
+        try:
+            return rp.run(
+                schema=schema,
+                table=table,
+                key_column=key_column,
+                address_column=address_column,
+                name_column=name_column,
+                city_column=city_column,
+                where=where,
+                order_by=order_by,
+                limit=int(limit or 0),
+                strategy=strategy or "address",
+                min_confidence=float(min_confidence or 0.6),
+                workers=int(workers or 8),
+                estimate_only=bool(estimate_only),
+                details_only=bool(details_only),
+                project_id=project_id or "",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return tool_error_from_exception(exc)
 
     if background and _http_mode() and not estimate_only:
-        from mcp_server.jobs import start_job
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
-        job = start_job(
-            "resolve_places",
-            _run,
-            meta={
-                "schema": schema,
-                "table": table,
-                "limit": limit,
-                "strategy": strategy,
-            },
-        )
+        meta = {
+            "schema": schema,
+            "table": table,
+            "key_column": key_column,
+            "address_column": address_column,
+            "name_column": name_column,
+            "city_column": city_column,
+            "where": where,
+            "order_by": order_by,
+            "limit": limit,
+            "strategy": strategy,
+            "min_confidence": min_confidence,
+            "workers": workers,
+            "project_id": project_id,
+            "details_only": bool(details_only),
+        }
+        before = find_active_by_queue_key(make_queue_key("resolve_places", meta))
+        job = start_job("resolve_places", _run, meta=meta)
         return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
+            _started_response(job, attached=before is not None and before.id == job.id)
         )
     return _json(_run())
 
@@ -1673,11 +1714,21 @@ def classify_leads(
     force: bool = False,
     limit: int = 0,
     include_no_site: bool = False,
+    center: str = "",
+    radius_miles: float = 0.0,
+    center_lat: float = 0.0,
+    center_lng: float = 0.0,
+    require_geo: bool = True,
 ) -> str:
     """LLM-classify businesses against an ICP (LLM cost only; not Maps).
 
     Only businesses with fetched website text are eligible by default. Scope
     with source (e.g. 'shovels'), re-run with force=true, and cap with limit.
+
+    Geography is a free deterministic gate applied BEFORE the LLM. Default
+    require_geo=true — pass center + radius_miles (or center_lat/center_lng).
+    Out-of-radius rows are saved as in_icp=false with reason outside_radius.
+    Pass require_geo=false for ICPs with no geographic constraint.
     When nothing is eligible, result.reason explains why.
     """
     _ensure_repo_cwd()
@@ -1701,6 +1752,11 @@ def classify_leads(
         force=force,
         limit=limit or None,
         include_no_site=include_no_site,
+        center=center or "",
+        radius_miles=float(radius_miles or 0),
+        center_lat=float(center_lat) if center_lat else None,
+        center_lng=float(center_lng) if center_lng else None,
+        require_geo=bool(require_geo),
     )
     out: dict[str, Any] = {
         "result": res,
@@ -1792,7 +1848,7 @@ def apify_contact_crawl(
     domains: str = "",
     source: str = "",
     limit: int = 0,
-    max_pages_per_site: int = 5,
+    max_pages_per_site: int = 3,
     verify_emails: bool = False,
     use_proxy: bool = True,
     estimate_only: bool = False,
@@ -1804,27 +1860,37 @@ def apify_contact_crawl(
     Pass domains as comma-separated hosts/URLs, or source='maps_no_owner' /
     'icp_no_owner' to select from local SQLite. Prefer estimate_apify_contact_crawl
     for cost checks. Refuses when estimate exceeds APIFY_MAX_COST_USD.
-    No approval / spend confirmation required.
-
-    Response is counts + run_id only — never row payloads.
+    Default max_pages_per_site=3. Paid leadsEnrichment/social/email-verify
+    add-ons are never enabled. Typed errors on failure — never a bare
+    'No approval received' string.
     """
     _ensure_repo_cwd()
     from gmscraper import apify_contacts
+    from mcp_server.errors import ToolError, tool_error_from_exception
 
     store = _store()
 
     def _run() -> dict[str, Any]:
-        return apify_contacts.crawl(
-            store,
-            domains=domains or "",
-            source=source or "",
-            limit=int(limit or 0),
-            max_pages_per_site=int(max_pages_per_site or 5),
-            verify_emails=bool(verify_emails),
-            use_proxy=bool(use_proxy),
-            estimate_only=bool(estimate_only),
-            run_label=run_label or "",
-        )
+        try:
+            return apify_contacts.crawl(
+                store,
+                domains=domains or "",
+                source=source or "",
+                limit=int(limit or 0),
+                max_pages_per_site=int(max_pages_per_site or 3),
+                verify_emails=bool(verify_emails),
+                use_proxy=bool(use_proxy),
+                estimate_only=bool(estimate_only),
+                run_label=run_label or "",
+            )
+        except Exception as exc:  # noqa: BLE001
+            if "approval" in str(exc).lower():
+                return ToolError(
+                    f"{type(exc).__name__}: {exc}",
+                    kind="internal_error",
+                    details={"note": "not_an_approval_gate"},
+                ).to_dict()
+            return tool_error_from_exception(exc)
 
     # Long live runs go to background; estimates stay sync.
     if (
@@ -2031,15 +2097,26 @@ def enrich_waterfall(
     store = _store()
 
     def _run() -> dict[str, Any]:
-        return wf.enrich_waterfall(
-            rows,
-            need=need_norm,  # type: ignore[arg-type]
-            store=store,
-            write_supabase=True,
-            max_tier=max_tier_n,
-            run_apify=bool(run_apify),
-            on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
-        )
+        from mcp_server.errors import ToolError, tool_error_from_exception
+
+        try:
+            return wf.enrich_waterfall(
+                rows,
+                need=need_norm,  # type: ignore[arg-type]
+                store=store,
+                write_supabase=True,
+                max_tier=max_tier_n,
+                run_apify=bool(run_apify),
+                on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if "approval" in str(exc).lower():
+                return ToolError(
+                    f"{type(exc).__name__}: {exc}",
+                    kind="internal_error",
+                    details={"note": "not_an_approval_gate"},
+                ).to_dict()
+            return tool_error_from_exception(exc)
 
     if background and _http_mode() and len(rows or "") > 2000:
         import hashlib
@@ -2424,16 +2501,37 @@ async def root_page(_request: Request) -> PlainTextResponse:
 
 
 def _health_payload() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "service": "google-maps-scraper-mcp",
-        "transport": "streamable-http",
-        "mcp_path": "/mcp",
-        "claude_web": (
-            "Add this connector URL in Claude → Settings → Connectors: "
-            "https://<your-host>/mcp"
-        ),
-    }
+    """HTTP probe payload — mirrors key fields from the health MCP tool."""
+    try:
+        settings = _settings()
+        from gmscraper.apify_contacts import apify_token_valid
+
+        supabase_url = (os.environ.get("SUPABASE_URL") or "").strip()
+        apify_set = bool(settings.apify_token)
+        apify_ok = apify_set and apify_token_valid(settings.apify_token)
+        return {
+            "ok": True,
+            "service": "google-maps-scraper-mcp",
+            "transport": "streamable-http",
+            "mcp_path": "/mcp",
+            "supabase_project_ref": _supabase_project_ref(supabase_url),
+            "apify_token_set": apify_set,
+            "apify_token_valid": apify_ok,
+            "apify_configured": apify_ok,
+            "apify_contact_actor": settings.apify_contact_actor,
+            "auto_resume": os.environ.get("MCP_AUTO_RESUME", "true").lower()
+            not in ("0", "false", "no"),
+            "claude_web": (
+                "Add this connector URL in Claude → Settings → Connectors: "
+                "https://<your-host>/mcp"
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "service": "google-maps-scraper-mcp",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -2447,11 +2545,240 @@ async def health_live_api(_request: Request) -> JSONResponse:
     return JSONResponse(_health_payload())
 
 
+def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
+    """Re-enqueue resumable interrupted jobs from stored meta (no human action)."""
+    from mcp_server.jobs import make_queue_key, start_job
+
+    auto = os.environ.get("MCP_AUTO_RESUME", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    if not auto:
+        return []
+    resumed: list[str] = []
+    for rec in swept.get("jobs") or []:
+        kind = rec.get("kind") or ""
+        meta = dict(rec.get("meta") or {})
+        try:
+            if kind == "run_leads" and meta.get("plan_path"):
+                plan_path = meta["plan_path"]
+                job = start_job(
+                    "run_leads",
+                    lambda p=plan_path: _execute_run_leads(p, "", True, 8),
+                    meta={**meta, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key("run_leads", meta),
+                )
+                resumed.append(job.id)
+            elif kind == "scrape_maps" and meta.get("plan_path"):
+                plan_path = meta["plan_path"]
+                job = start_job(
+                    "scrape_maps",
+                    lambda p=plan_path: _execute_scrape_maps(p, 8, 0),
+                    meta={**meta, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key("scrape_maps", meta),
+                )
+                resumed.append(job.id)
+            elif kind == "enrich_sites":
+                from gmscraper import enrich_site
+
+                def _enrich() -> dict[str, Any]:
+                    store = _store()
+                    store.queue_sites()
+                    pending = store.pending_sites()
+                    if _http_mode():
+                        return _enrich_sites_via_subprocess(0, 3)
+                    res = enrich_site.run(
+                        store,
+                        pending,
+                        workers=3,
+                        on_progress=lambda **p: _job_progress("enrich", **p),
+                    )
+                    return {"result": res, "stats": store.stats(), "domains": len(pending)}
+
+                job = start_job(
+                    "enrich_sites",
+                    _enrich,
+                    meta={**meta, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key("enrich_sites", meta),
+                )
+                resumed.append(job.id)
+            elif kind == "resolve_places" and meta.get("schema") and meta.get("table"):
+                from gmscraper import resolve_places as rp
+
+                m = dict(meta)
+
+                def _resolve() -> dict[str, Any]:
+                    return rp.run(
+                        schema=m.get("schema") or "",
+                        table=m.get("table") or "",
+                        key_column=m.get("key_column") or "id",
+                        address_column=m.get("address_column") or "",
+                        name_column=m.get("name_column") or "",
+                        city_column=m.get("city_column") or "",
+                        where=m.get("where") or "",
+                        order_by=m.get("order_by") or "",
+                        limit=int(m.get("limit") or 0),
+                        strategy=m.get("strategy") or "address",
+                        min_confidence=float(m.get("min_confidence") or 0.6),
+                        workers=int(m.get("workers") or 8),
+                        details_only=bool(m.get("details_only")),
+                        project_id=m.get("project_id") or "",
+                    )
+
+                job = start_job(
+                    "resolve_places",
+                    _resolve,
+                    meta={**meta, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key("resolve_places", meta),
+                )
+                resumed.append(job.id)
+            elif kind == "pipeline_run" and meta.get("schema") and meta.get("table"):
+                from gmscraper import pipeline as pipe
+
+                m = dict(meta)
+
+                def _pipe() -> dict[str, Any]:
+                    return pipe.run(
+                        _store(),
+                        schema=m.get("schema") or "",
+                        table=m.get("table") or "",
+                        key_column=m.get("key_column") or "id",
+                        stages=m.get("stages") or "resolve,enrich,extract,contacts",
+                        max_tier=m.get("max_tier") or "getleads",
+                        limit=int(m.get("limit") or 0),
+                        on_progress=lambda **p: _job_progress(**p),
+                    )
+
+                job = start_job(
+                    "pipeline_run",
+                    _pipe,
+                    meta={**meta, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key("pipeline_run", meta),
+                )
+                resumed.append(job.id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Auto-resume skipped for {kind}/{rec.get('id')}: {exc}", flush=True)
+    return resumed
+
+
+def _start_backlog_drain() -> None:
+    """Background loop that drains pending sites / team pages when idle."""
+    enabled = os.environ.get("MCP_BACKLOG_DRAIN", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    if not enabled or not _http_mode():
+        return
+    interval = int(os.environ.get("MCP_BACKLOG_DRAIN_SEC", "300") or 300)
+    batch = int(os.environ.get("MCP_BACKLOG_BATCH", "200") or 200)
+    team_workers = int(os.environ.get("MCP_BACKLOG_TEAM_WORKERS", "4") or 4)
+
+    def loop() -> None:
+        import time
+
+        from mcp_server.jobs import list_jobs, start_job
+
+        while True:
+            time.sleep(max(60, interval))
+            try:
+                active = [
+                    j
+                    for j in list_jobs(limit=20)
+                    if j.status in ("queued", "running")
+                ]
+                if active:
+                    continue
+                store = _store()
+                store.queue_sites()
+                pending = store.pending_sites(limit=batch)
+                if pending:
+                    print(
+                        f"Backlog drain: queueing enrich_sites for {len(pending)} domains",
+                        flush=True,
+                    )
+                    start_job(
+                        "enrich_sites",
+                        lambda: _enrich_sites_via_subprocess(batch, 3),
+                        meta={"limit": batch, "workers": 3, "backlog_drain": True},
+                        queue_key=f"enrich_sites:backlog:{batch}",
+                        dedupe=True,
+                    )
+                    continue
+
+                # After site fetch drains, crawl team/about pages + extract.
+                need_team = store.domains_needing_team_crawl(limit=batch)
+                if not need_team:
+                    continue
+                print(
+                    f"Backlog drain: queueing crawl_team_pages for {len(need_team)} domains",
+                    flush=True,
+                )
+
+                def _team() -> dict[str, Any]:
+                    from gmscraper import enrich_site, team_contacts
+
+                    s = _store()
+                    crawl = enrich_site.crawl_team_pages(
+                        s, limit=batch, workers=team_workers
+                    )
+                    extract = team_contacts.run(
+                        s, use_llm=True, workers=2, limit=batch
+                    )
+                    return {
+                        "crawl": crawl,
+                        "extract": extract,
+                        "stats": s.stats(),
+                    }
+
+                start_job(
+                    "crawl_team_pages",
+                    _team,
+                    meta={
+                        "limit": batch,
+                        "workers": team_workers,
+                        "backlog_drain": True,
+                    },
+                    queue_key=f"crawl_team_pages:backlog:{batch}",
+                    dedupe=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"Backlog drain tick failed: {exc}", flush=True)
+
+    import threading
+
+    threading.Thread(target=loop, name="mcp-backlog-drain", daemon=True).start()
+
+
 def main() -> None:
     """stdio for local Claude Desktop; streamable-http for Railway / Claude web."""
     _ensure_repo_cwd()
+
+    # Validate Apify token at boot — env-var presence alone is not enough.
+    try:
+        from gmscraper.apify_contacts import apify_token_valid
+        from gmscraper.config import settings as _cfg
+
+        if _cfg.apify_token:
+            ok = apify_token_valid(_cfg.apify_token)
+            print(
+                f"Apify token startup check: {'valid' if ok else 'INVALID'}",
+                flush=True,
+            )
+            if not ok:
+                print(
+                    "WARNING: APIFY_TOKEN set but GET /v2/users/me failed — "
+                    "apify_contact_crawl will return missing_or_invalid_credential.",
+                    flush=True,
+                )
+        else:
+            print("Apify token startup check: not configured", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Apify token startup check skipped: {exc}", flush=True)
+
     # Container restarts kill in-process workers; flip leftovers so they are
-    # not stuck as status=running forever.
+    # not stuck as status=running forever, then auto-requeue when possible.
     try:
         from mcp_server.jobs import sweep_orphaned_jobs
 
@@ -2462,8 +2789,19 @@ def main() -> None:
                 f"as interrupted: {', '.join(swept.get('job_ids') or [])}",
                 flush=True,
             )
+            resumed = _auto_resume_orphans(swept)
+            if resumed:
+                print(
+                    f"Auto-resumed {len(resumed)} job(s): {', '.join(resumed)}",
+                    flush=True,
+                )
     except Exception as exc:  # noqa: BLE001
         print(f"Job orphan sweep skipped: {exc}", flush=True)
+
+    try:
+        _start_backlog_drain()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Backlog drain not started: {exc}", flush=True)
 
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
     host = os.environ.get("HOST", "0.0.0.0")
