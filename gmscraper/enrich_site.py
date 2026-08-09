@@ -302,7 +302,7 @@ def run(
             counts["emails"] += int(bool(found))
             counts["pages"] += len(pages)
             done += 1
-            if done % 25 == 0 or done == len(domains):
+            if done % 10 == 0 or done == len(domains):
                 sys.stderr.write(
                     f"\r  {done:,}/{len(domains):,} | ok={counts['ok']:,} "
                     f"err={counts['error']:,} skip={counts['skipped']:,} "

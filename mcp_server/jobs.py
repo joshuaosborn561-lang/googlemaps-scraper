@@ -25,9 +25,11 @@ ROOT = Path(__file__).resolve().parent.parent
 JOBS_DIR = ROOT / "data" / "jobs"
 
 # No heartbeat for this long → treat as dead (container restart / killed thread).
-STALL_SECONDS = 180
+# Enrich/classify is CPU-heavy (html2text); allow a few minutes of ticker lag
+# before declaring the worker dead so live jobs are not false-stalled.
+STALL_SECONDS = 300
 # Background ticker while a job runs (enrich/classify may not emit scrape ticks).
-HEARTBEAT_INTERVAL_SEC = 60
+HEARTBEAT_INTERVAL_SEC = 30
 
 
 @dataclass

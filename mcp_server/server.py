@@ -680,11 +680,36 @@ def _execute_run_leads(
     store.queue_sites()
     pending = store.pending_sites()
     _job_progress("enrich", done=0, total=len(pending))
-    # Cap workers so site-fetch CPU work cannot starve the MCP HTTP loop.
+    # Large site-fetch runs are GIL-heavy (html2text) and wedge the MCP HTTP
+    # loop if done in-process. Defer to enrich_sites so heartbeats/status stay live.
+    defer_threshold = 500
+    if len(pending) > defer_threshold:
+        _job_progress(
+            "enrich_deferred",
+            done=0,
+            total=len(pending),
+            deferred=True,
+            reason=f"pending_sites>{defer_threshold}",
+        )
+        return {
+            "plan_path": record.plan_path,
+            "scrape": scrape_res,
+            "enrich": "deferred",
+            "pending_sites": len(pending),
+            "csv": None,
+            "rows": 0,
+            "message": (
+                f"Maps scrape finished. {len(pending):,} domains still need "
+                "enrich_sites — call that next (then classify_leads / "
+                "find_owners / export_csv). Large enrich is deferred so the "
+                "MCP stays responsive."
+            ),
+        }
+
     enrich_site.run(
         store,
         pending,
-        workers=max(1, min(int(workers or 8), 8)),
+        workers=max(1, min(int(workers or 8), 3)),
         on_progress=lambda **p: _job_progress("enrich", **p),
     )
 
@@ -875,7 +900,7 @@ def get_job_status(job_id: str) -> str:
     """Poll a background run_leads / scrape_maps job. Use after run_leads returns job_id.
 
     status may be queued|running|completed|failed|stalled|interrupted.
-    stalled = no heartbeat for ~3 minutes (worker likely dead after restart).
+    stalled = no heartbeat for ~5 minutes (worker likely dead after restart).
     interrupted = orphaned on process boot. For either, re-call run_leads with
     the same plan_path — Maps scrape resumes from unfinished ZIP×category pairs.
     """
