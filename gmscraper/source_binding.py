@@ -136,7 +136,14 @@ def resolve_binding(**kwargs: Any) -> SourceBinding:
         "order_by": _env("SOURCE_ORDER_BY", ""),
         "where": _env("SOURCE_WHERE", ""),
     }
-    merged = {**defaults, **{k: v for k, v in kwargs.items() if v is not None}}
+    # Empty strings must not wipe env defaults (auto-resume used to pass
+    # project_id="" and silently target the wrong Supabase project).
+    cleaned = {
+        k: v
+        for k, v in kwargs.items()
+        if v is not None and not (isinstance(v, str) and not v.strip())
+    }
+    merged = {**defaults, **cleaned}
     schema = _require_ident(str(merged.get("schema") or ""), "schema")
     table = _require_ident(str(merged.get("table") or ""), "table")
     key_column = _require_ident(str(merged.get("key_column") or ""), "key_column")

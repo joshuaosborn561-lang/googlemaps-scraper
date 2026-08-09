@@ -427,6 +427,7 @@ def run(
     domain_column: str = "domain",
     resolved_column: str = "resolved",
     confidence_column: str = "confidence",
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     binding = sb.resolve_binding(
         project_id=project_id,
@@ -482,8 +483,23 @@ def run(
         "estimated_overage_usd": est.get("estimated_overage_usd"),
     }
     lock = threading.Lock()
+    done = 0
+    total = len(rows)
+    if on_progress:
+        try:
+            on_progress(
+                stage="resolve_places",
+                done=0,
+                total=total,
+                resolved=0,
+                project_id=binding.project_id,
+                table=binding.table,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def work(row: dict[str, Any]) -> None:
+        nonlocal done
         local = MapsDataClient(settings, limit=8)
         try:
             if details_only:
@@ -517,6 +533,23 @@ def run(
                 counts["no_match"] += 1
             else:
                 counts["errors"] += 1
+            done += 1
+            if on_progress and (done % 10 == 0 or done == total):
+                try:
+                    on_progress(
+                        stage="resolve_places",
+                        done=done,
+                        total=total,
+                        resolved=counts["resolved"],
+                        details_ok=counts["details_ok"],
+                        no_match=counts["no_match"],
+                        errors=counts["errors"],
+                        requests=counts["requests"],
+                        project_id=binding.project_id,
+                        table=binding.table,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers or 8))) as pool:
         futs = [pool.submit(work, r) for r in rows]

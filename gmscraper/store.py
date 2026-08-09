@@ -55,10 +55,16 @@ CREATE TABLE IF NOT EXISTS businesses (
     first_seen      TEXT DEFAULT CURRENT_TIMESTAMP,
     source          TEXT DEFAULT 'maps',
     external_id     TEXT,
-    permit_count    INTEGER
+    permit_count    INTEGER,
+    plan_id         TEXT,
+    run_id          TEXT,
+    client_tag      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_biz_domain ON businesses(domain);
 CREATE INDEX IF NOT EXISTS idx_biz_state  ON businesses(state);
+CREATE INDEX IF NOT EXISTS idx_biz_plan ON businesses(plan_id);
+CREATE INDEX IF NOT EXISTS idx_biz_run ON businesses(run_id);
+CREATE INDEX IF NOT EXISTS idx_biz_client ON businesses(client_tag);
 -- Indexes on source/external_id are created in Store._migrate so older DBs
 -- that predate those columns can ALTER TABLE first.
 
@@ -162,6 +168,10 @@ _BIZ_EXTRA_COLS = (
     ("source", "TEXT DEFAULT 'maps'"),
     ("external_id", "TEXT"),
     ("permit_count", "INTEGER"),
+    # Multi-client scoping: stamp the plan/run that created the row.
+    ("plan_id", "TEXT"),
+    ("run_id", "TEXT"),
+    ("client_tag", "TEXT"),
 )
 
 
@@ -204,6 +214,15 @@ class Store:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_biz_external_id ON businesses(external_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_biz_plan ON businesses(plan_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_biz_run ON businesses(run_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_biz_client ON businesses(client_tag)"
         )
         # Ensure tables added after the first schema ship exist on old volumes.
         conn.executescript(
@@ -308,6 +327,9 @@ class Store:
                 r.get("source") or "maps",
                 r.get("external_id"),
                 r.get("permit_count"),
+                r.get("plan_id") or None,
+                r.get("run_id") or None,
+                r.get("client_tag") or None,
             )
             for r in rows
             if r.get("place_id")
@@ -320,10 +342,29 @@ class Store:
                    (place_id, name, address, city, state, zip, phone, website,
                     domain, rating, reviews, main_category, types, latitude,
                     longitude, maps_url, source_zip, source_category, raw_json,
-                    source, external_id, permit_count)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    source, external_id, permit_count, plan_id, run_id, client_tag)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 payload,
             )
+            # Stamp plan/run/client on existing rows when a new scrape re-sees them.
+            for r in rows:
+                if not r.get("place_id"):
+                    continue
+                if not (r.get("plan_id") or r.get("run_id") or r.get("client_tag")):
+                    continue
+                c.execute(
+                    """UPDATE businesses SET
+                         plan_id = COALESCE(?, plan_id),
+                         run_id = COALESCE(?, run_id),
+                         client_tag = COALESCE(?, client_tag)
+                       WHERE place_id = ?""",
+                    (
+                        r.get("plan_id") or None,
+                        r.get("run_id") or None,
+                        r.get("client_tag") or None,
+                        r.get("place_id"),
+                    ),
+                )
             return cur.rowcount or 0
 
     def get_business(self, place_id: str) -> sqlite3.Row | None:
@@ -455,11 +496,81 @@ class Store:
             )
             return cur.rowcount or 0
 
-    def pending_sites(self, limit: int | None = None) -> list[str]:
-        sql = "SELECT domain FROM sites WHERE status = 'pending'"
+    def pending_sites(
+        self,
+        limit: int | None = None,
+        *,
+        city: str = "",
+        state: str = "",
+        main_category: str = "",
+        plan_id: str = "",
+        run_id: str = "",
+        client_tag: str = "",
+        source: str = "",
+    ) -> list[str]:
+        """Pending site domains, optionally scoped to matching businesses.
+
+        state/main_category accept comma-separated lists. main_category matches
+        with SQL LIKE (%term%) so 'dealer' catches 'Car dealer' / 'Toyota dealer'.
+        """
+        scoped = any(
+            [
+                city.strip(),
+                state.strip(),
+                main_category.strip(),
+                plan_id.strip(),
+                run_id.strip(),
+                client_tag.strip(),
+                source.strip(),
+            ]
+        )
+        if not scoped:
+            sql = "SELECT domain FROM sites WHERE status = 'pending'"
+            if limit:
+                sql += f" LIMIT {int(limit)}"
+            return [r["domain"] for r in self.conn.execute(sql)]
+
+        clauses = ["s.status = 'pending'", "b.domain IS NOT NULL", "b.domain != ''"]
+        args: list[Any] = []
+        if city.strip():
+            clauses.append("lower(b.city) = lower(?)")
+            args.append(city.strip())
+        if state.strip():
+            states = [s.strip().upper() for s in state.split(",") if s.strip()]
+            if states:
+                placeholders = ",".join("?" for _ in states)
+                clauses.append(f"upper(COALESCE(b.state,'')) IN ({placeholders})")
+                args.extend(states)
+        if main_category.strip():
+            cats = [c.strip() for c in main_category.split(",") if c.strip()]
+            if cats:
+                ors = " OR ".join(
+                    "lower(COALESCE(b.main_category,'')) LIKE ?" for _ in cats
+                )
+                clauses.append(f"({ors})")
+                args.extend(f"%{c.lower()}%" for c in cats)
+        if plan_id.strip():
+            clauses.append("b.plan_id = ?")
+            args.append(plan_id.strip())
+        if run_id.strip():
+            clauses.append("b.run_id = ?")
+            args.append(run_id.strip())
+        if client_tag.strip():
+            clauses.append("b.client_tag = ?")
+            args.append(client_tag.strip())
+        if source.strip():
+            clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
+            args.append(source.strip().lower())
+
+        sql = (
+            "SELECT DISTINCT s.domain FROM sites s "
+            "JOIN businesses b ON b.domain = s.domain WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY s.domain"
+        )
         if limit:
             sql += f" LIMIT {int(limit)}"
-        return [r["domain"] for r in self.conn.execute(sql)]
+        return [r["domain"] for r in self.conn.execute(sql, args)]
 
     def save_site(
         self,
@@ -544,23 +655,129 @@ class Store:
             args = [domain]
         return [dict(r) for r in self.conn.execute(sql, args)]
 
-    def domains_with_ok_sites(self, limit: int | None = None) -> list[str]:
-        sql = "SELECT domain FROM sites WHERE status='ok' ORDER BY domain"
+    def _business_scope_clauses(
+        self,
+        *,
+        city: str = "",
+        state: str = "",
+        main_category: str = "",
+        plan_id: str = "",
+        run_id: str = "",
+        client_tag: str = "",
+        source: str = "",
+    ) -> tuple[list[str], list[Any]]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if city.strip():
+            clauses.append("lower(b.city) = lower(?)")
+            args.append(city.strip())
+        if state.strip():
+            states = [s.strip().upper() for s in state.split(",") if s.strip()]
+            if states:
+                placeholders = ",".join("?" for _ in states)
+                clauses.append(f"upper(COALESCE(b.state,'')) IN ({placeholders})")
+                args.extend(states)
+        if main_category.strip():
+            cats = [c.strip() for c in main_category.split(",") if c.strip()]
+            if cats:
+                ors = " OR ".join(
+                    "lower(COALESCE(b.main_category,'')) LIKE ?" for _ in cats
+                )
+                clauses.append(f"({ors})")
+                args.extend(f"%{c.lower()}%" for c in cats)
+        if plan_id.strip():
+            clauses.append("b.plan_id = ?")
+            args.append(plan_id.strip())
+        if run_id.strip():
+            clauses.append("b.run_id = ?")
+            args.append(run_id.strip())
+        if client_tag.strip():
+            clauses.append("b.client_tag = ?")
+            args.append(client_tag.strip())
+        if source.strip():
+            clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
+            args.append(source.strip().lower())
+        return clauses, args
+
+    def domains_with_ok_sites(
+        self,
+        limit: int | None = None,
+        *,
+        city: str = "",
+        state: str = "",
+        main_category: str = "",
+        plan_id: str = "",
+        run_id: str = "",
+        client_tag: str = "",
+        source: str = "",
+    ) -> list[str]:
+        scope, args = self._business_scope_clauses(
+            city=city,
+            state=state,
+            main_category=main_category,
+            plan_id=plan_id,
+            run_id=run_id,
+            client_tag=client_tag,
+            source=source,
+        )
+        if not scope:
+            sql = "SELECT domain FROM sites WHERE status='ok' ORDER BY domain"
+            if limit:
+                sql += f" LIMIT {int(limit)}"
+            return [r["domain"] for r in self.conn.execute(sql)]
+        sql = (
+            "SELECT DISTINCT s.domain FROM sites s "
+            "JOIN businesses b ON b.domain = s.domain "
+            "WHERE s.status='ok' AND "
+            + " AND ".join(scope)
+            + " ORDER BY s.domain"
+        )
         if limit:
             sql += f" LIMIT {int(limit)}"
-        return [r["domain"] for r in self.conn.execute(sql)]
+        return [r["domain"] for r in self.conn.execute(sql, args)]
 
-    def domains_needing_team_crawl(self, limit: int | None = None) -> list[str]:
+    def domains_needing_team_crawl(
+        self,
+        limit: int | None = None,
+        *,
+        city: str = "",
+        state: str = "",
+        main_category: str = "",
+        plan_id: str = "",
+        run_id: str = "",
+        client_tag: str = "",
+        source: str = "",
+    ) -> list[str]:
         """OK sites that have no team/about page rows yet."""
-        sql = """
-            SELECT s.domain FROM sites s
+        scope, args = self._business_scope_clauses(
+            city=city,
+            state=state,
+            main_category=main_category,
+            plan_id=plan_id,
+            run_id=run_id,
+            client_tag=client_tag,
+            source=source,
+        )
+        base = """
+            SELECT DISTINCT s.domain FROM sites s
+            {join}
             WHERE s.status = 'ok'
               AND NOT EXISTS (
                 SELECT 1 FROM site_pages p
                 WHERE p.domain = s.domain AND p.page_type IN ('team', 'about')
               )
+              {extra}
             ORDER BY s.domain
         """
+        if scope:
+            sql = base.format(
+                join="JOIN businesses b ON b.domain = s.domain",
+                extra="AND " + " AND ".join(scope),
+            )
+            if limit:
+                sql += f" LIMIT {int(limit)}"
+            return [r["domain"] for r in self.conn.execute(sql, args)]
+        sql = base.format(join="", extra="")
         if limit:
             sql += f" LIMIT {int(limit)}"
         return [r["domain"] for r in self.conn.execute(sql)]

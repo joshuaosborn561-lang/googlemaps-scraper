@@ -102,6 +102,9 @@ def run(
     max_jobs: int | None = None,
     on_progress: ProgressCb | None = None,
     heartbeat_every: int = 25,
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
 ) -> dict[str, int]:
     """Scrape every pending (zip, category) pair. Safe to re-run after a kill.
 
@@ -110,6 +113,9 @@ def run(
     """
     by_zip = {r["zip"]: r for r in zip_rows}
     store.queue_jobs(list(by_zip), list(categories))
+    tag_plan = (plan_id or "").strip()
+    tag_run = (run_id or "").strip()
+    tag_client = (client_tag or "").strip()
 
     pending = [
         (z, c) for z, c in store.pending_jobs(limit=max_jobs) if z in by_zip
@@ -152,6 +158,14 @@ def run(
             return
         try:
             rows = client.search(category, by_zip[zip_code])
+            if tag_plan or tag_run or tag_client:
+                for r in rows:
+                    if tag_plan:
+                        r["plan_id"] = tag_plan
+                    if tag_run:
+                        r["run_id"] = tag_run
+                    if tag_client:
+                        r["client_tag"] = tag_client
             new = store.upsert_businesses(rows)
             store.finish_job(zip_code, category, len(rows))
             prog.tick(new, False, zip_code=zip_code, category=category)

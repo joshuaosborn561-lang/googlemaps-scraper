@@ -54,4 +54,4 @@ def test_never_emit_bare_no_approval_received() -> None:
 def test_debug_echo_body() -> None:
     out = server.debug_echo("lane-probe")
     assert '"echo": "lane-probe"' in out
-    assert "1.5.0" in out
+    assert "1.6.0" in out

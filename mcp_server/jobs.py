@@ -117,6 +117,25 @@ def _load_from_disk(job_id: str) -> Job:
     return Job(**{k: v for k, v in data.items() if k in Job.__dataclass_fields__})
 
 
+def _scope_fingerprint(meta: dict[str, Any]) -> str:
+    """Stable suffix for scoped enrich/classify/crawl jobs."""
+    parts = []
+    for key in (
+        "city",
+        "state",
+        "main_category",
+        "plan_id",
+        "plan_path",
+        "run_id",
+        "client_tag",
+        "source",
+    ):
+        val = str(meta.get(key) or "").strip()
+        if val:
+            parts.append(f"{key}={val}")
+    return "|".join(parts)
+
+
 def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
     """Stable key for dedupe across Claude chats (same work → same key)."""
     meta = meta or {}
@@ -127,7 +146,8 @@ def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
         schema = meta.get("schema") or ""
         table = meta.get("table") or ""
         details = "details" if meta.get("details_only") else "full"
-        return f"resolve_places:{schema}.{table}:{details}"
+        pid = meta.get("project_id") or ""
+        return f"resolve_places:{pid}:{schema}.{table}:{details}"
     if kind == "pipeline_run":
         schema = meta.get("schema") or ""
         table = meta.get("table") or ""
@@ -139,8 +159,12 @@ def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
         rows_chars = meta.get("rows_chars")
         fingerprint = meta.get("rows_fingerprint") or rows_chars or ""
         return f"enrich_waterfall:{need}:{max_tier}:{fingerprint}"
-    if kind == "enrich_sites":
-        return f"enrich_sites:limit={meta.get('limit') or 0}"
+    if kind in ("enrich_sites", "crawl_team_pages", "classify_leads"):
+        scope = _scope_fingerprint(meta)
+        base = f"{kind}:limit={meta.get('limit') or 0}"
+        if scope:
+            return f"{base}:{scope}"
+        return base
     # Unique per call when we can't safely dedupe.
     return f"{kind}:{uuid.uuid4().hex[:12]}"
 
@@ -391,6 +415,16 @@ _RESUMABLE_KINDS = frozenset(
         "resolve_places",
         "pipeline_run",
         "crawl_team_pages",
+        "classify_leads",
+    }
+)
+
+# Kinds that spend money and must NOT auto-resume without an approval flag.
+_PAID_RESUME_KINDS = frozenset(
+    {
+        "apify_contact_crawl",
+        "enrich_waterfall",  # may hit paid tiers; resume only with approve_paid
+        "find_owners",  # paid when use_paid_fallback
     }
 )
 
@@ -462,16 +496,44 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
             continue
         if job.status != "interrupted":
             continue
-        if job.kind not in _RESUMABLE_KINDS:
-            continue
         meta = dict(job.meta or {})
         if (
             meta.get("auto_resume_attempted")
             or meta.get("auto_resumed_from")
             or meta.get("cancel_requested")
             or meta.get("cancelled_reason")
+            or meta.get("needs_approval")
         ):
             continue
+        # Never reclaim paid work unless the original call set approve_paid.
+        if job.kind in _PAID_RESUME_KINDS and not meta.get("approve_paid"):
+            meta["needs_approval"] = True
+            meta["auto_resume_attempted"] = True
+            job.meta = meta
+            job.error = (
+                (job.error or "")
+                + " | Not auto-resumed: paid job requires approve_paid=true"
+            ).strip(" |")
+            with _lock:
+                _jobs[job.id] = job
+            _persist(job)
+            continue
+        if job.kind not in _RESUMABLE_KINDS:
+            continue
+        # Global enrich_sites:limit=0 / backlog drain starves scoped work —
+        # do not reclaim them; callers re-queue with scope when needed.
+        if job.kind == "enrich_sites":
+            scoped = bool(_scope_fingerprint(meta))
+            if meta.get("backlog_drain") or (
+                int(meta.get("limit") or 0) == 0 and not scoped
+            ):
+                meta["auto_resume_attempted"] = True
+                meta["resume_skipped_reason"] = "global_enrich_or_backlog"
+                job.meta = meta
+                with _lock:
+                    _jobs[job.id] = job
+                _persist(job)
+                continue
         finished = float(job.finished_at or job.heartbeat_at or job.created_at or 0)
         if finished and (now - finished) > max_age:
             continue
@@ -661,17 +723,36 @@ def start_job(
     *,
     queue_key: str | None = None,
     dedupe: bool = True,
+    priority: int | None = None,
 ) -> Job:
     """Enqueue a background job. Never kills an existing run.
 
     If ``dedupe`` and a queued/running job shares ``queue_key``, return that
-    job instead of spawning a duplicate. Otherwise append to the serial FIFO
-    queue and return immediately with status=queued (or running once the
-    dispatcher picks it up).
+    job instead of spawning a duplicate. Otherwise insert into the wait
+    queue by priority (higher first; same priority is FIFO) and return
+    immediately with status=queued.
+
+    Priority guidance:
+      10+  scoped client work (city/state/plan_id/…)
+       5   interactive unscoped user jobs
+       0   backlog drain / auto housekeeping
     """
     meta = dict(meta or {})
     key = (queue_key or meta.get("queue_key") or make_queue_key(kind, meta)).strip()
     meta["queue_key"] = key
+    if priority is None:
+        if meta.get("backlog_drain"):
+            priority = 0
+        elif _scope_fingerprint(meta) or kind in (
+            "resolve_places",
+            "classify_leads",
+            "run_leads",
+            "scrape_maps",
+        ):
+            priority = 10
+        else:
+            priority = 5
+    meta["priority"] = int(priority)
 
     if dedupe:
         existing = find_active_by_queue_key(key)
@@ -703,12 +784,21 @@ def start_job(
     with _lock:
         _jobs[job.id] = job
         _fns[job.id] = fn
-        _wait_queue.append(job.id)
+        # Higher priority jumps ahead of lower-priority queued work.
+        insert_at = len(_wait_queue)
+        for i, jid in enumerate(_wait_queue):
+            other = _jobs.get(jid)
+            other_pri = int((other.meta or {}).get("priority") or 0) if other else 0
+            if int(priority) > other_pri:
+                insert_at = i
+                break
+        _wait_queue.insert(insert_at, job.id)
         position = _wait_queue.index(job.id) + 1
         job.progress = {
             **job.progress,
             "queue_position": position,
             "queue_key": key,
+            "priority": int(priority),
         }
         snap = Job(**asdict(job))
     _persist(snap)

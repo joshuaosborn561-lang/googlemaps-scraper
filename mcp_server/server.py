@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.5.0",
+    version="1.6.0",
 )
 
 
@@ -554,11 +554,62 @@ def ensure_zips() -> str:
         open_world=False,
     )
 )
-def pipeline_stats() -> str:
-    """Show what is already in the local SQLite leads database."""
+def pipeline_stats(
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_path: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
+    source: str = "",
+) -> str:
+    """Show what is already in the local SQLite leads database.
+
+    Optional filters (city/state/main_category/plan_path/plan_id/run_id/
+    client_tag/source) return a scoped business count so one client's scrape
+    is distinguishable from the global cumulative totals.
+    """
     _ensure_repo_cwd()
     store = _store()
-    return _json(store.stats())
+    out: dict[str, Any] = dict(store.stats())
+    scope = _normalize_scope(
+        city=city,
+        state=state,
+        main_category=main_category,
+        plan_path=plan_path,
+        plan_id=plan_id,
+        run_id=run_id,
+        client_tag=client_tag,
+        source=source,
+    )
+    if _scope_is_set(scope) or scope.get("plan_path"):
+        clauses, args = store._business_scope_clauses(
+            city=scope["city"],
+            state=scope["state"],
+            main_category=scope["main_category"],
+            plan_id=scope["plan_id"],
+            run_id=scope["run_id"],
+            client_tag=scope["client_tag"],
+            source=scope["source"],
+        )
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        scoped_n = store.conn.execute(
+            f"SELECT COUNT(*) FROM businesses b{where}", args
+        ).fetchone()[0]
+        pending = store.pending_sites(
+            city=scope["city"],
+            state=scope["state"],
+            main_category=scope["main_category"],
+            plan_id=scope["plan_id"],
+            run_id=scope["run_id"],
+            client_tag=scope["client_tag"],
+            source=scope["source"],
+        )
+        out["scope"] = scope
+        out["scoped_businesses"] = int(scoped_n)
+        out["scoped_pending_sites"] = len(pending)
+    return _json(out)
 
 
 @mcp.tool(
@@ -791,6 +842,67 @@ def _job_progress(stage: str, **extra: Any) -> None:
         pass
 
 
+def _plan_id_from_path(plan_path: str) -> str:
+    """Stable plan_id stamped onto business rows (filename stem)."""
+    p = (plan_path or "").strip()
+    if not p:
+        return ""
+    return Path(p).stem
+
+
+def _normalize_scope(
+    *,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_path: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
+    source: str = "",
+) -> dict[str, str]:
+    """Normalize optional row-scope filters for enrich/classify/crawl."""
+    pid = (plan_id or "").strip() or _plan_id_from_path(plan_path)
+    return {
+        "city": (city or "").strip(),
+        "state": (state or "").strip(),
+        "main_category": (main_category or "").strip(),
+        "plan_path": (plan_path or "").strip(),
+        "plan_id": pid,
+        "run_id": (run_id or "").strip(),
+        "client_tag": (client_tag or "").strip(),
+        "source": (source or "").strip(),
+    }
+
+
+def _scope_is_set(scope: dict[str, str]) -> bool:
+    return any(
+        scope.get(k)
+        for k in (
+            "city",
+            "state",
+            "main_category",
+            "plan_id",
+            "run_id",
+            "client_tag",
+            "source",
+        )
+    )
+
+
+def _default_leads_project_id(table: str = "", project_id: str = "") -> str:
+    """Operators / parcel tables live on the LEADS Supabase project."""
+    if (project_id or "").strip():
+        return project_id.strip()
+    t = (table or "").strip().lower()
+    if t in ("operators", "parcels", "contractors", "permits"):
+        return (
+            os.environ.get("LEADS_SUPABASE_PROJECT_ID", "").strip()
+            or "kemvxzhcxvynmoutwdrh"
+        )
+    return ""
+
+
 def _started_response(job: Any, *, attached: bool = False) -> dict[str, Any]:
     """Uniform start/queue/attach payload for background tools."""
     from mcp_server.jobs import live_progress, queue_position
@@ -889,6 +1001,8 @@ def _execute_run_leads(
             businesses_found=bf,
         )
 
+    tag_plan = _plan_id_from_path(record.plan_path)
+    tag_run = current_job_id() or ""
     scrape_res = scrape.run(
         store,
         client,
@@ -898,6 +1012,9 @@ def _execute_run_leads(
         price_per_request=settings.price_per_request,
         on_progress=_on_scrape_progress,
         heartbeat_every=10,
+        plan_id=tag_plan,
+        run_id=tag_run,
+        client_tag=(plan.vertical or "")[:80],
     )
 
     _job_progress("enrich")
@@ -1049,6 +1166,7 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
     from gmscraper import scrape
     from gmscraper.config import settings
     from gmscraper.mapsdata import MapsDataClient
+    from mcp_server.jobs import current_job_id
 
     record = resolve_plan(plan_path=plan_path)
     settings.require_rapidapi()
@@ -1056,6 +1174,8 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
     zip_rows = _zip_rows_for_plan(plan)
     store = _store()
     client = MapsDataClient(settings)
+    tag_plan = _plan_id_from_path(record.plan_path)
+    tag_run = current_job_id() or ""
     res = scrape.run(
         store,
         client,
@@ -1065,6 +1185,9 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
         price_per_request=settings.price_per_request,
         max_jobs=max_jobs or None,
         on_progress=lambda p: _job_progress(**p),
+        plan_id=tag_plan,
+        run_id=tag_run,
+        client_tag=(getattr(plan, "vertical", None) or "")[:80],
     )
     return {
         "status": "completed",
@@ -1073,6 +1196,8 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
         "zip_count": len(zip_rows),
         "sample_source_zips": [r["zip"] for r in zip_rows[:20]],
         "plan_path": record.plan_path,
+        "plan_id": tag_plan,
+        "run_id": tag_run,
         "resume_note": (
             "Re-run scrape_maps with the same plan to continue unfinished pairs."
         ),
@@ -1144,7 +1269,13 @@ def get_job_status(job_id: str) -> str:
     public = job.to_public()
     store = None
     try:
-        if job.kind in ("run_leads", "scrape_maps", "enrich_sites"):
+        if job.kind in (
+            "run_leads",
+            "scrape_maps",
+            "enrich_sites",
+            "classify_leads",
+            "resolve_places",
+        ):
             store = _store()
     except Exception:  # noqa: BLE001
         store = None
@@ -1347,40 +1478,89 @@ def enrich_sites(
     limit: int = 0,
     workers: int = 3,
     background: bool = True,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_path: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
+    source: str = "",
 ) -> str:
     """Fetch website text/emails for pending domains (free, no Maps spend).
 
     Shallow same-domain crawl: homepage + up to 3 about/team pages
     (/about, /team, /leadership, …). Per-page text is stored with page_type.
 
+    Scope with city/state/main_category/plan_path/plan_id/run_id/client_tag/
+    source so one client's rows can be enriched without draining another
+    client's global backlog. Scoped runs jump the queue (priority > backlog).
+
     On Railway/HTTP this defaults to a background job — poll get_job_status.
-    Work runs in a subprocess so the MCP HTTP loop stays responsive.
+    Unscoped work runs in a subprocess so the MCP HTTP loop stays responsive.
     """
     _ensure_repo_cwd()
+    scope = _normalize_scope(
+        city=city,
+        state=state,
+        main_category=main_category,
+        plan_path=plan_path,
+        plan_id=plan_id,
+        run_id=run_id,
+        client_tag=client_tag,
+        source=source,
+    )
+    scoped = _scope_is_set(scope)
 
     def _run() -> dict[str, Any]:
-        if _http_mode():
+        # Subprocess CLI has no scope filters — run scoped work in-process.
+        if _http_mode() and not scoped:
             return _enrich_sites_via_subprocess(limit, workers)
         from gmscraper import enrich_site
 
         store = _store()
         store.queue_sites()
-        domains = store.pending_sites(limit=limit or None)
-        _job_progress("enrich", done=0, total=len(domains))
+        domains = store.pending_sites(
+            limit=limit or None,
+            city=scope["city"],
+            state=scope["state"],
+            main_category=scope["main_category"],
+            plan_id=scope["plan_id"],
+            run_id=scope["run_id"],
+            client_tag=scope["client_tag"],
+            source=scope["source"],
+        )
+        _job_progress("enrich", done=0, total=len(domains), **{
+            k: v for k, v in scope.items() if v
+        })
         res = enrich_site.run(
             store,
             domains,
             workers=max(1, min(int(workers or 3), 3)),
             on_progress=lambda **p: _job_progress("enrich", **p),
         )
-        return {"result": res, "stats": store.stats(), "domains": len(domains)}
+        return {
+            "result": res,
+            "stats": store.stats(),
+            "domains": len(domains),
+            "scope": scope,
+        }
 
     if _http_mode() and background:
         from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
-        meta = {"limit": limit, "workers": max(1, min(int(workers or 3), 3))}
+        meta = {
+            "limit": limit,
+            "workers": max(1, min(int(workers or 3), 3)),
+            **scope,
+        }
         before = find_active_by_queue_key(make_queue_key("enrich_sites", meta))
-        job = start_job("enrich_sites", _run, meta=meta)
+        job = start_job(
+            "enrich_sites",
+            _run,
+            meta=meta,
+            priority=10 if scoped else 5,
+        )
         return _json(
             _started_response(job, attached=before is not None and before.id == job.id)
         )
@@ -1401,37 +1581,84 @@ def crawl_team_pages(
     workers: int = 12,
     force: bool = False,
     background: bool = True,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_path: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
+    source: str = "",
 ) -> str:
     """Re-crawl about/team pages for domains already fetched (free).
 
     Use after a large enrich_sites run (e.g. ~8k sites) so team-page text is
     tagged by page_type. force=true re-crawls even if team pages exist.
+    Scope with city/state/main_category/plan_path/plan_id/run_id/client_tag/
+    source for multi-client isolation.
     On HTTP transport defaults to a background job — poll get_job_status.
     """
     _ensure_repo_cwd()
     from gmscraper import enrich_site
 
     store = _store()
+    scope = _normalize_scope(
+        city=city,
+        state=state,
+        main_category=main_category,
+        plan_path=plan_path,
+        plan_id=plan_id,
+        run_id=run_id,
+        client_tag=client_tag,
+        source=source,
+    )
+    scoped = _scope_is_set(scope)
 
     def _run() -> dict[str, Any]:
+        domains = (
+            store.domains_with_ok_sites(
+                limit=limit or None,
+                city=scope["city"],
+                state=scope["state"],
+                main_category=scope["main_category"],
+                plan_id=scope["plan_id"],
+                run_id=scope["run_id"],
+                client_tag=scope["client_tag"],
+                source=scope["source"],
+            )
+            if force
+            else store.domains_needing_team_crawl(
+                limit=limit or None,
+                city=scope["city"],
+                state=scope["state"],
+                main_category=scope["main_category"],
+                plan_id=scope["plan_id"],
+                run_id=scope["run_id"],
+                client_tag=scope["client_tag"],
+                source=scope["source"],
+            )
+        )
         res = enrich_site.crawl_team_pages(
             store,
-            limit=limit or None,
+            domains=domains,
             workers=workers,
             force=force,
         )
-        return {"result": res, "stats": store.stats()}
+        return {"result": res, "stats": store.stats(), "scope": scope, "domains": len(domains)}
 
     if background and _http_mode():
-        from mcp_server.jobs import start_job
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
-        job = start_job("crawl_team_pages", _run, meta={"limit": limit, "force": force})
+        meta = {"limit": limit, "force": force, **scope}
+        before = find_active_by_queue_key(make_queue_key("crawl_team_pages", meta))
+        job = start_job(
+            "crawl_team_pages",
+            _run,
+            meta=meta,
+            priority=10 if scoped else 5,
+        )
         return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
+            _started_response(job, attached=before is not None and before.id == job.id)
         )
     return _json(_run())
 
@@ -1636,6 +1863,8 @@ def resolve_places(
     from gmscraper import resolve_places as rp
     from mcp_server.errors import tool_error_from_exception
 
+    resolved_project = _default_leads_project_id(table, project_id)
+
     def _run() -> dict[str, Any]:
         try:
             return rp.run(
@@ -1653,7 +1882,8 @@ def resolve_places(
                 workers=int(workers or 8),
                 estimate_only=bool(estimate_only),
                 details_only=bool(details_only),
-                project_id=project_id or "",
+                project_id=resolved_project,
+                on_progress=lambda **p: _job_progress(**p),
             )
         except Exception as exc:  # noqa: BLE001
             return tool_error_from_exception(exc)
@@ -1674,11 +1904,11 @@ def resolve_places(
             "strategy": strategy,
             "min_confidence": min_confidence,
             "workers": workers,
-            "project_id": project_id,
+            "project_id": resolved_project,
             "details_only": bool(details_only),
         }
         before = find_active_by_queue_key(make_queue_key("resolve_places", meta))
-        job = start_job("resolve_places", _run, meta=meta)
+        job = start_job("resolve_places", _run, meta=meta, priority=10)
         return _json(
             _started_response(job, attached=before is not None and before.id == job.id)
         )
@@ -1911,11 +2141,24 @@ def classify_leads(
     center_lat: float = 0.0,
     center_lng: float = 0.0,
     require_geo: bool = True,
+    background: bool = True,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_path: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
 ) -> str:
     """LLM-classify businesses against an ICP (LLM cost only; not Maps).
 
     Only businesses with fetched website text are eligible by default. Scope
-    with source (e.g. 'shovels'), re-run with force=true, and cap with limit.
+    with source/city/state/main_category/plan_path/plan_id/run_id/client_tag,
+    re-run with force=true, and cap with limit. Foreground batches that hit
+    the timeout return has_more=true + remaining instead of a generic error.
+
+    On Railway/HTTP, background=true (default) returns job_id immediately and
+    classifies on the worker — use limit=0 to drain all eligible rows.
 
     Geography is a free deterministic gate applied BEFORE the LLM. Default
     require_geo=true — pass center + radius_miles (or center_lat/center_lng).
@@ -1926,24 +2169,36 @@ def classify_leads(
     _ensure_repo_cwd()
     from mcp_server.errors import tool_error_from_exception
 
-    try:
+    scope = _normalize_scope(
+        city=city,
+        state=state,
+        main_category=main_category,
+        plan_path=plan_path,
+        plan_id=plan_id,
+        run_id=run_id,
+        client_tag=client_tag,
+        source=source,
+    )
+
+    def _run() -> dict[str, Any]:
         from gmscraper import classify
         from gmscraper.cli import pick_vertical
         from gmscraper.config import DEFAULT_CATEGORIES
         from gmscraper.llm import default_workers
 
-        if not icp and vertical:
-            icp, _ = pick_vertical(DEFAULT_CATEGORIES, vertical)
-        if not icp:
+        text = icp
+        if not text and vertical:
+            text, _ = pick_vertical(DEFAULT_CATEGORIES, vertical)
+        if not text:
             raise ValueError("Provide icp text or a known vertical.")
         store = _store()
         llm = _llm()
         res = classify.run(
             store,
             llm,
-            icp,
+            text,
             workers=workers or default_workers(llm),
-            source=source,
+            source=scope["source"],
             force=force,
             limit=limit or None,
             include_no_site=include_no_site,
@@ -1952,15 +2207,52 @@ def classify_leads(
             center_lat=float(center_lat) if center_lat else None,
             center_lng=float(center_lng) if center_lng else None,
             require_geo=bool(require_geo),
+            city=scope["city"],
+            state=scope["state"],
+            main_category=scope["main_category"],
+            plan_id=scope["plan_id"],
+            run_id=scope["run_id"],
+            client_tag=scope["client_tag"],
         )
         out: dict[str, Any] = {
             "result": res,
             "stats": store.stats(),
             "llm_spend": llm.spend_line(),
+            "scope": scope,
+            "has_more": bool(res.get("has_more")),
+            "remaining": res.get("remaining"),
+            "total_eligible": res.get("total_eligible"),
         }
         if res.get("reason"):
             out["reason"] = res["reason"]
-        return _json(out)
+        return out
+
+    try:
+        if background and _http_mode():
+            from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
+
+            meta = {
+                "icp": (icp or vertical or "")[:200],
+                "vertical": vertical,
+                "force": force,
+                "limit": limit,
+                "include_no_site": include_no_site,
+                "center": center,
+                "radius_miles": radius_miles,
+                "center_lat": center_lat,
+                "center_lng": center_lng,
+                "require_geo": require_geo,
+                "workers": workers,
+                **scope,
+            }
+            before = find_active_by_queue_key(make_queue_key("classify_leads", meta))
+            job = start_job("classify_leads", _run, meta=meta, priority=10)
+            return _json(
+                _started_response(
+                    job, attached=before is not None and before.id == job.id
+                )
+            )
+        return _json(_run())
     except Exception as exc:  # noqa: BLE001
         return _json(tool_error_from_exception(exc))
 
@@ -2276,7 +2568,7 @@ def debug_echo(message: str = "ping") -> str:
         {
             "ok": True,
             "echo": message,
-            "server_version": "1.5.0",
+            "server_version": mcp.version,
             "note": "Reached MCP tool body — client approval gate did not block.",
         }
     )
@@ -2781,7 +3073,11 @@ async def health_live_api(_request: Request) -> JSONResponse:
 
 
 def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
-    """Re-enqueue resumable interrupted jobs from stored meta (no human action)."""
+    """Re-enqueue resumable interrupted jobs from stored meta (no human action).
+
+    Replays the original argument payload from job.meta. Paid kinds and global
+    enrich_sites:limit=0 / backlog_drain are filtered in sweep_orphaned_jobs.
+    """
     from mcp_server.jobs import make_queue_key, start_job
 
     auto = os.environ.get("MCP_AUTO_RESUME", "true").lower() not in (
@@ -2795,77 +3091,182 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
     for rec in swept.get("jobs") or []:
         kind = rec.get("kind") or ""
         meta = dict(rec.get("meta") or {})
+        if meta.get("needs_approval") or meta.get("resume_skipped_reason"):
+            print(
+                f"Auto-resume skipped {kind}/{rec.get('id')}: "
+                f"{meta.get('resume_skipped_reason') or 'needs_approval'}",
+                flush=True,
+            )
+            continue
         try:
             if kind == "run_leads" and meta.get("plan_path"):
                 plan_path = meta["plan_path"]
+                workers = int(meta.get("workers") or 8)
                 job = start_job(
                     "run_leads",
-                    lambda p=plan_path: _execute_run_leads(p, "", True, 8),
+                    lambda p=plan_path, w=workers: _execute_run_leads(p, "", True, w),
                     meta={**meta, "auto_resumed_from": rec.get("id")},
                     queue_key=make_queue_key("run_leads", meta),
+                    priority=int(meta.get("priority") or 10),
                 )
                 resumed.append(job.id)
             elif kind == "scrape_maps" and meta.get("plan_path"):
                 plan_path = meta["plan_path"]
+                workers = int(meta.get("workers") or 8)
+                max_jobs = int(meta.get("max_jobs") or 0)
                 job = start_job(
                     "scrape_maps",
-                    lambda p=plan_path: _execute_scrape_maps(p, 8, 0),
+                    lambda p=plan_path, w=workers, m=max_jobs: _execute_scrape_maps(
+                        p, w, m
+                    ),
                     meta={**meta, "auto_resumed_from": rec.get("id")},
                     queue_key=make_queue_key("scrape_maps", meta),
+                    priority=int(meta.get("priority") or 10),
                 )
                 resumed.append(job.id)
             elif kind == "enrich_sites":
                 from gmscraper import enrich_site
 
-                def _enrich() -> dict[str, Any]:
+                m = dict(meta)
+                scope = _normalize_scope(
+                    city=str(m.get("city") or ""),
+                    state=str(m.get("state") or ""),
+                    main_category=str(m.get("main_category") or ""),
+                    plan_path=str(m.get("plan_path") or ""),
+                    plan_id=str(m.get("plan_id") or ""),
+                    run_id=str(m.get("run_id") or ""),
+                    client_tag=str(m.get("client_tag") or ""),
+                    source=str(m.get("source") or ""),
+                )
+                lim = int(m.get("limit") or 0)
+                workers = int(m.get("workers") or 3)
+
+                def _enrich(
+                    sc=scope, lim=lim, workers=workers
+                ) -> dict[str, Any]:
                     store = _store()
                     store.queue_sites()
-                    pending = store.pending_sites()
-                    if _http_mode():
-                        return _enrich_sites_via_subprocess(0, 3)
+                    if _http_mode() and not _scope_is_set(sc):
+                        return _enrich_sites_via_subprocess(lim, workers)
+                    pending = store.pending_sites(
+                        limit=lim or None,
+                        city=sc["city"],
+                        state=sc["state"],
+                        main_category=sc["main_category"],
+                        plan_id=sc["plan_id"],
+                        run_id=sc["run_id"],
+                        client_tag=sc["client_tag"],
+                        source=sc["source"],
+                    )
                     res = enrich_site.run(
                         store,
                         pending,
-                        workers=3,
+                        workers=max(1, min(workers, 3)),
                         on_progress=lambda **p: _job_progress("enrich", **p),
                     )
-                    return {"result": res, "stats": store.stats(), "domains": len(pending)}
+                    return {
+                        "result": res,
+                        "stats": store.stats(),
+                        "domains": len(pending),
+                        "scope": sc,
+                    }
 
                 job = start_job(
                     "enrich_sites",
                     _enrich,
+                    meta={**meta, **scope, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key("enrich_sites", {**meta, **scope}),
+                    priority=int(meta.get("priority") or (10 if _scope_is_set(scope) else 5)),
+                )
+                resumed.append(job.id)
+            elif kind == "classify_leads":
+                m = dict(meta)
+
+                def _classify(mm=m) -> dict[str, Any]:
+                    from gmscraper import classify
+                    from gmscraper.llm import default_workers
+
+                    store = _store()
+                    llm = _llm()
+                    text = (mm.get("icp") or "").strip()
+                    if not text:
+                        raise ValueError("classify_leads resume missing icp")
+                    res = classify.run(
+                        store,
+                        llm,
+                        text,
+                        workers=int(mm.get("workers") or 0) or default_workers(llm),
+                        source=str(mm.get("source") or ""),
+                        force=bool(mm.get("force")),
+                        limit=int(mm.get("limit") or 0) or None,
+                        include_no_site=bool(mm.get("include_no_site")),
+                        center=str(mm.get("center") or ""),
+                        radius_miles=float(mm.get("radius_miles") or 0),
+                        center_lat=float(mm["center_lat"])
+                        if mm.get("center_lat")
+                        else None,
+                        center_lng=float(mm["center_lng"])
+                        if mm.get("center_lng")
+                        else None,
+                        require_geo=bool(mm.get("require_geo", True)),
+                        city=str(mm.get("city") or ""),
+                        state=str(mm.get("state") or ""),
+                        main_category=str(mm.get("main_category") or ""),
+                        plan_id=str(mm.get("plan_id") or ""),
+                        run_id=str(mm.get("run_id") or ""),
+                        client_tag=str(mm.get("client_tag") or ""),
+                    )
+                    return {
+                        "result": res,
+                        "stats": store.stats(),
+                        "llm_spend": llm.spend_line(),
+                        "has_more": bool(res.get("has_more")),
+                        "remaining": res.get("remaining"),
+                    }
+
+                job = start_job(
+                    "classify_leads",
+                    _classify,
                     meta={**meta, "auto_resumed_from": rec.get("id")},
-                    queue_key=make_queue_key("enrich_sites", meta),
+                    queue_key=make_queue_key("classify_leads", meta),
+                    priority=int(meta.get("priority") or 10),
                 )
                 resumed.append(job.id)
             elif kind == "resolve_places" and meta.get("schema") and meta.get("table"):
                 from gmscraper import resolve_places as rp
 
                 m = dict(meta)
+                table = m.get("table") or ""
+                pid = _default_leads_project_id(table, str(m.get("project_id") or ""))
+                m["project_id"] = pid
 
-                def _resolve() -> dict[str, Any]:
+                def _resolve(mm=m) -> dict[str, Any]:
                     return rp.run(
-                        schema=m.get("schema") or "",
-                        table=m.get("table") or "",
-                        key_column=m.get("key_column") or "id",
-                        address_column=m.get("address_column") or "",
-                        name_column=m.get("name_column") or "",
-                        city_column=m.get("city_column") or "",
-                        where=m.get("where") or "",
-                        order_by=m.get("order_by") or "",
-                        limit=int(m.get("limit") or 0),
-                        strategy=m.get("strategy") or "address",
-                        min_confidence=float(m.get("min_confidence") or 0.6),
-                        workers=int(m.get("workers") or 8),
-                        details_only=bool(m.get("details_only")),
-                        project_id=m.get("project_id") or "",
+                        schema=mm.get("schema") or "",
+                        table=mm.get("table") or "",
+                        key_column=mm.get("key_column") or "id",
+                        address_column=mm.get("address_column") or "",
+                        name_column=mm.get("name_column") or "",
+                        city_column=mm.get("city_column") or "",
+                        where=mm.get("where") or "",
+                        order_by=mm.get("order_by") or "",
+                        limit=int(mm.get("limit") or 0),
+                        strategy=mm.get("strategy") or "address",
+                        min_confidence=float(mm.get("min_confidence") or 0.6),
+                        workers=int(mm.get("workers") or 8),
+                        details_only=bool(mm.get("details_only")),
+                        project_id=mm.get("project_id") or "",
+                        on_progress=lambda **p: _job_progress(**p),
                     )
 
                 job = start_job(
                     "resolve_places",
                     _resolve,
-                    meta={**meta, "auto_resumed_from": rec.get("id")},
-                    queue_key=make_queue_key("resolve_places", meta),
+                    meta={**meta, "project_id": pid, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key(
+                        "resolve_places", {**meta, "project_id": pid}
+                    ),
+                    priority=int(meta.get("priority") or 10),
                 )
                 resumed.append(job.id)
             elif kind == "pipeline_run" and meta.get("schema") and meta.get("table"):
@@ -2883,27 +3284,35 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 name_col = m.get("name_column") or (
                     "operator_name" if table == "operators" else ""
                 )
+                pid = _default_leads_project_id(table, str(m.get("project_id") or ""))
 
-                def _pipe() -> dict[str, Any]:
+                def _pipe(
+                    mm=m,
+                    key_col=key_col,
+                    addr_col=addr_col,
+                    name_col=name_col,
+                    table=table,
+                    pid=pid,
+                ) -> dict[str, Any]:
                     return pipe.run(
                         _store(),
-                        schema=m.get("schema") or "",
+                        schema=mm.get("schema") or "",
                         table=table,
                         key_column=key_col,
                         address_column=addr_col,
                         name_column=name_col,
-                        city_column=m.get("city_column") or "",
-                        where=m.get("where") or "",
-                        order_by=m.get("order_by") or "",
-                        stages=m.get("stages") or "resolve,enrich,extract,contacts",
-                        max_tier=m.get("max_tier") or "getleads",
-                        limit=int(m.get("limit") or 0),
-                        use_llm=bool(m.get("use_llm", True)),
-                        strategy=m.get("strategy") or "address",
-                        min_confidence=float(m.get("min_confidence") or 0.6),
-                        target_titles=m.get("target_titles") or "",
-                        project_id=m.get("project_id") or "",
-                        workers=int(m.get("workers") or 8),
+                        city_column=mm.get("city_column") or "",
+                        where=mm.get("where") or "",
+                        order_by=mm.get("order_by") or "",
+                        stages=mm.get("stages") or "resolve,enrich,extract,contacts",
+                        max_tier=mm.get("max_tier") or "getleads",
+                        limit=int(mm.get("limit") or 0),
+                        use_llm=bool(mm.get("use_llm", True)),
+                        strategy=mm.get("strategy") or "address",
+                        min_confidence=float(mm.get("min_confidence") or 0.6),
+                        target_titles=mm.get("target_titles") or "",
+                        project_id=pid,
+                        workers=int(mm.get("workers") or 8),
                         on_progress=lambda **p: _job_progress(**p),
                     )
 
@@ -2915,9 +3324,11 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                         "key_column": key_col,
                         "address_column": addr_col,
                         "name_column": name_col,
+                        "project_id": pid,
                         "auto_resumed_from": rec.get("id"),
                     },
                     queue_key=make_queue_key("pipeline_run", meta),
+                    priority=int(meta.get("priority") or 10),
                 )
                 resumed.append(job.id)
         except Exception as exc:  # noqa: BLE001
@@ -2967,6 +3378,7 @@ def _start_backlog_drain() -> None:
                         meta={"limit": batch, "workers": 3, "backlog_drain": True},
                         queue_key=f"enrich_sites:backlog:{batch}",
                         dedupe=True,
+                        priority=0,
                     )
                     continue
 
@@ -3005,6 +3417,7 @@ def _start_backlog_drain() -> None:
                     },
                     queue_key=f"crawl_team_pages:backlog:{batch}",
                     dedupe=True,
+                    priority=0,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"Backlog drain tick failed: {exc}", flush=True)

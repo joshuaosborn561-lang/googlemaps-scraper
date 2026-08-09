@@ -68,6 +68,12 @@ def _eligible_clauses(
     source: str = "",
     force: bool = False,
     include_no_site: bool = False,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
 ) -> tuple[str, list]:
     clauses: list[str] = []
     args: list = []
@@ -76,6 +82,32 @@ def _eligible_clauses(
     if source:
         clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
         args.append(source.strip().lower())
+    if city.strip():
+        clauses.append("lower(b.city) = lower(?)")
+        args.append(city.strip())
+    if state.strip():
+        states = [s.strip().upper() for s in state.split(",") if s.strip()]
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            clauses.append(f"upper(COALESCE(b.state,'')) IN ({placeholders})")
+            args.extend(states)
+    if main_category.strip():
+        cats = [c.strip() for c in main_category.split(",") if c.strip()]
+        if cats:
+            ors = " OR ".join(
+                "lower(COALESCE(b.main_category,'')) LIKE ?" for _ in cats
+            )
+            clauses.append(f"({ors})")
+            args.extend(f"%{c.lower()}%" for c in cats)
+    if plan_id.strip():
+        clauses.append("b.plan_id = ?")
+        args.append(plan_id.strip())
+    if run_id.strip():
+        clauses.append("b.run_id = ?")
+        args.append(run_id.strip())
+    if client_tag.strip():
+        clauses.append("b.client_tag = ?")
+        args.append(client_tag.strip())
     if not include_no_site:
         clauses.append("b.domain IS NOT NULL AND b.domain != ''")
         clauses.append(
@@ -141,20 +173,40 @@ def run(
     center_lat: float | None = None,
     center_lng: float | None = None,
     require_geo: bool = False,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
 ) -> dict[str, Any]:
     """Classify businesses against an ICP.
 
     By default only unclassified rows with fetched site text are eligible.
     Pass source= to scope (e.g. 'shovels'), force=True to re-classify, and
-    limit= to cap the batch.
+    limit= to cap the batch. Scope further with city/state/main_category/
+    plan_id/run_id/client_tag so one client's rows can be classified without
+    draining another client's backlog.
 
     When require_geo=True (or center+radius_miles are set), rows outside the
     radius are rejected deterministically before any LLM call and saved as
     in_icp=false with reason 'outside_radius'.
     """
     where, args = _eligible_clauses(
-        source=source, force=force, include_no_site=include_no_site
+        source=source,
+        force=force,
+        include_no_site=include_no_site,
+        city=city,
+        state=state,
+        main_category=main_category,
+        plan_id=plan_id,
+        run_id=run_id,
+        client_tag=client_tag,
     )
+    # Count full eligible set before LIMIT so callers get has_more.
+    total_eligible = store.conn.execute(
+        f"SELECT COUNT(*) FROM businesses b{where}", args
+    ).fetchone()[0]
     sql = f"SELECT b.* FROM businesses b{where} ORDER BY b.first_seen DESC, b.place_id"
     if limit:
         sql += f" LIMIT {int(limit)}"
@@ -235,6 +287,10 @@ def run(
             "unclassifiable_no_site": no_site,
             "classified": already,
             "classifiable_with_site": int(stats.get("classifiable_with_site") or 0),
+            "total_eligible": int(total_eligible),
+            "remaining": int(total_eligible),
+            "has_more": int(total_eligible) > 0,
+            "processed": 0,
         }
 
     if force:
@@ -322,11 +378,16 @@ def run(
 
     if not llm_rows:
         counts["done"] = geo_rejected
+        counts["processed"] = geo_rejected
         counts["reason"] = (
             f"all {geo_rejected} eligible rows were outside the geo radius"
             if geo_rejected
             else "nothing to classify after filters"
         )
+        remaining = max(0, int(total_eligible) - int(counts["processed"]))
+        counts["total_eligible"] = int(total_eligible)
+        counts["remaining"] = remaining
+        counts["has_more"] = remaining > 0
         return counts
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -340,4 +401,9 @@ def run(
                 f.cancel()
     sys.stderr.write("\n")
     counts["done"] = int(counts["done"]) + geo_rejected
+    counts["processed"] = int(counts["done"])
+    remaining = max(0, int(total_eligible) - int(counts["processed"]))
+    counts["total_eligible"] = int(total_eligible)
+    counts["remaining"] = remaining
+    counts["has_more"] = remaining > 0
     return counts
