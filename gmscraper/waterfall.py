@@ -1,9 +1,9 @@
 """Email / DM enrichment waterfall.
 
-Order (fixed): apify(+OpenAI discovery) → getleads → AI Ark → LeadMagic → FullEnrich.
+Order (fixed): apify(+OpenAI discovery) → AI Ark → getleads → LeadMagic → FullEnrich.
 
 - Apify is a discovery tier for domains with no known person (before paid lookups).
-- AI Ark is people discovery only (never email-to-profile reverse lookup).
+- AI Ark is people discovery only (never email-to-profile reverse lookup) — tier 2.
 - FullEnrich is email-only and runs only when max_tier allows it (default does not).
 - Results write to Supabase gc.companies / gc.contacts (not MCP response body).
 """
@@ -23,13 +23,13 @@ from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
 
 Need = Literal["email", "dm", "both"]
-MaxTier = Literal["apify", "getleads", "aiark", "leadmagic", "fullenrich"]
+MaxTier = Literal["apify", "aiark", "getleads", "leadmagic", "fullenrich"]
 
-# Discovery first, then paid person/email vendors. FullEnrich last.
+# Discovery first, AI Ark second, then paid person/email vendors. FullEnrich last.
 TIER_ORDER: list[str] = [
     "apify",
-    "getleads",
     "aiark",
+    "getleads",
     "leadmagic",
     "fullenrich",
 ]
@@ -202,7 +202,7 @@ class Waterfall:
         return None
 
     def resolve_dm(self, row: dict[str, Any]) -> PersonHit | None:
-        """Discover a decision-maker: local → apify → getleads → AI Ark → LeadMagic."""
+        """Discover a decision-maker: local → apify → AI Ark → getleads → LeadMagic."""
         domain = row["domain"]
         if not domain:
             return None
@@ -231,6 +231,14 @@ class Waterfall:
                     source_tier="input",
                 )
 
+        if self.ai_ark.enabled and self._allowed("aiark"):
+            self._bump("ai_ark", "calls")
+            people = self.ai_ark.find_people(domain, company_name=row.get("company_name") or "")
+            for p in people:
+                if apify_contacts._looks_like_person(p.first_name, p.last_name):
+                    self._bump("ai_ark", "dm_hits")
+                    return p
+
         if self.getleads.enabled and self._allowed("getleads"):
             self._bump("getleads", "calls")
             people = self.getleads.find_people(domain, row.get("company_name") or "")
@@ -239,14 +247,6 @@ class Waterfall:
                     if apify_contacts._looks_like_person(p.first_name, p.last_name):
                         self._bump("getleads", "dm_hits")
                         return p
-
-        if self.ai_ark.enabled and self._allowed("aiark"):
-            self._bump("ai_ark", "calls")
-            people = self.ai_ark.find_people(domain, company_name=row.get("company_name") or "")
-            for p in people:
-                if apify_contacts._looks_like_person(p.first_name, p.last_name):
-                    self._bump("ai_ark", "dm_hits")
-                    return p
 
         if self.leadmagic.enabled and self._allowed("leadmagic"):
             self._bump("leadmagic", "calls")

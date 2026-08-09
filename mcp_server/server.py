@@ -1612,16 +1612,16 @@ def enrich_waterfall(
     run_apify: bool = True,
     background: bool = True,
 ) -> str:
-    """Walk apify → getleads → AI Ark → LeadMagic → FullEnrich; write to gc.*.
+    """Walk apify → AI Ark → getleads → LeadMagic → FullEnrich; write to gc.*.
 
     `rows` = JSON list of {domain, first_name?, last_name?, company_name?, ...}.
     need = 'email' | 'dm' | 'both'.
-    max_tier = 'apify' | 'getleads' | 'aiark' | 'leadmagic' | 'fullenrich'
+    max_tier = 'apify' | 'aiark' | 'getleads' | 'leadmagic' | 'fullenrich'
     (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
 
-    Apify+OpenAI is a discovery tier for domains with no known person and runs
-    before paid person lookups. Stops at first success per field. Records
-    source_tier for hit-rate math. Response is counts only.
+    Apify+OpenAI is discovery tier 1; AI Ark is people-discovery tier 2.
+    Stops at first success per field. Records source_tier for hit-rate math.
+    Response is counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import waterfall as wf

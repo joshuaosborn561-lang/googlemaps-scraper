@@ -65,7 +65,7 @@ Do NOT use this for:
 | "address → business + domain" | `resolve_places` (generic schema/table binding; estimate_only first) |
 | "raw list → people end-to-end" | `pipeline_run` (resolve,enrich,extract,contacts; max_tier default getleads) |
 | "sync parcels with county + cursor" | `sync_to_supabase(dataset='parcels', county=…, cursor=…)` |
-| "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (apify→getleads→AI Ark→LeadMagic; max_tier default leadmagic) |
+| "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (apify→AI Ark→getleads→LeadMagic; max_tier default leadmagic) |
 | "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (only if max_tier=fullenrich) |
 | "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |
 | "browse / page through leads" | `query_leads` (page_size max 50) |
