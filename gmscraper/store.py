@@ -138,6 +138,19 @@ CREATE TABLE IF NOT EXISTS emails (
 );
 CREATE INDEX IF NOT EXISTS idx_emails_domain ON emails(domain);
 
+-- Raw Apify website-contact-finder dataset items (one row per item).
+CREATE TABLE IF NOT EXISTS apify_contact_raw (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    domain      TEXT,
+    url         TEXT,
+    raw_json    TEXT NOT NULL,
+    run_label   TEXT,
+    fetched_at  TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_apify_contact_raw_run ON apify_contact_raw(run_id);
+CREATE INDEX IF NOT EXISTS idx_apify_contact_raw_domain ON apify_contact_raw(domain);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -224,6 +237,19 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_site_pages_domain ON site_pages(domain);
             CREATE INDEX IF NOT EXISTS idx_site_pages_type ON site_pages(page_type);
+            CREATE TABLE IF NOT EXISTS apify_contact_raw (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id      TEXT NOT NULL,
+                domain      TEXT,
+                url         TEXT,
+                raw_json    TEXT NOT NULL,
+                run_label   TEXT,
+                fetched_at  TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_apify_contact_raw_run
+                ON apify_contact_raw(run_id);
+            CREATE INDEX IF NOT EXISTS idx_apify_contact_raw_domain
+                ON apify_contact_raw(domain);
             """
         )
 
@@ -698,6 +724,86 @@ class Store:
                 ((domain or "").strip().lower(),),
             )
         ]
+
+    # ------------------------------------------------------- apify contact raw
+
+    def save_apify_contact_raw(
+        self,
+        run_id: str,
+        items: Iterable[dict[str, Any]],
+        *,
+        run_label: str = "",
+    ) -> int:
+        """Persist Apify dataset items. Returns rows written."""
+        from urllib.parse import urlsplit
+
+        def _domain(item: dict[str, Any]) -> str:
+            for key in (
+                "domain", "website", "url", "inputUrl", "startUrl", "loadedUrl"
+            ):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    if "://" in val or "/" in val:
+                        host = (urlsplit(val if "://" in val else f"https://{val}")
+                                .hostname or "").lower()
+                        return host[4:] if host.startswith("www.") else host
+                    return val.strip().lower().lstrip("www.")
+            return ""
+
+        def _url(item: dict[str, Any], domain: str) -> str:
+            for key in ("url", "loadedUrl", "startUrl", "inputUrl", "website"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return f"https://{domain}" if domain else ""
+
+        n = 0
+        label = (run_label or "").strip() or None
+        with self.conn as c:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                domain = _domain(item)
+                url = _url(item, domain)
+                c.execute(
+                    """INSERT INTO apify_contact_raw
+                       (run_id, domain, url, raw_json, run_label, fetched_at)
+                       VALUES (?,?,?,?,?,datetime('now'))""",
+                    (
+                        run_id,
+                        domain or None,
+                        url or None,
+                        json.dumps(item, ensure_ascii=False),
+                        label,
+                    ),
+                )
+                n += 1
+        return n
+
+    def apify_contact_raw_rows(
+        self,
+        *,
+        run_id: str = "",
+        source: str = "",
+        limit: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Load raw Apify items for parse_contacts_openai."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id.strip():
+            clauses.append("run_id = ?")
+            params.append(run_id.strip())
+        if source.strip():
+            clauses.append("run_label = ?")
+            params.append(source.strip())
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            "SELECT id, run_id, domain, url, raw_json, run_label, fetched_at "
+            f"FROM apify_contact_raw{where} ORDER BY id"
+        )
+        if limit and limit > 0:
+            sql += f" LIMIT {int(limit)}"
+        return [dict(r) for r in self.conn.execute(sql, params)]
 
     # ----------------------------------------------------------------- meta
 

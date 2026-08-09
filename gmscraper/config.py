@@ -214,6 +214,19 @@ class Settings:
             "APIFY_SERP_ACTOR", "scraperlink/google-search-results-serp-scraper"
         )
     )
+    apify_contact_actor: str = field(
+        default_factory=lambda: _env(
+            "APIFY_CONTACT_ACTOR", "automation-lab/website-contact-finder"
+        )
+    )
+    apify_content_actor: str = field(
+        default_factory=lambda: _env(
+            "APIFY_CONTENT_ACTOR", "apify/website-content-crawler"
+        )
+    )
+    apify_max_cost_usd: float = field(
+        default_factory=lambda: _env_float("APIFY_MAX_COST_USD", 5.0)
+    )
     apify_base_url: str = field(
         default_factory=lambda: _env("APIFY_BASE_URL", "https://api.apify.com").rstrip("/")
     )

@@ -1,9 +1,10 @@
 """Email / DM enrichment waterfall.
 
-Order (fixed): getleads → AI Ark → LeadMagic → FullEnrich (last).
+Order (fixed): apify(+OpenAI discovery) → getleads → AI Ark → LeadMagic → FullEnrich.
 
+- Apify is a discovery tier for domains with no known person (before paid lookups).
 - AI Ark is people discovery only (never email-to-profile reverse lookup).
-- FullEnrich is email-only and runs only after the first three miss.
+- FullEnrich is email-only and runs only when max_tier allows it (default does not).
 - Results write to Supabase gc.companies / gc.contacts (not MCP response body).
 """
 
@@ -12,7 +13,8 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from . import gc_sync
+from . import apify_contacts, gc_sync
+from .config import settings
 from .store import Store
 from .vendors.ai_ark import AiArkClient
 from .vendors.base import EmailHit, PersonHit, split_name
@@ -21,11 +23,45 @@ from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
 
 Need = Literal["email", "dm", "both"]
+MaxTier = Literal["apify", "getleads", "aiark", "leadmagic", "fullenrich"]
+
+# Discovery first, then paid person/email vendors. FullEnrich last.
+TIER_ORDER: list[str] = [
+    "apify",
+    "getleads",
+    "aiark",
+    "leadmagic",
+    "fullenrich",
+]
+TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
+DEFAULT_MAX_TIER: MaxTier = "leadmagic"
 
 DM_TITLE_HINTS = (
     "owner", "founder", "principal", "president", "ceo", "partner",
     "director", "vp", "vice president", "managing",
 )
+
+
+def normalize_max_tier(max_tier: str | None) -> str:
+    t = (max_tier or DEFAULT_MAX_TIER).strip().lower()
+    aliases = {
+        "ai_ark": "aiark",
+        "ai-ark": "aiark",
+        "full_enrich": "fullenrich",
+        "full-enrich": "fullenrich",
+        "get_leads": "getleads",
+        "lead_magic": "leadmagic",
+    }
+    t = aliases.get(t, t)
+    if t not in TIER_RANK:
+        raise ValueError(
+            f"max_tier must be one of {', '.join(TIER_ORDER)}; got {max_tier!r}"
+        )
+    return t
+
+
+def tier_allowed(tier: str, max_tier: str) -> bool:
+    return TIER_RANK[tier] <= TIER_RANK[normalize_max_tier(max_tier)]
 
 
 def _is_dm_title(title: str) -> bool:
@@ -82,6 +118,25 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _person_from_local_contact(c: dict[str, Any]) -> PersonHit | None:
+    """Accept only contacts that look like real humans (reject titles/companies)."""
+    name = (c.get("name") or "").strip()
+    if not name:
+        return None
+    first, last = split_name(name)
+    if not apify_contacts._looks_like_person(first, last):
+        return None
+    return PersonHit(
+        first_name=first,
+        last_name=last,
+        full_name=name,
+        title=c.get("title") or "",
+        email=c.get("email") or "",
+        source_tier=c.get("source_tier") or c.get("source") or "local",
+        raw=dict(c),
+    )
+
+
 class Waterfall:
     def __init__(
         self,
@@ -91,47 +146,54 @@ class Waterfall:
         leadmagic: LeadMagicClient | None = None,
         fullenrich: FullEnrichClient | None = None,
         store: Store | None = None,
+        max_tier: str = DEFAULT_MAX_TIER,
     ):
         self.getleads = getleads or GetLeadsClient()
         self.ai_ark = ai_ark or AiArkClient()
         self.leadmagic = leadmagic or LeadMagicClient()
         self.fullenrich = fullenrich or FullEnrichClient()
         self.store = store
+        self.max_tier = normalize_max_tier(max_tier)
         self.tier_stats = {
+            "apify": {"calls": 0, "email_hits": 0, "dm_hits": 0},
             "getleads": {"calls": 0, "email_hits": 0, "dm_hits": 0},
             "ai_ark": {"calls": 0, "email_hits": 0, "dm_hits": 0},
             "leadmagic": {"calls": 0, "email_hits": 0, "dm_hits": 0},
             "fullenrich": {"calls": 0, "email_hits": 0, "dm_hits": 0},
             "team_page": {"calls": 0, "email_hits": 0, "dm_hits": 0},
         }
+        self.apify_meta: dict[str, Any] = {}
 
     def _bump(self, tier: str, field: str) -> None:
         self.tier_stats.setdefault(tier, {"calls": 0, "email_hits": 0, "dm_hits": 0})
         self.tier_stats[tier][field] = self.tier_stats[tier].get(field, 0) + 1
 
+    def _allowed(self, tier: str) -> bool:
+        return tier_allowed(tier, self.max_tier)
+
     def resolve_email(self, row: dict[str, Any]) -> EmailHit | None:
-        """getleads → LeadMagic → FullEnrich. AI Ark skipped for email."""
+        """getleads → LeadMagic → FullEnrich (respecting max_tier)."""
         first, last, domain = row["first_name"], row["last_name"], row["domain"]
         if row.get("email"):
             return EmailHit(email=row["email"], source_tier="input", status="provided")
         if not (first and last and domain):
             return None
 
-        if self.getleads.enabled:
+        if self.getleads.enabled and self._allowed("getleads"):
             self._bump("getleads", "calls")
             hit = self.getleads.find_email(first, last, domain, row.get("company_name") or "")
             if hit:
                 self._bump("getleads", "email_hits")
                 return hit
 
-        if self.leadmagic.enabled:
+        if self.leadmagic.enabled and self._allowed("leadmagic"):
             self._bump("leadmagic", "calls")
             hit = self.leadmagic.find_email(first, last, domain, row.get("company_name") or "")
             if hit:
                 self._bump("leadmagic", "email_hits")
                 return hit
 
-        if self.fullenrich.enabled:
+        if self.fullenrich.enabled and self._allowed("fullenrich"):
             self._bump("fullenrich", "calls")
             hit = self.fullenrich.find_email(first, last, domain, row.get("company_name") or "")
             if hit:
@@ -140,62 +202,142 @@ class Waterfall:
         return None
 
     def resolve_dm(self, row: dict[str, Any]) -> PersonHit | None:
-        """Discover a decision-maker: local team_page → getleads → AI Ark → LeadMagic."""
+        """Discover a decision-maker: local → apify → getleads → AI Ark → LeadMagic."""
         domain = row["domain"]
         if not domain:
             return None
 
-        # Free local signal first (not a paid tier, but fills DMs).
+        # Local contacts that look like real people (filters junk team_page titles).
         if self.store:
             self._bump("team_page", "calls")
-            contacts = self.store.contacts_for_domain(domain)
-            for c in contacts:
-                if _is_dm_title(c.get("title") or ""):
-                    first, last = split_name(c.get("name") or "")
-                    self._bump("team_page", "dm_hits")
-                    return PersonHit(
-                        first_name=first,
-                        last_name=last,
-                        full_name=c.get("name") or "",
-                        title=c.get("title") or "",
-                        email=c.get("email") or "",
-                        source_tier="team_page",
-                        raw=dict(c),
+            for c in self.store.contacts_for_domain(domain):
+                person = _person_from_local_contact(c)
+                if person and (_is_dm_title(person.title) or person.source_tier == "apify_openai"):
+                    self._bump(
+                        "apify" if person.source_tier == "apify_openai" else "team_page",
+                        "dm_hits",
                     )
+                    return person
 
         if row.get("full_name") and _is_dm_title(row.get("title") or "owner"):
-            return PersonHit(
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                full_name=row["full_name"],
-                title=row.get("title") or "",
-                email=row.get("email") or "",
-                source_tier="input",
-            )
+            first, last = row["first_name"], row["last_name"]
+            if apify_contacts._looks_like_person(first, last):
+                return PersonHit(
+                    first_name=first,
+                    last_name=last,
+                    full_name=row["full_name"],
+                    title=row.get("title") or "",
+                    email=row.get("email") or "",
+                    source_tier="input",
+                )
 
-        if self.getleads.enabled:
+        if self.getleads.enabled and self._allowed("getleads"):
             self._bump("getleads", "calls")
             people = self.getleads.find_people(domain, row.get("company_name") or "")
             for p in people:
                 if _is_dm_title(p.title) or not p.title:
-                    self._bump("getleads", "dm_hits")
-                    return p
+                    if apify_contacts._looks_like_person(p.first_name, p.last_name):
+                        self._bump("getleads", "dm_hits")
+                        return p
 
-        if self.ai_ark.enabled:
+        if self.ai_ark.enabled and self._allowed("aiark"):
             self._bump("ai_ark", "calls")
             people = self.ai_ark.find_people(domain, company_name=row.get("company_name") or "")
             for p in people:
-                if _is_dm_title(p.title) or True:
+                if apify_contacts._looks_like_person(p.first_name, p.last_name):
                     self._bump("ai_ark", "dm_hits")
                     return p
 
-        if self.leadmagic.enabled:
+        if self.leadmagic.enabled and self._allowed("leadmagic"):
             self._bump("leadmagic", "calls")
             people = self.leadmagic.find_people(domain, row.get("company_name") or "")
             for p in people:
-                self._bump("leadmagic", "dm_hits")
-                return p
+                if apify_contacts._looks_like_person(p.first_name, p.last_name):
+                    self._bump("leadmagic", "dm_hits")
+                    return p
         return None
+
+    def discover_apify(self, domains: list[str]) -> dict[str, Any]:
+        """Batch Apify crawl + OpenAI parse for domains with no known person."""
+        if not self._allowed("apify"):
+            return {"skipped": True, "reason": "max_tier_excludes_apify"}
+        if not self.store:
+            return {"skipped": True, "reason": "no_store"}
+        if not settings.apify_token:
+            return {"skipped": True, "reason": "apify_token_missing"}
+
+        need: list[str] = []
+        for d in domains:
+            d = (d or "").strip().lower()
+            if not d:
+                continue
+            has_person = False
+            for c in self.store.contacts_for_domain(d):
+                if _person_from_local_contact(c):
+                    has_person = True
+                    break
+            if not has_person:
+                need.append(d)
+        if not need:
+            return {"skipped": True, "reason": "all_have_person", "domains": 0}
+
+        self._bump("apify", "calls")
+        domains_csv = ",".join(need)
+        try:
+            crawl_res = apify_contacts.crawl(
+                self.store,
+                domains=domains_csv,
+                estimate_only=False,
+                verify_emails=False,
+                run_label="waterfall_apify",
+            )
+        except Exception as exc:  # noqa: BLE001 — surface in meta, don't abort waterfall
+            return {"skipped": False, "error": str(exc)[:300], "domains": len(need)}
+
+        self.apify_meta["crawl"] = {
+            k: crawl_res.get(k)
+            for k in (
+                "run_id", "started", "blocked", "estimated_cost_usd",
+                "actual_cost_usd", "rows_persisted", "status", "reason",
+            )
+        }
+        if crawl_res.get("blocked") or not crawl_res.get("started"):
+            return {
+                "skipped": False,
+                "blocked": bool(crawl_res.get("blocked")),
+                "crawl": self.apify_meta["crawl"],
+                "domains": len(need),
+            }
+
+        run_id = str(crawl_res.get("run_id") or "")
+        try:
+            parse_res = apify_contacts.parse_contacts_openai(
+                self.store, run_id=run_id, workers=8
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "skipped": False,
+                "crawl": self.apify_meta["crawl"],
+                "parse_error": str(exc)[:300],
+                "domains": len(need),
+            }
+
+        self.apify_meta["parse"] = {
+            k: parse_res.get(k)
+            for k in (
+                "domains_processed", "people_extracted", "domains_with_person",
+                "rows_written", "estimated_llm_cost_usd",
+            )
+        }
+        self.tier_stats["apify"]["dm_hits"] = int(
+            parse_res.get("domains_with_person") or 0
+        )
+        return {
+            "skipped": False,
+            "domains": len(need),
+            "crawl": self.apify_meta["crawl"],
+            "parse": self.apify_meta["parse"],
+        }
 
 
 def enrich_waterfall(
@@ -204,8 +346,15 @@ def enrich_waterfall(
     need: Need = "both",
     store: Store | None = None,
     write_supabase: bool = True,
+    max_tier: str = DEFAULT_MAX_TIER,
+    run_apify: bool = True,
 ) -> dict[str, Any]:
-    """Walk tiers per row; upsert companies/contacts to Supabase; return counts only."""
+    """Walk tiers per row; upsert companies/contacts to Supabase; return counts only.
+
+    max_tier (default leadmagic) hard-stops the walk so FullEnrich never fires
+    unless explicitly requested.
+    """
+    max_tier_n = normalize_max_tier(max_tier)
     parsed = [_norm_row(r) for r in _parse_rows(rows)]
     parsed = [r for r in parsed if r.get("domain")]
     if not parsed:
@@ -217,13 +366,31 @@ def enrich_waterfall(
             "dms_found": 0,
             "tier_stats": {},
             "need": need,
+            "max_tier": max_tier_n,
         }
 
-    wf = Waterfall(store=store)
+    wf = Waterfall(store=store, max_tier=max_tier_n)
     company_rows: list[dict[str, Any]] = []
     contact_rows: list[dict[str, Any]] = []
     emails_found = 0
     dms_found = 0
+
+    # Discovery tier: Apify + OpenAI for domains that still lack a person.
+    apify_result: dict[str, Any] = {}
+    if run_apify and need in ("dm", "both") and wf._allowed("apify"):
+        # Only discover when the row itself has no usable person name.
+        need_domains = [
+            r["domain"]
+            for r in parsed
+            if not (
+                r.get("first_name")
+                and r.get("last_name")
+                and apify_contacts._looks_like_person(r["first_name"], r["last_name"])
+            )
+        ]
+        need_domains = list(dict.fromkeys(need_domains))
+        if need_domains:
+            apify_result = wf.discover_apify(need_domains)
 
     # Bulk FullEnrich pass for rows that still need email after earlier tiers.
     pending_fe: list[tuple[int, dict[str, Any]]] = []
@@ -251,10 +418,10 @@ def enrich_waterfall(
                     email_tier = person.source_tier
 
         if need in ("email", "both") and not email:
-            # Inline getleads + leadmagic; defer fullenrich to bulk.
+            # Inline getleads + leadmagic; defer fullenrich to bulk when allowed.
             first, last, domain = row["first_name"], row["last_name"], row["domain"]
             if first and last and domain:
-                if wf.getleads.enabled:
+                if wf.getleads.enabled and wf._allowed("getleads"):
                     wf._bump("getleads", "calls")
                     hit = wf.getleads.find_email(
                         first, last, domain, row.get("company_name") or ""
@@ -262,7 +429,7 @@ def enrich_waterfall(
                     if hit:
                         wf._bump("getleads", "email_hits")
                         email, email_tier = hit.email, hit.source_tier
-                if not email and wf.leadmagic.enabled:
+                if not email and wf.leadmagic.enabled and wf._allowed("leadmagic"):
                     wf._bump("leadmagic", "calls")
                     hit = wf.leadmagic.find_email(
                         first, last, domain, row.get("company_name") or ""
@@ -270,7 +437,11 @@ def enrich_waterfall(
                     if hit:
                         wf._bump("leadmagic", "email_hits")
                         email, email_tier = hit.email, hit.source_tier
-                if not email and wf.fullenrich.enabled:
+                if (
+                    not email
+                    and wf.fullenrich.enabled
+                    and wf._allowed("fullenrich")
+                ):
                     pending_fe.append((idx, row))
 
         enriched.append(
@@ -283,8 +454,8 @@ def enrich_waterfall(
             }
         )
 
-    # FullEnrich bulk for remaining email misses.
-    if pending_fe and wf.fullenrich.enabled:
+    # FullEnrich bulk for remaining email misses (only when max_tier allows).
+    if pending_fe and wf.fullenrich.enabled and wf._allowed("fullenrich"):
         fe_rows = [
             {
                 "first_name": r["first_name"],
@@ -301,6 +472,9 @@ def enrich_waterfall(
                 wf._bump("fullenrich", "email_hits")
                 enriched[idx]["email"] = hit.email
                 enriched[idx]["email_tier"] = hit.source_tier
+    elif pending_fe:
+        # Explicit: FullEnrich was eligible by miss but blocked by max_tier.
+        wf.tier_stats["fullenrich"]["blocked_by_max_tier"] = len(pending_fe)
 
     for item in enriched:
         row = item["row"]
@@ -380,7 +554,11 @@ def enrich_waterfall(
     contacts_written = 0
     if write_supabase:
         companies_upserted = gc_sync.upsert_companies(company_rows)
-        contacts_written = gc_sync.insert_contacts(contact_rows)
+        # Emails: ignore (domain, email) conflicts; null emails insert separately.
+        with_email = [r for r in contact_rows if r.get("email")]
+        no_email = [r for r in contact_rows if not r.get("email")]
+        contacts_written = gc_sync.insert_contacts_ignore_conflict(with_email)
+        contacts_written += gc_sync.insert_contacts(no_email)
 
     # Merge live client counters into tier_stats for reporting.
     for name, client in (
@@ -400,10 +578,13 @@ def enrich_waterfall(
         "dms_found": dms_found,
         "tier_stats": wf.tier_stats,
         "need": need,
+        "max_tier": max_tier_n,
+        "apify": apify_result or None,
         "vendors_enabled": {
+            "apify": bool(settings.apify_token),
             "getleads": wf.getleads.enabled,
             "ai_ark": wf.ai_ark.enabled,
             "leadmagic": wf.leadmagic.enabled,
-            "fullenrich": wf.fullenrich.enabled,
+            "fullenrich": wf.fullenrich.enabled and wf._allowed("fullenrich"),
         },
     }

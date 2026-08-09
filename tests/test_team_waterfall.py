@@ -172,6 +172,9 @@ def test_waterfall_writes_counts_only(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", fake_companies)
     monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", fake_contacts)
+    monkeypatch.setattr(
+        waterfall.gc_sync, "insert_contacts_ignore_conflict", fake_contacts
+    )
 
     out = waterfall.enrich_waterfall(
         [
@@ -186,6 +189,7 @@ def test_waterfall_writes_counts_only(tmp_path: Path, monkeypatch) -> None:
         need="email",
         store=store,
         write_supabase=True,
+        run_apify=False,
     )
     assert out["rows_in"] == 1
     assert out["emails_found"] == 1

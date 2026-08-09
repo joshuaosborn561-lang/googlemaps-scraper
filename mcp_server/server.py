@@ -331,6 +331,9 @@ def health() -> str:
         (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
         or (os.environ.get("SUPABASE_ANON_KEY") or "").strip()
     )
+    from gmscraper.apify_contacts import apify_token_valid
+
+    apify_ok = bool(settings.apify_token) and apify_token_valid(settings.apify_token)
     return _json(
         {
             "ok": True,
@@ -338,7 +341,10 @@ def health() -> str:
             "rapidapi_configured": bool(settings.rapidapi_key),
             "llm_provider": settings.llm_provider,
             "openai_configured": bool(settings.openai_api_key),
-            "apify_configured": bool(settings.apify_token),
+            "apify_configured": apify_ok,
+            "apify_contact_actor": settings.apify_contact_actor,
+            "apify_content_actor": settings.apify_content_actor,
+            "apify_max_cost_usd": settings.apify_max_cost_usd,
             "supabase_configured": bool(supabase_url and supabase_key),
             "supabase_url": supabase_url or None,
             "db": str(DEFAULT_DB),
@@ -1214,6 +1220,135 @@ def find_owners(
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Apify contact crawl",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def apify_contact_crawl(
+    domains: str = "",
+    source: str = "",
+    limit: int = 0,
+    max_pages_per_site: int = 5,
+    verify_emails: bool = False,
+    use_proxy: bool = True,
+    estimate_only: bool = False,
+    run_label: str = "",
+    background: bool = True,
+) -> str:
+    """Run automation-lab/website-contact-finder; persist raw items locally.
+
+    Pass domains as comma-separated hosts/URLs, or source='maps_no_owner' /
+    'icp_no_owner' to select from local SQLite. Always estimates cost first;
+    refuses when estimate exceeds APIFY_MAX_COST_USD. estimate_only=True
+    returns the estimate and starts nothing.
+
+    Response is counts + run_id only — never row payloads.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import apify_contacts
+
+    store = _store()
+
+    def _run() -> dict[str, Any]:
+        return apify_contacts.crawl(
+            store,
+            domains=domains or "",
+            source=source or "",
+            limit=int(limit or 0),
+            max_pages_per_site=int(max_pages_per_site or 5),
+            verify_emails=bool(verify_emails),
+            use_proxy=bool(use_proxy),
+            estimate_only=bool(estimate_only),
+            run_label=run_label or "",
+        )
+
+    # Long live runs go to background; estimates stay sync.
+    if (
+        background
+        and _http_mode()
+        and not estimate_only
+        and (domains or source)
+    ):
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "apify_contact_crawl",
+            _run,
+            meta={
+                "limit": limit,
+                "source": source or None,
+                "domains_chars": len(domains or ""),
+                "estimate_only": False,
+            },
+        )
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Parse Apify contacts via OpenAI",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+def parse_contacts_openai(
+    run_id: str = "",
+    source: str = "",
+    limit: int = 0,
+    model: str = "gpt-4o-mini",
+    workers: int = 8,
+    background: bool = True,
+) -> str:
+    """Extract real people from Apify crawl text with OpenAI; write to gc.*.
+
+    Rejects job titles and company names in name fields. Never invents emails.
+    Writes gc.companies / gc.contacts server-side. Response is counts only.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import apify_contacts
+
+    store = _store()
+
+    def _run() -> dict[str, Any]:
+        return apify_contacts.parse_contacts_openai(
+            store,
+            run_id=run_id or "",
+            source=source or "",
+            limit=int(limit or 0),
+            model=model or "gpt-4o-mini",
+            workers=int(workers or 8),
+        )
+
+    if background and _http_mode():
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "parse_contacts_openai",
+            _run,
+            meta={"run_id": run_id or None, "source": source or None, "limit": limit},
+        )
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="FullEnrich find email",
         readOnlyHint=False,
         openWorldHint=True,
@@ -1226,10 +1361,11 @@ def fullenrich_find_email(
     domain: str,
     company_name: str = "",
 ) -> str:
-    """FullEnrich email lookup (tier 4). 1 credit on work-email hit, 0 on miss.
+    """FullEnrich email lookup (last tier). 1 credit on work-email hit, 0 on miss.
 
-    Call only after getleads, AI Ark (people), and LeadMagic miss — or use
-    enrich_waterfall which enforces that order. Requires FULLENRICH_API_KEY.
+    Call only after earlier waterfall tiers miss — or use enrich_waterfall
+    with max_tier='fullenrich'. Default waterfall max_tier is leadmagic.
+    Requires FULLENRICH_API_KEY.
     """
     _ensure_repo_cwd()
     from gmscraper.vendors.fullenrich import FullEnrichClient
@@ -1306,16 +1442,20 @@ def fullenrich_find_email_bulk(rows: str) -> str:
 def enrich_waterfall(
     rows: str,
     need: str = "both",
+    max_tier: str = "leadmagic",
+    run_apify: bool = True,
     background: bool = True,
 ) -> str:
-    """Walk getleads → AI Ark → LeadMagic → FullEnrich; write to gc.* tables.
+    """Walk apify → getleads → AI Ark → LeadMagic → FullEnrich; write to gc.*.
 
     `rows` = JSON list of {domain, first_name?, last_name?, company_name?, ...}.
     need = 'email' | 'dm' | 'both'.
+    max_tier = 'apify' | 'getleads' | 'aiark' | 'leadmagic' | 'fullenrich'
+    (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
 
-    Stops at first success per field. Records source_tier for hit-rate math.
-    Results go to Supabase gc.companies / gc.contacts — response is counts only.
-    AI Ark is people discovery only (never email reverse lookup).
+    Apify+OpenAI is a discovery tier for domains with no known person and runs
+    before paid person lookups. Stops at first success per field. Records
+    source_tier for hit-rate math. Response is counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import waterfall as wf
@@ -1323,12 +1463,18 @@ def enrich_waterfall(
     need_norm = (need or "both").strip().lower()
     if need_norm not in ("email", "dm", "both"):
         raise ValueError("need must be 'email', 'dm', or 'both'")
+    max_tier_n = wf.normalize_max_tier(max_tier)
 
     store = _store()
 
     def _run() -> dict[str, Any]:
         return wf.enrich_waterfall(
-            rows, need=need_norm, store=store, write_supabase=True  # type: ignore[arg-type]
+            rows,
+            need=need_norm,  # type: ignore[arg-type]
+            store=store,
+            write_supabase=True,
+            max_tier=max_tier_n,
+            run_apify=bool(run_apify),
         )
 
     if background and _http_mode() and len(rows or "") > 2000:
@@ -1337,7 +1483,11 @@ def enrich_waterfall(
         job = start_job(
             "enrich_waterfall",
             _run,
-            meta={"need": need_norm, "rows_chars": len(rows or "")},
+            meta={
+                "need": need_norm,
+                "max_tier": max_tier_n,
+                "rows_chars": len(rows or ""),
+            },
         )
         return _json(
             {

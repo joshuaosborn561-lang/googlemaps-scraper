@@ -83,6 +83,7 @@ def upsert_companies(rows: list[dict[str, Any]]) -> int:
 
 
 def insert_contacts(rows: list[dict[str, Any]]) -> int:
+    """Insert contact rows (used for null-email rows with no unique conflict)."""
     if not rows:
         return 0
     cfg = supabase_config()
@@ -95,6 +96,31 @@ def insert_contacts(rows: list[dict[str, Any]]) -> int:
         prefer="return=minimal",
     )
     return len(rows)
+
+
+def insert_contacts_ignore_conflict(rows: list[dict[str, Any]]) -> int:
+    """Insert contacts; skip duplicates on unique (domain, email).
+
+    Rows with a null/empty email must NOT use this path — Postgres unique
+    indexes treat NULLs as distinct, but the conflict target requires email.
+    Use insert_contacts() for null-email rows instead.
+    """
+    if not rows:
+        return 0
+    # Drop empties so on_conflict=domain,email is well-defined.
+    clean = [r for r in rows if (r.get("email") or "").strip()]
+    if not clean:
+        return 0
+    cfg = supabase_config()
+    _request(
+        "POST",
+        f"{CONTACTS}?on_conflict=domain,email",
+        cfg["key"],
+        cfg["url"],
+        body=clean,
+        prefer="resolution=ignore-duplicates,return=minimal",
+    )
+    return len(clean)
 
 
 def _job_level(title: str) -> str:
