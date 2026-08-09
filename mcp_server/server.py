@@ -943,20 +943,52 @@ def list_background_jobs(limit: int = 20) -> str:
         openWorldHint=True,
     )
 )
-def enrich_sites(limit: int = 0, workers: int = 12) -> str:
+def enrich_sites(
+    limit: int = 0,
+    workers: int = 3,
+    background: bool = True,
+) -> str:
     """Fetch website text/emails for pending domains (free, no Maps spend).
 
     Shallow same-domain crawl: homepage + up to 3 about/team pages
     (/about, /team, /leadership, …). Per-page text is stored with page_type.
+
+    On Railway/HTTP this defaults to a background job — poll get_job_status.
+    Workers default to 3 so the MCP HTTP loop stays responsive.
     """
     _ensure_repo_cwd()
-    from gmscraper import enrich_site
 
-    store = _store()
-    store.queue_sites()
-    domains = store.pending_sites(limit=limit or None)
-    res = enrich_site.run(store, domains, workers=workers)
-    return _json({"result": res, "stats": store.stats()})
+    def _run() -> dict[str, Any]:
+        from gmscraper import enrich_site
+
+        store = _store()
+        store.queue_sites()
+        domains = store.pending_sites(limit=limit or None)
+        _job_progress("enrich", done=0, total=len(domains))
+        res = enrich_site.run(
+            store,
+            domains,
+            workers=max(1, min(int(workers or 3), 3)),
+            on_progress=lambda **p: _job_progress("enrich", **p),
+        )
+        return {"result": res, "stats": store.stats(), "domains": len(domains)}
+
+    if _http_mode() and background:
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "enrich_sites",
+            _run,
+            meta={"limit": limit, "workers": max(1, min(int(workers or 3), 3))},
+        )
+        return _json(
+            {
+                "status": "started",
+                "job_id": job.id,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
 
 
 @mcp.tool(
