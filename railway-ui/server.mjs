@@ -289,13 +289,23 @@ async function runJob(job) {
   })
 }
 
-app.get('/api/health', (_request, response) => {
-  response.json({
+function healthPayload() {
+  return {
     ok: true,
+    service: 'google-maps-scraper',
     supabaseConfigured: Boolean(supabase),
     historyMode: supabase ? 'supabase' : 'unavailable',
     persistence: 'supabase-primary',
-  })
+  }
+}
+
+app.get('/api/health', (_request, response) => {
+  response.json(healthPayload())
+})
+
+// Railway / probes sometimes hit /health instead of /api/health.
+app.get('/health', (_request, response) => {
+  response.json(healthPayload())
 })
 
 app.get('/api/jobs', async (_request, response) => {

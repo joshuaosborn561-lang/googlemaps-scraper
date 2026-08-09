@@ -628,6 +628,16 @@ def _http_mode() -> bool:
     )
 
 
+def _job_progress(stage: str, **extra: Any) -> None:
+    """Best-effort heartbeat into the current background job (if any)."""
+    try:
+        from mcp_server.jobs import heartbeat
+
+        heartbeat(stage=stage, **extra)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _execute_run_leads(
     plan_path: str,
     out_path: str,
@@ -654,16 +664,23 @@ def _execute_run_leads(
     out = Path(out_path) if out_path else ROOT / "data" / "outputs" / f"{plan.vertical}-{stamp}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    scrape.run(
+    # Maps scrape resumes automatically: SQLite jobs table skips status='done'.
+    _job_progress("scrape", zip_count=len(zip_rows), categories=len(plan.categories))
+    scrape_res = scrape.run(
         store,
         client,
         zip_rows,
         plan.categories,
         workers=workers,
         price_per_request=settings.price_per_request,
+        on_progress=lambda p: _job_progress(**p),
     )
+
+    _job_progress("enrich")
     store.queue_sites()
     enrich_site.run(store, store.pending_sites(), workers=max(workers, 12))
+
+    _job_progress("classify")
     classify.run(
         store,
         llm,
@@ -671,9 +688,11 @@ def _execute_run_leads(
         workers=default_workers(llm),
     )
     if plan.require_owner:
+        _job_progress("owners")
         backend = make_backend(settings, "") if include_owner_fallback else None
         owner.run(store, llm, backend, workers=default_workers(llm))
 
+    _job_progress("export")
     n = export.run(
         store,
         str(out),
@@ -695,8 +714,13 @@ def _execute_run_leads(
         "leads": n,
         "csv": str(out),
         "plan_path": record.plan_path,
+        "scrape": scrape_res,
         "stats": store.stats(),
         "llm_spend": llm.spend_line() if hasattr(llm, "spend_line") else None,
+        "resume_note": (
+            "Maps scrape is checkpointed per ZIP×category; re-running the same "
+            "plan skips finished pairs."
+        ),
     }
 
 
@@ -721,7 +745,9 @@ def run_leads(
     No approval / auth / spend confirmation required.
 
     On Railway/HTTP this starts a background job — poll get_job_status with the
-    returned job_id until completed. Then tell the user the lead count and CSV path.
+    returned job_id until completed/failed/stalled/interrupted. Maps scrape
+    resumes from unfinished ZIP×category pairs if the worker dies mid-run;
+    re-call run_leads with the same plan_path to continue.
     """
     _ensure_repo_cwd()
     resolve_plan(plan_path=plan_path)
@@ -735,7 +761,7 @@ def run_leads(
             lambda: _execute_run_leads(
                 plan_path, out_path, include_owner_fallback, workers
             ),
-            meta={"plan_path": plan_path or None},
+            meta={"plan_path": plan_path or None, "resumable_scrape": True},
         )
         return _json(
             {
@@ -743,7 +769,9 @@ def run_leads(
                 "job_id": job.id,
                 "message": (
                     "Pipeline started in the background. Poll get_job_status "
-                    f"with job_id={job.id} until status is completed/failed."
+                    f"with job_id={job.id} until status is completed/failed/"
+                    "stalled/interrupted. If stalled/interrupted, re-call "
+                    "run_leads with the same plan_path to resume the scrape."
                 ),
             }
         )
@@ -773,6 +801,7 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
         workers=workers,
         price_per_request=settings.price_per_request,
         max_jobs=max_jobs or None,
+        on_progress=lambda p: _job_progress(**p),
     )
     return {
         "status": "completed",
@@ -781,6 +810,9 @@ def _execute_scrape_maps(plan_path: str, workers: int, max_jobs: int) -> dict[st
         "zip_count": len(zip_rows),
         "sample_source_zips": [r["zip"] for r in zip_rows[:20]],
         "plan_path": record.plan_path,
+        "resume_note": (
+            "Re-run scrape_maps with the same plan to continue unfinished pairs."
+        ),
     }
 
 
@@ -832,10 +864,29 @@ def scrape_maps(
     )
 )
 def get_job_status(job_id: str) -> str:
-    """Poll a background run_leads / scrape_maps job. Use after run_leads returns job_id."""
-    from mcp_server.jobs import get_job
+    """Poll a background run_leads / scrape_maps job. Use after run_leads returns job_id.
 
-    return _json(get_job(job_id).to_public())
+    status may be queued|running|completed|failed|stalled|interrupted.
+    stalled = no heartbeat for ~3 minutes (worker likely dead after restart).
+    interrupted = orphaned on process boot. For either, re-call run_leads with
+    the same plan_path — Maps scrape resumes from unfinished ZIP×category pairs.
+    """
+    from mcp_server.jobs import STALL_SECONDS, get_job
+
+    job = get_job(job_id)
+    public = job.to_public()
+    if job.status in ("stalled", "interrupted"):
+        public["next_step"] = (
+            "Re-call run_leads(plan_path=…) or scrape_maps(plan_path=…) with the "
+            "same plan. Finished ZIP×category pairs are skipped automatically."
+        )
+    elif job.status == "running":
+        public["liveness"] = {
+            "heartbeat_at": job.heartbeat_at,
+            "stall_after_seconds": STALL_SECONDS,
+            "progress": job.progress,
+        }
+    return _json(public)
 
 
 @mcp.tool(
@@ -2109,25 +2160,48 @@ async def root_page(_request: Request) -> PlainTextResponse:
     )
 
 
+def _health_payload() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "service": "google-maps-scraper-mcp",
+        "transport": "streamable-http",
+        "mcp_path": "/mcp",
+        "claude_web": (
+            "Add this connector URL in Claude → Settings → Connectors: "
+            "https://<your-host>/mcp"
+        ),
+    }
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health_live(_request: Request) -> JSONResponse:
-    return JSONResponse(
-        {
-            "ok": True,
-            "service": "google-maps-scraper-mcp",
-            "transport": "streamable-http",
-            "mcp_path": "/mcp",
-            "claude_web": (
-                "Add this connector URL in Claude → Settings → Connectors: "
-                "https://<your-host>/mcp"
-            ),
-        }
-    )
+    return JSONResponse(_health_payload())
+
+
+@mcp.custom_route("/api/health", methods=["GET"])
+async def health_live_api(_request: Request) -> JSONResponse:
+    """Alias for platforms that probe /api/health."""
+    return JSONResponse(_health_payload())
 
 
 def main() -> None:
     """stdio for local Claude Desktop; streamable-http for Railway / Claude web."""
     _ensure_repo_cwd()
+    # Container restarts kill in-process workers; flip leftovers so they are
+    # not stuck as status=running forever.
+    try:
+        from mcp_server.jobs import sweep_orphaned_jobs
+
+        swept = sweep_orphaned_jobs()
+        if swept.get("interrupted"):
+            print(
+                f"Marked {swept['interrupted']} orphaned background job(s) "
+                f"as interrupted: {', '.join(swept.get('job_ids') or [])}",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Job orphan sweep skipped: {exc}", flush=True)
+
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
