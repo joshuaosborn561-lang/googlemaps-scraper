@@ -35,7 +35,7 @@ HEARTBEAT_INTERVAL_SEC = 30
 
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset(
-    {"completed", "failed", "stalled", "interrupted"}
+    {"completed", "failed", "stalled", "interrupted", "cancelled"}
 )
 
 
@@ -43,7 +43,7 @@ TERMINAL_STATUSES = frozenset(
 class Job:
     id: str
     kind: str
-    status: str  # queued | running | completed | failed | stalled | interrupted
+    status: str  # queued | running | completed | failed | stalled | interrupted | cancelled
     created_at: float
     started_at: float | None = None
     finished_at: float | None = None
@@ -60,12 +60,17 @@ class Job:
 _lock = threading.Lock()
 _jobs: dict[str, Job] = {}
 _fns: dict[str, Callable[[], dict[str, Any]]] = {}
+_cancel_requested: set[str] = set()
 _tls = threading.local()
 # FIFO of job ids waiting to run. At most one worker thread executes at a time.
 _wait_queue: list[str] = []
 _running_id: str | None = None
 _dispatcher_wakeup = threading.Event()
 _dispatcher_started = False
+
+
+class JobCancelled(Exception):
+    """Raised inside a worker when cancel_job wins the race."""
 
 
 def _path(job_id: str) -> Path:
@@ -278,6 +283,106 @@ def find_active_by_queue_key(queue_key: str) -> Job | None:
     return None
 
 
+def is_cancel_requested(job_id: str = "") -> bool:
+    jid = (job_id or current_job_id()).strip()
+    if not jid:
+        return False
+    with _lock:
+        if jid in _cancel_requested:
+            return True
+        job = _jobs.get(jid)
+        return bool(job and (job.meta or {}).get("cancel_requested"))
+
+
+def cancel_job(job_id: str, *, reason: str = "") -> dict[str, Any]:
+    """Cancel a queued or running job. Queued jobs never start.
+
+    Running jobs are marked cancelled and asked to stop; in-flight vendor
+    work (e.g. an Apify actor that already has a runId) is best-effort —
+    prefer cancelling while status=queued. Cancelled jobs are never
+    auto-resumed on restart.
+    """
+    jid = (job_id or "").strip()
+    if not jid:
+        raise ValueError("job_id is required")
+
+    try:
+        job = get_job(jid)
+    except ValueError:
+        return {"ok": False, "job_id": jid, "error": "unknown_job_id"}
+
+    if job.status == "cancelled":
+        return {
+            "ok": True,
+            "job_id": jid,
+            "status": "cancelled",
+            "already_cancelled": True,
+            "kind": job.kind,
+        }
+    if job.status in TERMINAL_STATUSES:
+        return {
+            "ok": False,
+            "job_id": jid,
+            "status": job.status,
+            "error": f"job already terminal ({job.status})",
+            "kind": job.kind,
+        }
+
+    why = (reason or "Cancelled by cancel_job").strip()
+    was = job.status
+    with _lock:
+        job = _jobs.get(jid) or job
+        meta = dict(job.meta or {})
+        meta["cancel_requested"] = True
+        meta["auto_resume_attempted"] = True  # never reclaim
+        meta["cancelled_reason"] = why
+        job.meta = meta
+        _cancel_requested.add(jid)
+
+        if job.status == "queued":
+            job.status = "cancelled"
+            job.finished_at = time.time()
+            job.error = why
+            job.progress = {
+                **dict(job.progress or {}),
+                "stage": "cancelled",
+                "updated_at": time.time(),
+            }
+            if jid in _wait_queue:
+                _wait_queue[:] = [x for x in _wait_queue if x != jid]
+            _fns.pop(jid, None)
+        elif job.status == "running":
+            # Soft-cancel: flag the worker; status flips when the worker exits
+            # or immediately if we can claim it before work starts.
+            job.progress = {
+                **dict(job.progress or {}),
+                "cancel_requested": True,
+                "updated_at": time.time(),
+            }
+        snap = Job(**asdict(job))
+    _persist(snap)
+    _dispatcher_wakeup.set()
+
+    # Re-read after persist for the response.
+    fresh = get_job(jid)
+    return {
+        "ok": True,
+        "job_id": jid,
+        "kind": fresh.kind,
+        "was_status": was,
+        "status": fresh.status,
+        "cancel_requested": True,
+        "removed_from_queue": was == "queued",
+        "note": (
+            "Queued job removed; it will not start."
+            if was == "queued"
+            else "Running job flagged; worker will exit as cancelled when able. "
+            "If an Apify actor already started, abort it separately with its runId."
+        ),
+        "queue_position": queue_position(jid),
+    }
+
+
 _RESUMABLE_KINDS = frozenset(
     {
         "run_leads",
@@ -360,7 +465,12 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
         if job.kind not in _RESUMABLE_KINDS:
             continue
         meta = dict(job.meta or {})
-        if meta.get("auto_resume_attempted") or meta.get("auto_resumed_from"):
+        if (
+            meta.get("auto_resume_attempted")
+            or meta.get("auto_resumed_from")
+            or meta.get("cancel_requested")
+            or meta.get("cancelled_reason")
+        ):
             continue
         finished = float(job.finished_at or job.heartbeat_at or job.created_at or 0)
         if finished and (now - finished) > max_age:
@@ -448,8 +558,22 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
                 _running_id = None
                 _dispatcher_wakeup.set()
                 return
-        if job.status != "queued":
+        # Cancelled / non-queued jobs must never start work.
+        if job.status != "queued" or job_id in _cancel_requested or (
+            job.meta or {}
+        ).get("cancel_requested"):
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.error = (job.meta or {}).get("cancelled_reason") or (
+                    "Cancelled by cancel_job"
+                )
+                job.finished_at = time.time()
+                try:
+                    _persist(job)
+                except OSError:
+                    pass
             _running_id = None
+            _fns.pop(job_id, None)
             _dispatcher_wakeup.set()
             return
         job.status = "running"
@@ -473,17 +597,42 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
     ).start()
 
     try:
+        if is_cancel_requested(job_id):
+            raise JobCancelled("Cancelled by cancel_job")
         result = fn() or {}
         with _lock:
             job = _jobs[job_id]
-            job.result = result
-            job.status = "completed"
-            job.error = None
+            if job_id in _cancel_requested or (job.meta or {}).get(
+                "cancel_requested"
+            ):
+                job.status = "cancelled"
+                job.error = (job.meta or {}).get("cancelled_reason") or (
+                    "Cancelled by cancel_job"
+                )
+                job.result = result if isinstance(result, dict) else {}
+            else:
+                job.result = result
+                job.status = "completed"
+                job.error = None
+    except JobCancelled as exc:
+        with _lock:
+            job = _jobs[job_id]
+            job.status = "cancelled"
+            job.error = str(exc) or "Cancelled by cancel_job"
+            job.result = {}
     except Exception as exc:  # noqa: BLE001
         with _lock:
             job = _jobs[job_id]
-            job.status = "failed"
-            job.error = f"{type(exc).__name__}: {exc}"
+            if job_id in _cancel_requested or (job.meta or {}).get(
+                "cancel_requested"
+            ):
+                job.status = "cancelled"
+                job.error = (job.meta or {}).get("cancelled_reason") or (
+                    f"Cancelled by cancel_job ({type(exc).__name__}: {exc})"
+                )
+            else:
+                job.status = "failed"
+                job.error = f"{type(exc).__name__}: {exc}"
             job.result = {"traceback": traceback.format_exc()[-4000:]}
     finally:
         stop_hb.set()
@@ -494,6 +643,7 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
             snap = Job(**asdict(job))
             if _running_id == job_id:
                 _running_id = None
+            _cancel_requested.discard(job_id)
         try:
             _persist(snap)
         except OSError:

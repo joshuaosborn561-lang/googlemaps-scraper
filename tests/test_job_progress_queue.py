@@ -46,6 +46,7 @@ def _reset_queue_state() -> None:
         jobs._running_id = None
         jobs._jobs.clear()
         jobs._fns.clear()
+        jobs._cancel_requested.clear()
     jobs._dispatcher_wakeup.set()
 
 
@@ -116,3 +117,40 @@ def test_queue_serializes_different_keys(tmp_path: Path, monkeypatch) -> None:
     assert jobs.get_job(j2.id).status == "completed"
     # Serial: a fully finishes before b starts.
     assert order == ["start:a", "end:a", "start:b", "end:b"]
+
+
+def test_cancel_queued_job_never_starts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(jobs, "JOBS_DIR", tmp_path)
+    _reset_queue_state()
+
+    started: list[str] = []
+
+    def slow() -> dict:
+        started.append("ran")
+        time.sleep(0.5)
+        return {"ok": True}
+
+    blocker = jobs.start_job(
+        "enrich_sites", slow, meta={"limit": 1}, queue_key="enrich_sites:limit=1"
+    )
+    target = jobs.start_job(
+        "apify_contact_crawl",
+        lambda: started.append("apify") or {"ok": True},
+        meta={"domains_chars": 100},
+        queue_key="apify_contact_crawl:test",
+    )
+    assert jobs.queue_position(target.id) == 1
+
+    out = jobs.cancel_job(target.id, reason="user kill")
+    assert out["ok"] is True
+    assert out["removed_from_queue"] is True
+    assert jobs.get_job(target.id).status == "cancelled"
+    assert jobs.queue_position(target.id) is None
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if jobs.get_job(blocker.id).status in ("completed", "failed", "cancelled"):
+            break
+        time.sleep(0.05)
+    assert "apify" not in started
+    assert jobs.get_job(target.id).status == "cancelled"

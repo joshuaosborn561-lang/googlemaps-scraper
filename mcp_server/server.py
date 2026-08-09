@@ -999,10 +999,11 @@ def scrape_maps(
 def get_job_status(job_id: str) -> str:
     """Poll a background job. Use after run_leads / pipeline_run / enrich_* return job_id.
 
-    status may be queued|running|completed|failed|stalled|interrupted.
+    status may be queued|running|completed|failed|stalled|interrupted|cancelled.
     Always includes `live` progress: jobs_total, jobs_done, jobs_pending,
     businesses_found, percent_complete, updated_at, eta_seconds, queue_position.
     stalled = no heartbeat for ~5 minutes. interrupted = orphaned on process boot.
+    cancelled = removed via cancel_job (never auto-resumed).
     Same plan_path / queue_key re-calls attach instead of duplicating.
     """
     from mcp_server.jobs import STALL_SECONDS, get_job, live_progress, queue_position
@@ -1047,8 +1048,11 @@ def get_job_status(job_id: str) -> str:
     elif job.status == "queued":
         public["next_step"] = (
             f"Waiting in queue (position {public['queue_position']}). "
-            "Do not start a duplicate — keep polling this job_id."
+            "Do not start a duplicate — keep polling this job_id. "
+            "Call cancel_job to remove it from the queue."
         )
+    elif job.status == "cancelled":
+        public["next_step"] = "Job cancelled. It will not auto-resume on restart."
     return _json(public)
 
 
@@ -1113,10 +1117,33 @@ def list_job_queue() -> str:
             "note": (
                 "Re-calling a tool with the same plan_path / table / rows "
                 "attaches to the active job_id — it does not start a duplicate "
-                "or kill the current run."
+                "or kill the current run. Use cancel_job(job_id) to remove a "
+                "queued job before it starts."
             ),
         }
     )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Cancel background job",
+        readOnlyHint=False,
+        openWorldHint=False,
+        destructiveHint=False,
+    )
+)
+def cancel_job(job_id: str, reason: str = "") -> str:
+    """Cancel a queued or running background job by job_id.
+
+    Queued jobs are removed immediately and never start (use this to kill an
+    Apify crawl still waiting behind enrich). Running jobs are flagged; the
+    worker exits as cancelled when able. Cancelled jobs are never auto-resumed
+    on container restart. Does not call Apify abort — if an actor runId already
+    exists, abort that separately.
+    """
+    from mcp_server.jobs import cancel_job as _cancel
+
+    return _json(_cancel(job_id, reason=reason or ""))
 
 
 def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
