@@ -325,12 +325,93 @@ def run_serp_batch(queries: list[str], *, max_cost: float) -> dict[str, Any]:
     }
 
 
+def serp_pending_where(binding: sb.SourceBinding) -> str:
+    """Rows SERP should process.
+
+    Includes classic unresolved rows plus Maps-resolved empties (no name /
+    business_name / domain) that have not yet been tried via SERP. Without the
+    empty-fallback branch, suite mailings Maps marks resolved at low confidence
+    (e.g. Maple Ave → Weitzman candidate, score 0.2, nothing written) would
+    never enter the SERP queue.
+    """
+    empty_bits = [
+        f"COALESCE({binding.domain_column}, '') = ''",
+        "COALESCE(business_name, '') = ''",
+    ]
+    if binding.name_column:
+        empty_bits.append(f"COALESCE({binding.name_column}, '') = ''")
+    empty = " AND ".join(empty_bits)
+    not_serp_yet = (
+        "(resolve_raw IS NULL OR COALESCE(resolve_raw->>'via', '') <> 'serp')"
+    )
+    unresolved = (
+        f"({binding.resolved_column} IS NULL OR {binding.resolved_column} = false)"
+    )
+    maps_empty = f"(({empty}) AND {not_serp_yet})"
+    base = f"({unresolved} OR {maps_empty})"
+    if binding.where:
+        return f"({base}) AND ({binding.where})"
+    return base
+
+
+def count_serp_pending(binding: sb.SourceBinding) -> int:
+    n = sb.rpc(
+        binding,
+        "pp_count_rows",
+        {
+            "p_schema": binding.schema,
+            "p_table": binding.table,
+            "p_where": serp_pending_where(binding),
+        },
+    )
+    return int(n or 0)
+
+
+def fetch_serp_pending(
+    binding: sb.SourceBinding, *, limit: int = 100, offset: int = 0
+) -> list[dict[str, Any]]:
+    cols = [
+        binding.key_column,
+        binding.resolved_column,
+        binding.confidence_column,
+        binding.domain_column,
+    ]
+    for c in (
+        binding.address_column,
+        binding.name_column,
+        binding.city_column,
+        "website",
+        "phone",
+        "place_id",
+        "business_name",
+        "resolve_raw",
+    ):
+        if c and c not in cols:
+            cols.append(c)
+    rows = sb.rpc(
+        binding,
+        "pp_select_rows",
+        {
+            "p_schema": binding.schema,
+            "p_table": binding.table,
+            "p_columns": cols,
+            "p_where": serp_pending_where(binding),
+            "p_order_by": binding.order_by or binding.key_column,
+            "p_limit": int(limit) if limit and limit > 0 else 100,
+            "p_offset": int(offset or 0),
+        },
+    )
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict)]
+
+
 def estimate(
     binding: sb.SourceBinding,
     *,
     limit: int = 0,
 ) -> dict[str, Any]:
-    n = sb.count_pending(binding, details_only=False)
+    n = count_serp_pending(binding)
     if limit and limit > 0:
         n = min(n, int(limit))
     cost = round(estimate_cost_usd(n), 4)
@@ -348,6 +429,7 @@ def estimate(
         "blocked": blocked,
         "block_reason": "exceeds_APIFY_MAX_COST_USD" if blocked else None,
         "actor": _serp_actor(),
+        "pending_mode": "unresolved_or_maps_empty",
         "cost_model": {
             "start_usd": COST_START_USD,
             "per_serp_usd": COST_SERP_USD,
@@ -460,7 +542,7 @@ def run(
             if remaining_cap <= 0:
                 break
         fetch_lim = batch_n if not remaining_cap else min(batch_n, remaining_cap)
-        rows = sb.fetch_pending(binding, limit=fetch_lim, details_only=False)
+        rows = fetch_serp_pending(binding, limit=fetch_lim)
         if not rows:
             break
         if not total:

@@ -2038,16 +2038,18 @@ def resolve_via_serp(
     batch_size: int = 100,
     background: bool = True,
 ) -> str:
-    """Resolve unresolved source rows via Google SERP when Maps returns a building.
+    """Resolve source rows via Google SERP when Maps returns an empty building.
 
-    Same source-binding pattern as resolve_places. Batches address strings into
-    apify/google-search-scraper (100 queries/run, $0.0045/SERP + $0.001 start),
-    parses top organic results with OpenAI for company/domain/phone, writes
+    Same source-binding pattern as resolve_places. Queues unresolved rows plus
+    Maps-resolved empties (no operator_name/business_name/domain) that have not
+    yet been tried via SERP — so low-confidence Maps misses stay eligible.
+    Batches address strings into apify/google-search-scraper (100 queries/run,
+    $0.0045/SERP + $0.001 start), parses top organic with OpenAI, writes
     operator_name, business_name, domain, website, phone, confidence, and marks
-    resolved (resumable per row — already-resolved rows are skipped).
+    resolved (resumable — rows with resolve_raw.via='serp' are skipped).
 
     Proven on suite addresses like "3102 MAPLE AVE STE 500, DALLAS TX" where
-    Maps Place Details returned an empty building but SERP found Weitzman.
+    Maps left a Weitzman candidate at confidence 0.2 with nothing written.
     Prefer estimate_resolve_via_serp for a cost check first. Counts only.
     """
     _ensure_repo_cwd()

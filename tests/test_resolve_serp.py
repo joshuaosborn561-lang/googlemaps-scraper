@@ -67,6 +67,24 @@ def test_match_item_to_query() -> None:
     assert hit["organicResults"][0]["title"] == "Weitzman"
 
 
+def test_serp_pending_where_includes_maps_empty() -> None:
+    binding = sb.SourceBinding(
+        project_id="kemvx",
+        schema="permit_parcel",
+        table="operators",
+        key_column="operator_address",
+        address_column="operator_address",
+        name_column="operator_name",
+        domain_column="domain",
+        resolved_column="resolved",
+    )
+    where = rs.serp_pending_where(binding)
+    assert "resolved = false" in where
+    assert "business_name" in where
+    assert "via" in where
+    assert "serp" in where
+
+
 def test_run_writes_hit_and_marks_resolved(monkeypatch) -> None:
     binding = sb.SourceBinding(
         project_id="kemvx",
@@ -84,27 +102,23 @@ def test_run_writes_hit_and_marks_resolved(monkeypatch) -> None:
     row = {
         "operator_address": "3102 MAPLE AVE STE 500, DALLAS TX",
         "operator_name": None,
-        "resolved": False,
+        "resolved": True,  # Maps already marked resolved with empty writeback
+        "business_name": None,
+        "domain": None,
     }
     patches: list[tuple] = []
 
     monkeypatch.setattr(rs.sb, "resolve_binding", lambda **kw: binding)
     monkeypatch.setattr(rs.sb, "validate_binding", lambda b: None)
     monkeypatch.setattr(rs.sb, "ensure_writeback_columns", lambda b: {"ok": True})
-    monkeypatch.setattr(rs.sb, "count_pending", lambda b, details_only=False: 1)
-    monkeypatch.setattr(
-        rs.sb,
-        "fetch_pending",
-        lambda b, limit=100, details_only=False: [row] if limit else [],
-    )
-    # Second fetch returns empty to end the loop.
+    monkeypatch.setattr(rs, "count_serp_pending", lambda b: 1)
     calls = {"n": 0}
 
-    def _fetch(b, limit=100, details_only=False):
+    def _fetch(b, limit=100, offset=0):
         calls["n"] += 1
         return [row] if calls["n"] == 1 else []
 
-    monkeypatch.setattr(rs.sb, "fetch_pending", _fetch)
+    monkeypatch.setattr(rs, "fetch_serp_pending", _fetch)
     monkeypatch.setattr(
         rs.sb,
         "patch_row",
@@ -182,7 +196,7 @@ def test_estimate_only_no_spend(monkeypatch) -> None:
     )
     monkeypatch.setattr(rs.sb, "resolve_binding", lambda **kw: binding)
     monkeypatch.setattr(rs.sb, "validate_binding", lambda b: None)
-    monkeypatch.setattr(rs.sb, "count_pending", lambda b, details_only=False: 50)
+    monkeypatch.setattr(rs, "count_serp_pending", lambda b: 50)
     monkeypatch.setattr(rs.settings, "apify_max_cost_usd", 5.0)
 
     out = rs.run(
