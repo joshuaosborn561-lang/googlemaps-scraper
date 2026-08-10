@@ -2775,12 +2775,20 @@ def classify_leads(
         from gmscraper.cli import pick_vertical
         from gmscraper.config import DEFAULT_CATEGORIES
         from gmscraper.llm import default_workers
+        from mcp_server.jobs import current_job_id, heartbeat as _hb
 
         text = icp
         if not text and vertical:
             text, _ = pick_vertical(DEFAULT_CATEGORIES, vertical)
         if not text:
             raise ValueError("Provide icp text or a known vertical.")
+        # Capture job id on the worker thread — classify pool threads have no TLS.
+        jid = current_job_id()
+
+        def _prog(**p: Any) -> None:
+            if jid:
+                _hb(jid, **p)
+
         store = _store()
         llm = _llm()
         res = classify.run(
@@ -2803,7 +2811,7 @@ def classify_leads(
             plan_id=scope["plan_id"],
             run_id=scope["run_id"],
             client_tag=scope["client_tag"],
-            on_progress=lambda **p: _job_progress(**p),
+            on_progress=_prog,
         )
         out: dict[str, Any] = {
             "result": res,
@@ -3905,12 +3913,19 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 def _classify(mm=m) -> dict[str, Any]:
                     from gmscraper import classify
                     from gmscraper.llm import default_workers
+                    from mcp_server.jobs import current_job_id, heartbeat as _hb
 
                     store = _store()
                     llm = _llm()
                     text = (mm.get("icp") or "").strip()
                     if not text:
                         raise ValueError("classify_leads resume missing icp")
+                    jid = current_job_id()
+
+                    def _prog(**p: Any) -> None:
+                        if jid:
+                            _hb(jid, **p)
+
                     res = classify.run(
                         store,
                         llm,
@@ -3935,7 +3950,7 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                         plan_id=str(mm.get("plan_id") or ""),
                         run_id=str(mm.get("run_id") or ""),
                         client_tag=str(mm.get("client_tag") or ""),
-                        on_progress=lambda **p: _job_progress(**p),
+                        on_progress=_prog,
                     )
                     return {
                         "result": res,
