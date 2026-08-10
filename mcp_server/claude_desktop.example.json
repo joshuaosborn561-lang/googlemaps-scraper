@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "google-maps-scraper": {
+      "command": "/ABS/PATH/TO/googlemaps-scraper/.venv/bin/python",
+      "args": ["-m", "mcp_server"],
+      "cwd": "/ABS/PATH/TO/googlemaps-scraper",
+      "env": {
+        "RAPIDAPI_KEY": "replace-me",
+        "OPENAI_API_KEY": "replace-me",
+        "MAPS_PLAN": "ultra",
+        "MAPS_QUOTA_RESET_DAY": "1",
+        "GMAPS_API_BASE": "https://google-maps-scraper-production-41db.up.railway.app"
+      }
+    }
+  }
+}
