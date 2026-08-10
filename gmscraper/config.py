@@ -227,6 +227,11 @@ class Settings:
             "APIFY_CONTENT_ACTOR", "apify/website-content-crawler"
         )
     )
+    apify_google_search_actor: str = field(
+        default_factory=lambda: _env(
+            "APIFY_GOOGLE_SEARCH_ACTOR", "apify/google-search-scraper"
+        )
+    )
     apify_max_cost_usd: float = field(
         default_factory=lambda: _env_float("APIFY_MAX_COST_USD", 5.0)
     )

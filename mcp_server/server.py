@@ -1963,6 +1963,216 @@ def resolve_places(
 
 @mcp.tool(
     annotations=_ann(
+        'Estimate resolve_via_serp cost',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
+    )
+)
+def estimate_resolve_via_serp(
+    schema: str = "permit_parcel",
+    table: str = "operators",
+    key_column: str = "operator_address",
+    address_column: str = "operator_address",
+    name_column: str = "operator_name",
+    city_column: str = "",
+    where: str = "",
+    order_by: str = "",
+    limit: int = 0,
+    project_id: str = "",
+) -> str:
+    """Read-only Apify SERP cost estimate for resolve_via_serp. No spend.
+
+    Pricing model: $0.001 actor start per batch of ≤100 queries + $0.0045/SERP.
+    OpenAI parse cost is separate (LLM bill). Prefer this before starting a run.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import resolve_serp as rs
+    from mcp_server.errors import tool_error_from_exception
+
+    resolved_project = _default_leads_project_id(table, project_id)
+    resolved_schema = _default_source_schema(table, schema)
+    try:
+        return _json(
+            rs.run(
+                schema=resolved_schema,
+                table=table,
+                key_column=key_column,
+                address_column=address_column,
+                name_column=name_column,
+                city_column=city_column,
+                where=where,
+                order_by=order_by,
+                limit=int(limit or 0),
+                project_id=resolved_project,
+                estimate_only=True,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Resolve via Google SERP (Apify + OpenAI)',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
+    )
+)
+def resolve_via_serp(
+    schema: str = "permit_parcel",
+    table: str = "operators",
+    key_column: str = "operator_address",
+    address_column: str = "operator_address",
+    name_column: str = "operator_name",
+    city_column: str = "",
+    where: str = "",
+    order_by: str = "",
+    limit: int = 0,
+    min_confidence: float = 0.35,
+    project_id: str = "",
+    estimate_only: bool = False,
+    batch_size: int = 100,
+    background: bool = True,
+) -> str:
+    """Resolve unresolved source rows via Google SERP when Maps returns a building.
+
+    Same source-binding pattern as resolve_places. Batches address strings into
+    apify/google-search-scraper (100 queries/run, $0.0045/SERP + $0.001 start),
+    parses top organic results with OpenAI for company/domain/phone, writes
+    operator_name, business_name, domain, website, phone, confidence, and marks
+    resolved (resumable per row — already-resolved rows are skipped).
+
+    Proven on suite addresses like "3102 MAPLE AVE STE 500, DALLAS TX" where
+    Maps Place Details returned an empty building but SERP found Weitzman.
+    Prefer estimate_resolve_via_serp for a cost check first. Counts only.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import resolve_serp as rs
+    from mcp_server.errors import tool_error_from_exception
+
+    resolved_project = _default_leads_project_id(table, project_id)
+    resolved_schema = _default_source_schema(table, schema)
+
+    def _run() -> dict[str, Any]:
+        try:
+            return rs.run(
+                schema=resolved_schema,
+                table=table,
+                key_column=key_column,
+                address_column=address_column,
+                name_column=name_column,
+                city_column=city_column,
+                where=where,
+                order_by=order_by,
+                limit=int(limit or 0),
+                min_confidence=float(min_confidence or 0.35),
+                project_id=resolved_project,
+                estimate_only=bool(estimate_only),
+                batch_size=int(batch_size or 100),
+                on_progress=lambda **p: _job_progress(**p),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return tool_error_from_exception(exc)
+
+    if background and _http_mode() and not estimate_only:
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
+
+        meta = {
+            "schema": resolved_schema,
+            "table": table,
+            "key_column": key_column,
+            "address_column": address_column,
+            "name_column": name_column,
+            "city_column": city_column,
+            "where": where,
+            "order_by": order_by,
+            "limit": limit,
+            "min_confidence": min_confidence,
+            "batch_size": int(batch_size or 100),
+            "project_id": resolved_project,
+        }
+        before = find_active_by_queue_key(make_queue_key("resolve_via_serp", meta))
+        job = start_job("resolve_via_serp", _run, meta=meta, priority=10)
+        return _json(
+            _started_response(job, attached=before is not None and before.id == job.id)
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Build operators from parcels (in-state filter)',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
+    )
+)
+def build_operators(
+    states: str = "TX",
+    dry_run: bool = True,
+    min_parcels: int = 1,
+    project_id: str = "",
+    background: bool = True,
+) -> str:
+    """Rebuild permit_parcel.operators from parcels, keeping in-state mailings only.
+
+    Aggregates parcels by mailing_address. Drops out-of-state mailings using a
+    state parser that catches ', ST ZIP', 'ST, ZIP' (e.g. 'BOSTON MA, 02109'),
+    'ST ZIP', and full state names — the prior filter leaked comma-after-state
+    forms (Boston MA, Nashville TN, Atlanta GA, Chicago IL, etc.).
+
+    dry_run=true (default): report counts + OOS examples, no truncate.
+    dry_run=false: truncate+replace operators via replace_permit_parcel_operators
+    (requires SUPABASE_INGEST_SECRET). Destructive — run dry_run first.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import operators as ops
+    from mcp_server.errors import tool_error_from_exception
+
+    resolved_project = _default_leads_project_id("operators", project_id)
+
+    def _run() -> dict[str, Any]:
+        try:
+            return ops.build_operators(
+                states=states or "TX",
+                project_id=resolved_project,
+                dry_run=bool(dry_run),
+                min_parcels=int(min_parcels or 1),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return tool_error_from_exception(exc)
+
+    if background and _http_mode() and not dry_run:
+        from mcp_server.jobs import start_job
+
+        job = start_job(
+            "build_operators",
+            _run,
+            meta={
+                "states": states,
+                "dry_run": False,
+                "min_parcels": min_parcels,
+                "project_id": resolved_project,
+            },
+            priority=10,
+        )
+        return _json(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "message": f"Poll get_job_status with job_id={job.id}.",
+            }
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=_ann(
         'Pipeline: resolve → enrich → extract → contacts',
         read_only=False,
         destructive=False,
@@ -3430,6 +3640,43 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                     meta={**meta, "project_id": pid, "auto_resumed_from": rec.get("id")},
                     queue_key=make_queue_key(
                         "resolve_places", {**meta, "project_id": pid}
+                    ),
+                    priority=int(meta.get("priority") or 10),
+                )
+                resumed.append(job.id)
+            elif kind == "resolve_via_serp" and meta.get("table"):
+                from gmscraper import resolve_serp as rs
+
+                m = dict(meta)
+                table = m.get("table") or ""
+                pid = _default_leads_project_id(table, str(m.get("project_id") or ""))
+                schema = _default_source_schema(table, str(m.get("schema") or ""))
+                m["project_id"] = pid
+                m["schema"] = schema
+
+                def _resolve_serp(mm=m) -> dict[str, Any]:
+                    return rs.run(
+                        schema=mm.get("schema") or "",
+                        table=mm.get("table") or "",
+                        key_column=mm.get("key_column") or "operator_address",
+                        address_column=mm.get("address_column") or "",
+                        name_column=mm.get("name_column") or "",
+                        city_column=mm.get("city_column") or "",
+                        where=mm.get("where") or "",
+                        order_by=mm.get("order_by") or "",
+                        limit=int(mm.get("limit") or 0),
+                        min_confidence=float(mm.get("min_confidence") or 0.35),
+                        batch_size=int(mm.get("batch_size") or 100),
+                        project_id=mm.get("project_id") or "",
+                        on_progress=lambda **p: _job_progress(**p),
+                    )
+
+                job = start_job(
+                    "resolve_via_serp",
+                    _resolve_serp,
+                    meta={**meta, "project_id": pid, "auto_resumed_from": rec.get("id")},
+                    queue_key=make_queue_key(
+                        "resolve_via_serp", {**meta, "project_id": pid}
                     ),
                     priority=int(meta.get("priority") or 10),
                 )

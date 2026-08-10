@@ -1,0 +1,77 @@
+"""build_operators in-state aggregation (OOS mailing exclusion)."""
+
+from __future__ import annotations
+
+from gmscraper.operators import _aggregate_parcels
+
+
+def test_aggregate_drops_oos_city_st_comma_zip() -> None:
+    parcels = [
+        {
+            "mailing_address": "100 MAIN ST, DALLAS TX 75201",
+            "owner_name": "TX HOLDINGS LLC",
+            "county": "Dallas",
+            "assessed_value": 5_000_000,
+            "parcel_address": "100 Main St Dallas",
+        },
+        {
+            "mailing_address": "BOSTON MA, 02109",
+            "owner_name": "EAST COAST LLC",
+            "county": "Dallas",
+            "assessed_value": 50_000_000,
+            "parcel_address": "Big Dallas Tower",
+        },
+        {
+            "mailing_address": "NASHVILLE TN, 37203",
+            "owner_name": "MUSIC ROW LP",
+            "county": "Harris",
+            "assessed_value": 20_000_000,
+            "parcel_address": "Houston Site",
+        },
+        {
+            "mailing_address": "ATLANTA GA, 30309",
+            "owner_name": "PEACH LLC",
+            "county": "Travis",
+            "assessed_value": 10_000_000,
+            "parcel_address": "Austin Site",
+        },
+        {
+            "mailing_address": "CHICAGO IL, 60601",
+            "owner_name": "WINDY LLC",
+            "county": "Dallas",
+            "assessed_value": 8_000_000,
+            "parcel_address": "Dallas Site",
+        },
+        {
+            "mailing_address": "INDIANAPOLIS IN, 46204",
+            "owner_name": "HOOSIER LLC",
+            "county": "Dallas",
+            "assessed_value": 7_000_000,
+            "parcel_address": "Dallas Site 2",
+        },
+        {
+            "mailing_address": "CONSHOHOCKEN PA, 19428",
+            "owner_name": "PA HOLDCO",
+            "county": "Dallas",
+            "assessed_value": 6_000_000,
+            "parcel_address": "Dallas Site 3",
+        },
+        {
+            "mailing_address": "200 CONGRESS AVE, AUSTIN TEXAS 78701",
+            "owner_name": "AUSTIN TX LLC",
+            "county": "Travis",
+            "assessed_value": 1_000_000,
+            "parcel_address": "200 Congress",
+        },
+    ]
+    rows, stats = _aggregate_parcels(parcels, allowed_states={"TX"})
+    assert stats["parcels_oos"] == 6
+    assert stats["parcels_kept"] == 2
+    assert stats["operators"] == 2
+    addrs = {r["operator_address"] for r in rows}
+    assert any("DALLAS" in a.upper() for a in addrs)
+    assert any("AUSTIN" in a.upper() for a in addrs)
+    assert not any("BOSTON" in a.upper() for a in addrs)
+    assert not any("NASHVILLE" in a.upper() for a in addrs)
+    # Top by portfolio among kept is Dallas mailing.
+    assert rows[0]["portfolio_value"] == 5_000_000
