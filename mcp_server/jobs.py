@@ -153,6 +153,19 @@ def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
         table = meta.get("table") or ""
         pid = meta.get("project_id") or ""
         return f"resolve_via_serp:{pid}:{schema}.{table}"
+    if kind == "resolve_addresses":
+        schema = meta.get("schema") or ""
+        table = meta.get("table") or ""
+        pid = meta.get("project_id") or ""
+        method = meta.get("method") or "auto"
+        return f"resolve_addresses:{pid}:{schema}.{table}:{method}:limit={meta.get('limit') or 0}"
+    if kind == "run_owner_lane":
+        pid = meta.get("project_id") or ""
+        states = meta.get("states") or ""
+        return (
+            f"run_owner_lane:{pid}:{states}:limit={meta.get('resolve_limit') or 0}:"
+            f"method={meta.get('method') or 'serp'}"
+        )
     if kind == "pipeline_run":
         schema = meta.get("schema") or ""
         table = meta.get("table") or ""

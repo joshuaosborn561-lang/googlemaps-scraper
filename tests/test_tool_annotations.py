@@ -54,4 +54,17 @@ def test_never_emit_bare_no_approval_received() -> None:
 def test_debug_echo_body() -> None:
     out = server.debug_echo("lane-probe")
     assert '"echo": "lane-probe"' in out
-    assert "1.7.0" in out
+    assert "1.8.0" in out
+
+
+def test_primary_outcome_tools_registered() -> None:
+    tools = {t.name: t for t in server._iter_registered_tools()}
+    for name in (
+        "resolve_addresses",
+        "run_owner_lane",
+        "run_lead_list",
+        "outcome_status",
+    ):
+        assert name in tools, name
+        dump = tools[name].annotations.model_dump()
+        assert dump.get("destructive_hint") is False

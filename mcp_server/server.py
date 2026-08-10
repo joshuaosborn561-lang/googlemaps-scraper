@@ -1,8 +1,8 @@
 """Claude MCP server for the Google Maps lead scraper.
 
-Exposes planning, estimation, stage runners, full pipeline runs, and optional
-Railway job history. No connector auth and no spend-approval gate. Paid tools
-use a saved plan from plan_leads / estimate_cost (plan_path or latest plan).
+v1.8 outcome-first: prefer resolve_addresses / run_owner_lane / run_lead_list /
+outcome_status. Low-level stage tools remain for advanced/debug use.
+No connector auth and no spend-approval gate.
 """
 
 from __future__ import annotations
@@ -30,13 +30,14 @@ mcp = MCPServer(
     name="google-maps-scraper",
     title="Google Maps Scraper",
     description=(
-        "Build US local-business lead CSVs from Google Maps. "
-        "Use when the user asks for niche + city/state leads, owners, or emails."
+        "Outcome-first US B2B lead MCP: resolve addresses to businesses, "
+        "owner/mailing lanes, and local Maps lead lists. Prefer "
+        "resolve_addresses / run_owner_lane / run_lead_list / outcome_status."
     ),
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.7.0",
+    version="1.8.0",
 )
 
 
@@ -492,8 +493,322 @@ def health() -> str:
             "categories_file": str(DEFAULT_CATEGORIES),
             "remote_api": _remote_base() or None,
             "auth": "none",
+            "mcp_version": "1.8.0",
+            "primary_tools": [
+                "resolve_addresses",
+                "run_owner_lane",
+                "run_lead_list",
+                "outcome_status",
+            ],
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Primary outcome tools (v1.8) — Claude should prefer these over stage tools.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Resolve addresses → businesses',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
+    )
+)
+def resolve_addresses(
+    addresses: str = "",
+    schema: str = "",
+    table: str = "",
+    key_column: str = "",
+    address_column: str = "",
+    name_column: str = "",
+    city_column: str = "",
+    where: str = "",
+    order_by: str = "",
+    project_id: str = "",
+    method: str = "auto",
+    limit: int = 0,
+    min_confidence: float = 0.35,
+    estimate_only: bool = False,
+    background: bool = True,
+) -> str:
+    """PRIMARY: Find the business at each address (name, website/domain, phone).
+
+    Pass ``addresses`` as a newline-separated list or JSON array for ad-hoc
+    lookups ("here are these addresses — what businesses are there?").
+    OR bind a Supabase table (schema/table/key_column/address_column).
+
+    method=auto uses Maps then SERP for building-only / empty misses (recommended).
+    method=serp / maps forces one engine. Returns outcome + useful_with_domain;
+    outcome=no_value means nothing usable was written — say so to the user.
+    Prefer estimate_only=true once before a paid run. Counts + results (ad-hoc).
+    """
+    _ensure_repo_cwd()
+    from gmscraper import outcomes as oc
+    from mcp_server.errors import tool_error_from_exception
+
+    resolved_project = _default_leads_project_id(table, project_id)
+    resolved_schema = _default_source_schema(table, schema) if table else schema
+
+    def _run() -> dict[str, Any]:
+        try:
+            return oc.resolve_addresses(
+                addresses=addresses,
+                schema=resolved_schema,
+                table=table,
+                key_column=key_column,
+                address_column=address_column,
+                name_column=name_column,
+                city_column=city_column,
+                where=where,
+                order_by=order_by,
+                project_id=resolved_project,
+                method=method,
+                limit=int(limit or 0),
+                min_confidence=float(min_confidence or 0.35),
+                estimate_only=bool(estimate_only),
+                on_progress=lambda **p: _job_progress(**p),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return tool_error_from_exception(exc)
+
+    # Ad-hoc lists are usually small — run sync unless background forced with table.
+    ad_hoc = bool((addresses or "").strip()) and not table
+    if background and _http_mode() and not estimate_only and not ad_hoc:
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
+
+        meta = {
+            "kind": "resolve_addresses",
+            "table": table,
+            "schema": resolved_schema,
+            "method": method,
+            "limit": limit,
+            "project_id": resolved_project,
+        }
+        before = find_active_by_queue_key(make_queue_key("resolve_addresses", meta))
+        job = start_job("resolve_addresses", _run, meta=meta, priority=10)
+        return _json(
+            _started_response(job, attached=before is not None and before.id == job.id)
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Owner / mailing-operator lane',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
+    )
+)
+def run_owner_lane(
+    states: str = "TX",
+    rebuild_operators: bool = False,
+    operators_dry_run: bool = True,
+    min_parcels: int = 1,
+    resolve_limit: int = 0,
+    method: str = "serp",
+    min_confidence: float = 0.35,
+    project_id: str = "",
+    estimate_only: bool = False,
+    background: bool = True,
+) -> str:
+    """PRIMARY: Parcel mailing addresses → real operator companies (any market).
+
+    Collapses shell LLCs by mailing address (operators table), drops out-of-state
+    mailings when rebuilding, then resolves company/domain via SERP (default) or
+    auto Maps→SERP. Pass states= for the market (e.g. 'TX' or 'NY,NJ,CT').
+
+    rebuild_operators=false (default) resolves the current operators table.
+    Set rebuild_operators=true and review dry_run before operators_dry_run=false
+    (destructive replace). Prefer estimate_only=true first. Read outcome +
+    useful_with_domain — not resolved row counts.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import outcomes as oc
+    from mcp_server.errors import tool_error_from_exception
+
+    resolved_project = _default_leads_project_id("operators", project_id)
+
+    def _run() -> dict[str, Any]:
+        try:
+            return oc.run_owner_lane(
+                states=states or "TX",
+                rebuild_operators=bool(rebuild_operators),
+                operators_dry_run=bool(operators_dry_run),
+                min_parcels=int(min_parcels or 1),
+                resolve_limit=int(resolve_limit or 0),
+                method=method or "serp",
+                min_confidence=float(min_confidence or 0.35),
+                project_id=resolved_project,
+                estimate_only=bool(estimate_only),
+                on_progress=lambda **p: _job_progress(**p),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return tool_error_from_exception(exc)
+
+    if background and _http_mode() and not estimate_only:
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
+
+        meta = {
+            "states": states,
+            "rebuild_operators": rebuild_operators,
+            "resolve_limit": resolve_limit,
+            "method": method,
+            "project_id": resolved_project,
+        }
+        before = find_active_by_queue_key(make_queue_key("run_owner_lane", meta))
+        job = start_job("run_owner_lane", _run, meta=meta, priority=10)
+        return _json(
+            _started_response(job, attached=before is not None and before.id == job.id)
+        )
+    return _json(_run())
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Local Maps lead list (plan→scrape)',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
+    )
+)
+def run_lead_list(
+    brief: str = "",
+    client_tag: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    states: str = "",
+    zips: str = "",
+    vertical: str = "",
+    estimate_only: bool = False,
+    background: bool = True,
+) -> str:
+    """PRIMARY: Build a local-business lead list from Google Maps for a niche+geo.
+
+    One-shot wrapper: plans from the brief (or explicit geo/vertical), returns
+    cost when estimate_only=true, otherwise starts the scrape pipeline. Pass
+    client_tag for multi-client isolation (peterson, basco, …).
+
+    For address→business on a pasted list, use resolve_addresses instead.
+    For parcel/mailing owners, use run_owner_lane instead.
+    """
+    _ensure_repo_cwd()
+    from mcp_server.errors import tool_error_from_exception
+
+    text = (brief or "").strip()
+    if not text:
+        bits = [b for b in (vertical, states or center) if b]
+        text = " in ".join(bits) if bits else ""
+    if states and states.upper() not in text.upper():
+        text = f"{text} in {states}".strip()
+    if len(text) < 8:
+        return _json(
+            {
+                "started": False,
+                "outcome": "nothing_to_do",
+                "warning": "Pass brief= (niche + geography) or vertical= + states=/center=.",
+            }
+        )
+
+    try:
+        plan_raw = plan_leads(
+            brief=text,
+            zips=zips,
+            center=center,
+            radius_miles=float(radius_miles or 0),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
+
+    if estimate_only:
+        try:
+            plan_obj = json.loads(plan_raw) if isinstance(plan_raw, str) else plan_raw
+        except json.JSONDecodeError:
+            return plan_raw if isinstance(plan_raw, str) else _json(plan_raw)
+        if isinstance(plan_obj, dict):
+            plan_obj = {
+                **plan_obj,
+                "estimate_only": True,
+                "started": False,
+                "primary_tool": "run_lead_list",
+                "client_tag": client_tag or None,
+            }
+            return _json(plan_obj)
+        return plan_raw if isinstance(plan_raw, str) else _json(plan_raw)
+
+    try:
+        plan_obj = json.loads(plan_raw) if isinstance(plan_raw, str) else plan_raw
+    except json.JSONDecodeError:
+        return plan_raw if isinstance(plan_raw, str) else _json(plan_raw)
+
+    if isinstance(plan_obj, dict) and (
+        plan_obj.get("blocked") or str(plan_obj.get("status") or "").upper() == "BLOCKED"
+    ):
+        return _json(
+            {
+                "started": False,
+                "blocked": True,
+                "outcome": "blocked",
+                "warning": "Plan blocked by Maps hard limit — see plan details.",
+                "plan": plan_obj,
+            }
+        )
+
+    plan_path = ""
+    if isinstance(plan_obj, dict):
+        plan_path = str(plan_obj.get("plan_path") or plan_obj.get("path") or "")
+
+    return run_leads(
+        plan_path=plan_path,
+        background=background,
+        client_tag=client_tag,
+    )
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Outcome status / inventory',
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
+    )
+)
+def outcome_status(
+    scope: str = "operators",
+    client_tag: str = "",
+    project_id: str = "",
+    schema: str = "",
+    table: str = "",
+) -> str:
+    """PRIMARY: Honest inventory — useful domains/names, not just resolved flags.
+
+    scope='operators' (default) reports owner-lane truth: with_domain,
+    building_name_no_web, pending_for_serp, cost to finish, project_id.
+    Use whenever the user asks "where are we" or something looks stuck.
+    """
+    _ensure_repo_cwd()
+    from gmscraper import outcomes as oc
+    from mcp_server.errors import tool_error_from_exception
+
+    try:
+        return _json(
+            oc.status(
+                scope=scope,
+                client_tag=client_tag,
+                project_id=project_id or _default_leads_project_id(table or "operators", ""),
+                schema=schema,
+                table=table,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
 
 
 @mcp.tool(
@@ -1890,19 +2205,11 @@ def resolve_places(
     details_only: bool = False,
     background: bool = True,
 ) -> str:
-    """Turn source-table rows into business identities via Maps.
+    """[Advanced] Prefer PRIMARY tool `resolve_addresses` (method=auto|maps).
 
+    Turn source-table rows into business identities via Maps.
     Generic source binding: pass schema/table/columns — no hardcoded vertical.
-    strategy = 'address' | 'name' | 'address_then_name'.
-    Flow: text search → score → on min_confidence pass, Place Details for
-    website/phone → write website, domain (host), phone, place_id, confidence.
-    Cost is ~2 Maps requests per resolved row (details skipped on rejects).
-
-    details_only=True backfills Place Details for rows that already have
-    place_id but an empty website (ignores resolved=true). Use this after a
-    run that wrote place_id before details were wired.
-    For a cost check prefer estimate_resolve_places (read-only).
-    Response is counts only.
+    For a cost check prefer estimate_resolve_places (read-only). Counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_places as rp
@@ -2043,7 +2350,9 @@ def resolve_via_serp(
     batch_size: int = 100,
     background: bool = True,
 ) -> str:
-    """Resolve source rows via Google SERP when Maps returns a building pin.
+    """[Advanced] Prefer PRIMARY `resolve_addresses` or `run_owner_lane`.
+
+    Resolve source rows via Google SERP when Maps returns a building pin.
 
     Eligibility is missing domain+website and not yet tried via SERP — NOT
     resolved=false. Maps often stamps resolved=true while writing the building
@@ -3418,8 +3727,15 @@ def _health_payload() -> dict[str, Any]:
         return {
             "ok": True,
             "service": "google-maps-scraper-mcp",
+            "version": "1.8.0",
             "transport": "streamable-http",
             "mcp_path": "/mcp",
+            "primary_tools": [
+                "resolve_addresses",
+                "run_owner_lane",
+                "run_lead_list",
+                "outcome_status",
+            ],
             "supabase_project_ref": _supabase_project_ref(supabase_url),
             "apify_token_set": apify_set,
             "apify_token_valid": apify_ok,
