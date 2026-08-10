@@ -22,11 +22,11 @@ from .store import Store
 from .zips import haversine_miles, parse_center
 
 SYSTEM = (
-    "You qualify local businesses for a B2B prospect list. You are given an "
-    "ICP definition and evidence about one business. Decide whether the "
-    "business matches the ICP. Judge only from the evidence: if the evidence "
-    "is too thin to tell, say so with low confidence rather than guessing. "
-    "Be strict about the ICP's exclusions."
+    "You answer simple yes/no ICP checks for local businesses. "
+    "Read the ICP questions, glance at the Maps category and website text, "
+    "and answer quickly. Do not reason at length. Do not invent facts. "
+    "Only reject what is obviously out. When unsure, answer yes with lower "
+    "confidence rather than over-filtering."
 )
 
 SCHEMA = {
@@ -39,7 +39,7 @@ SCHEMA = {
     "required": ["in_icp", "confidence", "reason"],
 }
 
-PROMPT = """ICP:
+PROMPT = """ICP (simple yes/no checks):
 {icp}
 
 BUSINESS
@@ -54,10 +54,10 @@ WEBSITE TEXT (homepage/about/team/contact, truncated):
 {text}
 ---
 
-Does this business match the ICP? Answer with JSON:
-  in_icp     - true only if it clearly matches and hits none of the exclusions
-  confidence - 0.0 to 1.0, how sure you are given the evidence
-  reason     - one short sentence citing the evidence you used
+Answer with JSON only:
+  in_icp     - true unless the business is obviously not an ICP match
+  confidence - 0.0 to 1.0
+  reason     - one short phrase (not a paragraph)
 """
 
 NO_SITE_NOTE = "(no website text available - judge from the Maps data alone)"
