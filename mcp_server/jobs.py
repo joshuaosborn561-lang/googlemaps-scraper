@@ -218,7 +218,12 @@ def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
         rows_chars = meta.get("rows_chars")
         fingerprint = meta.get("rows_fingerprint") or rows_chars or ""
         return f"enrich_waterfall:{need}:{max_tier}:{fingerprint}"
-    if kind in ("enrich_sites", "crawl_team_pages", "classify_leads"):
+    if kind in (
+        "enrich_sites",
+        "crawl_team_pages",
+        "classify_leads",
+        "extract_team_contacts",
+    ):
         scope = _scope_fingerprint(meta)
         base = f"{kind}:limit={meta.get('limit') or 0}"
         if scope:

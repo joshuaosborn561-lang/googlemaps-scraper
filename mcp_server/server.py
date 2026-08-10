@@ -2055,6 +2055,14 @@ def extract_team_contacts(
     use_llm: bool = True,
     target_titles: str = "",
     background: bool = True,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_path: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    client_tag: str = "",
+    source: str = "",
 ) -> str:
     """Parse person+title pairs from team/about page text into contacts.
 
@@ -2062,15 +2070,42 @@ def extract_team_contacts(
     Defaults to use_llm=true — heuristic path invents title/company "names".
     target_titles = comma-separated roles to prefer (vertical-agnostic default
     when empty: owner, founder, president, principal, partner, chief, …).
+
+    Scope with city/state/main_category/plan_path/plan_id/run_id/client_tag/
+    source so a Lane-2 client pull does not LLM-extract the whole DB.
     """
     _ensure_repo_cwd()
     from gmscraper import team_contacts
 
-    store = _store()
+    scope = _normalize_scope(
+        city=city,
+        state=state,
+        main_category=main_category,
+        plan_path=plan_path,
+        plan_id=plan_id,
+        run_id=run_id,
+        client_tag=client_tag,
+        source=source,
+    )
+    scoped = _scope_is_set(scope)
     titles = [t.strip() for t in (target_titles or "").split(",") if t.strip()]
 
     def _run() -> dict[str, Any]:
+        store = _store()
         llm = _llm() if use_llm else None
+        domains = None
+        if scoped:
+            # Prefer domains that already have team/about pages crawled.
+            domains = store.domains_with_ok_sites(
+                limit=limit or None,
+                city=scope["city"],
+                state=scope["state"],
+                main_category=scope["main_category"],
+                plan_id=scope["plan_id"],
+                run_id=scope["run_id"],
+                client_tag=scope["client_tag"],
+                source=scope["source"],
+            )
         res = team_contacts.run(
             store,
             limit=limit or None,
@@ -2078,32 +2113,40 @@ def extract_team_contacts(
             icp_only=icp_only,
             use_llm=use_llm,
             llm=llm,
+            domains=domains,
             target_titles=titles or None,
         )
-        out: dict[str, Any] = {"result": res, "stats": store.stats()}
+        out: dict[str, Any] = {
+            "result": res,
+            "stats": store.stats(),
+            "scope": scope,
+            "domains": len(domains) if domains is not None else res.get("domains"),
+        }
         if llm:
             out["llm_spend"] = llm.spend_line()
         return out
 
     if background and _http_mode():
-        from mcp_server.jobs import start_job
+        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
+        meta = {
+            "limit": limit,
+            "icp_only": icp_only,
+            "use_llm": use_llm,
+            "target_titles": titles or None,
+            **scope,
+        }
+        before = find_active_by_queue_key(make_queue_key("extract_team_contacts", meta))
         job = start_job(
             "extract_team_contacts",
             _run,
-            meta={
-                "limit": limit,
-                "icp_only": icp_only,
-                "use_llm": use_llm,
-                "target_titles": titles or None,
-            },
+            meta=meta,
+            priority=10 if scoped else 5,
         )
         return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
+            _started_response(
+                job, attached=before is not None and before.id == job.id
+            )
         )
     return _json(_run())
 
