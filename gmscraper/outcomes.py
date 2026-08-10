@@ -597,6 +597,8 @@ def run_owner_lane(
     rebuild_operators: bool = False,
     operators_dry_run: bool = True,
     min_parcels: int = 1,
+    center: str = "",
+    radius_miles: float = 0.0,
     resolve_limit: int = 0,
     method: str = "serp",
     min_confidence: float = 0.35,
@@ -606,9 +608,9 @@ def run_owner_lane(
 ) -> dict[str, Any]:
     """Owner / mailing-operator lane (parcel shells → company at mailing address).
 
-    Generic — pass ``states`` for any market. Does not hardcode a vertical.
-    Default: do not rebuild operators (destructive); resolve via SERP on the
-    current operators table. Set rebuild_operators=true after reviewing a dry_run.
+    Generic — pass ``states`` and optional ``center`` + ``radius_miles`` (parcel
+    ZIP radius). Does not hardcode a vertical. Default: do not rebuild operators
+    (destructive); resolve via SERP on the current operators table.
     """
     pid = (
         project_id
@@ -618,30 +620,43 @@ def run_owner_lane(
     out: dict[str, Any] = {
         "lane": "owner_operators",
         "states": states,
+        "center": (center or "").strip() or None,
+        "radius_miles": float(radius_miles or 0) or None,
+        "min_parcels": int(float(min_parcels or 1)),
         "project_id": pid,
         "per_stage": {},
         "estimate_only": bool(estimate_only),
     }
 
     if rebuild_operators:
+        # dry_run wins whenever operators_dry_run OR estimate_only — never
+        # continue into resolve after a dry rebuild (that looked like an error
+        # / hung job when min_parcels filtering made the call slower).
+        dry = bool(operators_dry_run) or bool(estimate_only)
         op_res = ops.build_operators(
             states=states,
             project_id=pid,
-            dry_run=bool(operators_dry_run) or bool(estimate_only),
-            min_parcels=int(min_parcels or 1),
+            dry_run=dry,
+            min_parcels=int(float(min_parcels or 1)),
+            center=center or "",
+            radius_miles=float(radius_miles or 0),
         )
         out["per_stage"]["build_operators"] = op_res
-        if op_res.get("dry_run") and rebuild_operators and not estimate_only:
+        if dry:
             out["started"] = False
-            out["outcome"] = "needs_confirm"
+            out["outcome"] = "needs_confirm" if operators_dry_run else "estimate"
             out["warning"] = (
-                "build_operators ran dry_run=true (default). Re-call with "
-                "operators_dry_run=false to truncate+replace, or set "
-                "rebuild_operators=false to resolve the current table."
+                "build_operators dry_run only — no table replace, no SERP. "
+                "Re-call with operators_dry_run=false (and estimate_only=false) "
+                "to truncate+replace, then resolve. Pass center+radius_miles to "
+                "scope parcels (e.g. Dallas, TX / 60)."
             )
+            out["operators"] = op_res.get("operators")
+            out["geo"] = op_res.get("geo")
+            out["top_operators_sample"] = op_res.get("top_operators_sample")
             return out
 
-    # Status + resolve
+    # Status + resolve (only when not doing a dry rebuild)
     st = status(scope="operators", project_id=pid)
     out["per_stage"]["status_before"] = {
         k: st.get(k) for k in ("inventory", "serp_estimate", "outcome", "warning")

@@ -610,6 +610,8 @@ def run_owner_lane(
     rebuild_operators: bool = False,
     operators_dry_run: bool = True,
     min_parcels: int = 1,
+    center: str = "",
+    radius_miles: float = 0.0,
     resolve_limit: int = 0,
     method: str = "serp",
     min_confidence: float = 0.35,
@@ -619,14 +621,14 @@ def run_owner_lane(
 ) -> str:
     """PRIMARY: Parcel mailing addresses → real operator companies (any market).
 
-    Collapses shell LLCs by mailing address (operators table), drops out-of-state
-    mailings when rebuilding, then resolves company/domain via SERP (default) or
-    auto Maps→SERP. Pass states= for the market (e.g. 'TX' or 'NY,NJ,CT').
+    Collapses shell LLCs by mailing address, drops out-of-state mailings, then
+    resolves company/domain via SERP (default). Scope the *buildings* with
+    center + radius_miles (parcel ZIP radius), e.g. center='Dallas, TX',
+    radius_miles=60 — mailing may still be elsewhere in states=.
 
-    rebuild_operators=false (default) resolves the current operators table.
-    Set rebuild_operators=true and review dry_run before operators_dry_run=false
-    (destructive replace). Prefer estimate_only=true first. Read outcome +
-    useful_with_domain — not resolved row counts.
+    rebuild_operators=true + operators_dry_run=true returns counts/sample only
+    (no replace, no SERP). Then operators_dry_run=false to replace. Read
+    outcome + operators count — not resolved flags.
     """
     _ensure_repo_cwd()
     from gmscraper import outcomes as oc
@@ -640,7 +642,9 @@ def run_owner_lane(
                 states=states or "TX",
                 rebuild_operators=bool(rebuild_operators),
                 operators_dry_run=bool(operators_dry_run),
-                min_parcels=int(min_parcels or 1),
+                min_parcels=int(float(min_parcels or 1)),
+                center=center or "",
+                radius_miles=float(radius_miles or 0),
                 resolve_limit=int(resolve_limit or 0),
                 method=method or "serp",
                 min_confidence=float(min_confidence or 0.35),
@@ -651,12 +655,19 @@ def run_owner_lane(
         except Exception as exc:  # noqa: BLE001
             return tool_error_from_exception(exc)
 
-    if background and _http_mode() and not estimate_only:
+    # Dry rebuilds are sync-friendly (no spend) — avoid background job opacity.
+    dry_rebuild = bool(rebuild_operators) and (
+        bool(operators_dry_run) or bool(estimate_only)
+    )
+    if background and _http_mode() and not estimate_only and not dry_rebuild:
         from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
         meta = {
             "states": states,
             "rebuild_operators": rebuild_operators,
+            "center": center,
+            "radius_miles": radius_miles,
+            "min_parcels": min_parcels,
             "resolve_limit": resolve_limit,
             "method": method,
             "project_id": resolved_project,
@@ -2435,19 +2446,16 @@ def build_operators(
     states: str = "TX",
     dry_run: bool = True,
     min_parcels: int = 1,
+    center: str = "",
+    radius_miles: float = 0.0,
     project_id: str = "",
     background: bool = True,
 ) -> str:
-    """Rebuild permit_parcel.operators from parcels, keeping in-state mailings only.
+    """[Advanced] Prefer PRIMARY `run_owner_lane(rebuild_operators=true, …)`.
 
-    Aggregates parcels by mailing_address. Drops out-of-state mailings using a
-    state parser that catches ', ST ZIP', 'ST, ZIP' (e.g. 'BOSTON MA, 02109'),
-    'ST ZIP', and full state names — the prior filter leaked comma-after-state
-    forms (Boston MA, Nashville TN, Atlanta GA, Chicago IL, etc.).
-
-    dry_run=true (default): report counts + OOS examples, no truncate.
-    dry_run=false: truncate+replace operators via replace_permit_parcel_operators
-    (requires SUPABASE_INGEST_SECRET). Destructive — run dry_run first.
+    Rebuild permit_parcel.operators from parcels. In-state mailing filter +
+    optional center/radius_miles on parcel ZIPs (buildings in market).
+    dry_run=true (default): counts + top sample, no truncate.
     """
     _ensure_repo_cwd()
     from gmscraper import operators as ops
@@ -2461,7 +2469,9 @@ def build_operators(
                 states=states or "TX",
                 project_id=resolved_project,
                 dry_run=bool(dry_run),
-                min_parcels=int(min_parcels or 1),
+                min_parcels=int(float(min_parcels or 1)),
+                center=center or "",
+                radius_miles=float(radius_miles or 0),
             )
         except Exception as exc:  # noqa: BLE001
             return tool_error_from_exception(exc)

@@ -18,7 +18,7 @@ No login/auth and no spend-approval gate. Never ask the user to approve a tool.
 | User intent | Call this |
 |---|---|
 | "Here are addresses — what businesses are there?" | `resolve_addresses` |
-| "Find companies at these mailing/operator addresses" / owner lane | `run_owner_lane` (estimate first) |
+| "Find companies at these mailing/operator addresses" / owner lane | `run_owner_lane` (pass states= + optional center/radius_miles; dry rebuild first) |
 | "Get me X companies in Y" (local biz list from Maps) | `run_lead_list` |
 | "Where do we stand? / is it stuck?" | `outcome_status` |
 | "How much will this cost?" | same tool with `estimate_only=true` |

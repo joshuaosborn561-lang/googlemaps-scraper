@@ -1,12 +1,8 @@
-"""Build permit_parcel.operators from parcels with in-state mailing filter.
+"""Build permit_parcel.operators from parcels with in-state + geo filters.
 
-Aggregates parcels by mailing_address, drops out-of-state mailings, and
-replaces the operators table via ``replace_permit_parcel_operators``.
-
-The prior filter only caught ``, ST ZIP`` (comma before the state code).
-Mailings abbreviated as ``CITY ST, ZIP`` (comma between state and zip) —
-e.g. ``BOSTON MA, 02109`` — leaked through. ``address_state.extract_state``
-covers both shapes plus full state names.
+Aggregates parcels by mailing_address, drops out-of-state mailings, optionally
+keeps only parcels whose ZIP centroid falls inside center+radius, and replaces
+the operators table via ``replace_permit_parcel_operators``.
 """
 
 from __future__ import annotations
@@ -19,6 +15,7 @@ from urllib import error, request
 
 from . import address_state
 from . import source_binding as sb
+from . import zips as zips_mod
 
 PAGE_SIZE = 2000
 
@@ -29,6 +26,13 @@ def _env(name: str, default: str = "") -> str:
 
 def _normalize_address(addr: str) -> str:
     return " ".join((addr or "").upper().split())
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _local_llc(owner_name: str, states: set[str]) -> bool:
@@ -43,17 +47,44 @@ def _local_llc(owner_name: str, states: set[str]) -> bool:
     return False
 
 
+def _resolve_radius_zips(
+    *,
+    center: str,
+    radius_miles: float,
+    allowed_states: set[str],
+) -> tuple[set[str], dict[str, Any]]:
+    """ZIP codes whose centroids fall inside the radius (optionally state-limited)."""
+    lat, lng, label = zips_mod.parse_center(center)
+    rows = zips_mod.within_radius(
+        lat,
+        lng,
+        float(radius_miles),
+        states=sorted(allowed_states) if allowed_states else None,
+    )
+    zset = {r["zip"] for r in rows if r.get("zip")}
+    meta = {
+        "center": label,
+        "center_lat": lat,
+        "center_lng": lng,
+        "radius_miles": float(radius_miles),
+        "zips_in_radius": len(zset),
+    }
+    return zset, meta
+
+
 def _aggregate_parcels(
     parcels: list[dict[str, Any]],
     *,
     allowed_states: set[str],
+    zip_allow: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Group parcels by mailing address; keep in-state only."""
+    """Group parcels by mailing address; keep in-state (+ optional ZIP radius)."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     stats = {
         "parcels_read": 0,
         "parcels_no_mailing": 0,
         "parcels_oos": 0,
+        "parcels_outside_radius": 0,
         "parcels_kept": 0,
         "operators": 0,
     }
@@ -63,6 +94,11 @@ def _aggregate_parcels(
         if not mailing:
             stats["parcels_no_mailing"] += 1
             continue
+        if zip_allow is not None:
+            pz = str(p.get("zip") or "").strip()[:5]
+            if not pz or pz not in zip_allow:
+                stats["parcels_outside_radius"] += 1
+                continue
         if not address_state.is_in_states(mailing, allowed_states):
             stats["parcels_oos"] += 1
             continue
@@ -71,7 +107,6 @@ def _aggregate_parcels(
 
     rows: list[dict[str, Any]] = []
     for norm, items in groups.items():
-        # Prefer original casing from first kept row.
         operator_address = str(items[0].get("mailing_address") or norm).strip()
         llcs: dict[str, int] = defaultdict(int)
         counties: set[str] = set()
@@ -86,10 +121,7 @@ def _aggregate_parcels(
             county = str(it.get("county") or "").strip()
             if county:
                 counties.add(county)
-            try:
-                val = int(float(it.get("assessed_value") or 0))
-            except (TypeError, ValueError):
-                val = 0
+            val = _as_int(it.get("assessed_value"), 0)
             total_value += val
             if val >= largest:
                 largest = val
@@ -136,6 +168,8 @@ def _fetch_all_parcels(binding: sb.SourceBinding) -> list[dict[str, Any]]:
         "mailing_address",
         "parcel_address",
         "assessed_value",
+        "zip",
+        "city",
     ]
     while True:
         batch = sb.rpc(
@@ -202,15 +236,20 @@ def build_operators(
     project_id: str = "",
     dry_run: bool = False,
     min_parcels: int = 1,
+    center: str = "",
+    radius_miles: float = 0.0,
 ) -> dict[str, Any]:
-    """Rebuild permit_parcel.operators from parcels, in-state mailings only.
+    """Rebuild permit_parcel.operators from parcels.
 
-    states: comma-separated USPS codes to keep (default TX).
+    states: comma-separated USPS codes for mailing filter (default TX).
+    center + radius_miles: keep only parcels whose ZIP is inside the radius
+    (market geography). Mailing can still be elsewhere in ``states``.
     dry_run: aggregate + report counts without truncating operators.
     """
     allowed = {s.strip().upper() for s in (states or "TX").split(",") if s.strip()}
     if not allowed:
         raise ValueError("states= is required (e.g. states='TX')")
+    min_n = max(1, _as_int(min_parcels, 1))
 
     creds = sb.resolve_credentials(
         project_id or _env("LEADS_SUPABASE_PROJECT_ID", "kemvxzhcxvynmoutwdrh")
@@ -225,11 +264,27 @@ def build_operators(
         supabase_key=creds["key"],
     )
 
+    geo_meta: dict[str, Any] = {}
+    zip_allow: set[str] | None = None
+    if (center or "").strip() and float(radius_miles or 0) > 0:
+        zip_allow, geo_meta = _resolve_radius_zips(
+            center=center.strip(),
+            radius_miles=float(radius_miles),
+            allowed_states=allowed,
+        )
+        if not zip_allow:
+            raise ValueError(
+                f"No ZIPs found within {radius_miles} mi of {center!r} "
+                f"for states={sorted(allowed)}"
+            )
+
     parcels = _fetch_all_parcels(binding)
-    rows, stats = _aggregate_parcels(parcels, allowed_states=allowed)
-    if min_parcels and min_parcels > 1:
+    rows, stats = _aggregate_parcels(
+        parcels, allowed_states=allowed, zip_allow=zip_allow
+    )
+    if min_n > 1:
         before = len(rows)
-        rows = [r for r in rows if int(r["parcels"]) >= int(min_parcels)]
+        rows = [r for r in rows if _as_int(r.get("parcels"), 0) >= min_n]
         stats["operators_below_min_parcels"] = before - len(rows)
         stats["operators"] = len(rows)
 
@@ -258,15 +313,29 @@ def build_operators(
     except Exception:  # noqa: BLE001
         pass
 
+    top_sample = [
+        {
+            "operator_address": r["operator_address"],
+            "parcels": r["parcels"],
+            "portfolio_value": r["portfolio_value"],
+            "top_llc": r.get("top_llc"),
+            "counties": r.get("counties"),
+        }
+        for r in rows[:15]
+    ]
+
     out: dict[str, Any] = {
         "project_id": binding.project_id,
         "states": sorted(allowed),
         "dry_run": bool(dry_run),
+        "min_parcels": min_n,
         **stats,
+        "geo": geo_meta or None,
         "oos_examples_in_current_top": oos_examples,
+        "top_operators_sample": top_sample,
         "note": (
-            "In-state filter uses address_state.extract_state — catches "
-            "', ST ZIP', 'ST, ZIP', 'ST ZIP', and full state names."
+            "Mailing must parse to allowed states. Optional center+radius filters "
+            "by parcel ZIP centroid (buildings in market), not mailing city."
         ),
     }
     if dry_run:

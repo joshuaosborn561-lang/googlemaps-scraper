@@ -63,32 +63,39 @@ def test_resolve_addresses_ad_hoc_serp(monkeypatch) -> None:
     assert out["results"][0]["business_name"] == "Weitzman"
 
 
-def test_run_owner_lane_estimate(monkeypatch) -> None:
+def test_run_owner_lane_dry_rebuild_stops_before_resolve(monkeypatch) -> None:
     monkeypatch.setattr(
-        oc,
-        "status",
+        oc.ops,
+        "build_operators",
         lambda **kw: {
-            "inventory": {"pending_for_serp": 100, "useful_with_domain": 1},
-            "serp_estimate": {"estimated_cost_usd": 0.5, "blocked": False},
-            "outcome": "in_progress_or_stuck",
-        },
-    )
-    monkeypatch.setattr(
-        oc,
-        "resolve_addresses",
-        lambda **kw: {
+            "dry_run": True,
+            "operators": 100,
+            "min_parcels": kw.get("min_parcels", 1),
+            "geo": {"radius_miles": kw.get("radius_miles") or None},
+            "top_operators_sample": [],
             "started": False,
-            "estimate_only": True,
-            "blocked": False,
-            "useful_with_domain": 0,
-            "outcome": "ok",
-            "per_stage": {},
+            "operators_built": 0,
         },
     )
-    out = oc.run_owner_lane(states="TX", estimate_only=True, resolve_limit=100)
-    assert out["lane"] == "owner_operators"
-    assert out["estimate_only"] is True
-    assert "resolve" in out["per_stage"]
+
+    def _boom(**kw):
+        raise AssertionError("resolve must not run after dry rebuild")
+
+    monkeypatch.setattr(oc, "resolve_addresses", _boom)
+    monkeypatch.setattr(oc, "status", _boom)
+    out = oc.run_owner_lane(
+        states="TX",
+        rebuild_operators=True,
+        operators_dry_run=True,
+        min_parcels=2,
+        center="Dallas, TX",
+        radius_miles=60,
+        estimate_only=True,
+    )
+    assert out["outcome"] in ("needs_confirm", "estimate")
+    assert out["started"] is False
+    assert "resolve" not in out["per_stage"]
+    assert out["per_stage"]["build_operators"]["operators"] == 100
 
 
 def test_primary_tools_in_playbook() -> None:

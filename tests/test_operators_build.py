@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from gmscraper.operators import _aggregate_parcels
+from gmscraper.operators import _aggregate_parcels, _as_int
+
+
+def test_as_int_tolerates_float_strings() -> None:
+    assert _as_int(2) == 2
+    assert _as_int(2.0) == 2
+    assert _as_int("2") == 2
+    assert _as_int(None, 1) == 1
 
 
 def test_aggregate_drops_oos_city_st_comma_zip() -> None:
@@ -75,3 +82,43 @@ def test_aggregate_drops_oos_city_st_comma_zip() -> None:
     assert not any("NASHVILLE" in a.upper() for a in addrs)
     # Top by portfolio among kept is Dallas mailing.
     assert rows[0]["portfolio_value"] == 5_000_000
+
+
+def test_aggregate_radius_zip_and_min_parcels() -> None:
+    parcels = [
+        {
+            "mailing_address": "100 MAIN ST, DALLAS TX 75201",
+            "owner_name": "A LLC",
+            "county": "Dallas",
+            "assessed_value": 1_000_000,
+            "parcel_address": "P1",
+            "zip": "75201",
+        },
+        {
+            "mailing_address": "100 MAIN ST, DALLAS TX 75201",
+            "owner_name": "B LLC",
+            "county": "Dallas",
+            "assessed_value": 2_000_000,
+            "parcel_address": "P2",
+            "zip": "75201",
+        },
+        {
+            "mailing_address": "200 CONGRESS, AUSTIN TX 78701",
+            "owner_name": "C LLC",
+            "county": "Travis",
+            "assessed_value": 9_000_000,
+            "parcel_address": "P3",
+            "zip": "78701",
+        },
+    ]
+    rows, stats = _aggregate_parcels(
+        parcels, allowed_states={"TX"}, zip_allow={"75201"}
+    )
+    assert stats["parcels_outside_radius"] == 1
+    assert stats["parcels_kept"] == 2
+    assert len(rows) == 1
+    assert rows[0]["parcels"] == 2
+    assert rows[0]["portfolio_value"] == 3_000_000
+    # min_parcels=2 keeps this operator
+    kept = [r for r in rows if r["parcels"] >= 2]
+    assert len(kept) == 1
