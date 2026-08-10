@@ -612,6 +612,7 @@ def run_owner_lane(
     min_parcels: int = 1,
     center: str = "",
     radius_miles: float = 0.0,
+    owner_segments: str = "private",
     resolve_limit: int = 0,
     method: str = "serp",
     min_confidence: float = 0.35,
@@ -621,14 +622,14 @@ def run_owner_lane(
 ) -> str:
     """PRIMARY: Parcel mailing addresses → real operator companies (any market).
 
-    Collapses shell LLCs by mailing address, drops out-of-state mailings, then
-    resolves company/domain via SERP (default). Scope the *buildings* with
-    center + radius_miles (parcel ZIP radius), e.g. center='Dallas, TX',
-    radius_miles=60 — mailing may still be elsewhere in states=.
+    Collapses shell LLCs by mailing, drops OOS mailings, classifies each
+    operator into owner_segment (municipal / education / healthcare /
+    housing_authority / utility_transit / religious_nonprofit / private /
+    unclassified). Rebuild stores ALL segments; resolve spends only on
+    owner_segments= (default 'private'). Use 'education' or 'all' etc. later
+    without rebuilding. Scope buildings with center + radius_miles.
 
-    rebuild_operators=true + operators_dry_run=true returns counts/sample only
-    (no replace, no SERP). Then operators_dry_run=false to replace. Read
-    outcome + operators count — not resolved flags.
+    Dry rebuild returns segments= breakdown + top_by_segment before confirm.
     """
     _ensure_repo_cwd()
     from gmscraper import outcomes as oc
@@ -645,6 +646,7 @@ def run_owner_lane(
                 min_parcels=int(float(min_parcels or 1)),
                 center=center or "",
                 radius_miles=float(radius_miles or 0),
+                owner_segments=owner_segments or "private",
                 resolve_limit=int(resolve_limit or 0),
                 method=method or "serp",
                 min_confidence=float(min_confidence or 0.35),
@@ -668,6 +670,7 @@ def run_owner_lane(
             "center": center,
             "radius_miles": radius_miles,
             "min_parcels": min_parcels,
+            "owner_segments": owner_segments,
             "resolve_limit": resolve_limit,
             "method": method,
             "project_id": resolved_project,

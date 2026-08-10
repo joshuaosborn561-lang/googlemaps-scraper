@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from . import operators as ops
+from . import owner_segment as oseg
 from . import resolve_places, resolve_serp, source_binding as sb
 from .config import settings
 from .mapsdata import MapsDataClient, domain_of
@@ -599,6 +600,7 @@ def run_owner_lane(
     min_parcels: int = 1,
     center: str = "",
     radius_miles: float = 0.0,
+    owner_segments: str = "private",
     resolve_limit: int = 0,
     method: str = "serp",
     min_confidence: float = 0.35,
@@ -609,20 +611,24 @@ def run_owner_lane(
     """Owner / mailing-operator lane (parcel shells → company at mailing address).
 
     Generic — pass ``states`` and optional ``center`` + ``radius_miles`` (parcel
-    ZIP radius). Does not hardcode a vertical. Default: do not rebuild operators
-    (destructive); resolve via SERP on the current operators table.
+    ZIP radius). ``owner_segments`` selects which classified rows to resolve
+    (default ``private``). Rebuild classifies everyone and keeps all segments
+    in the table; resolve only spends on the selected segments.
     """
     pid = (
         project_id
         or __import__("os").environ.get("LEADS_SUPABASE_PROJECT_ID", "")
         or "kemvxzhcxvynmoutwdrh"
     )
+    segments = oseg.parse_segments(owner_segments)
     out: dict[str, Any] = {
         "lane": "owner_operators",
         "states": states,
         "center": (center or "").strip() or None,
         "radius_miles": float(radius_miles or 0) or None,
         "min_parcels": int(float(min_parcels or 1)),
+        "owner_segments": segments,
+        "owner_segments_param": owner_segments or "private",
         "project_id": pid,
         "per_stage": {},
         "estimate_only": bool(estimate_only),
@@ -630,8 +636,7 @@ def run_owner_lane(
 
     if rebuild_operators:
         # dry_run wins whenever operators_dry_run OR estimate_only — never
-        # continue into resolve after a dry rebuild (that looked like an error
-        # / hung job when min_parcels filtering made the call slower).
+        # continue into resolve after a dry rebuild.
         dry = bool(operators_dry_run) or bool(estimate_only)
         op_res = ops.build_operators(
             states=states,
@@ -642,21 +647,29 @@ def run_owner_lane(
             radius_miles=float(radius_miles or 0),
         )
         out["per_stage"]["build_operators"] = op_res
+        out["segments"] = op_res.get("segments")
+        out["top_by_segment"] = op_res.get("top_by_segment")
         if dry:
+            seg_counts = op_res.get("segments") or {}
+            private_n = int((seg_counts.get("private") or {}).get("operators") or 0)
+            total_n = int(op_res.get("operators") or 0)
             out["started"] = False
             out["outcome"] = "needs_confirm" if operators_dry_run else "estimate"
             out["warning"] = (
                 "build_operators dry_run only — no table replace, no SERP. "
-                "Re-call with operators_dry_run=false (and estimate_only=false) "
-                "to truncate+replace, then resolve. Pass center+radius_miles to "
-                "scope parcels (e.g. Dallas, TX / 60)."
+                f"Segment breakdown is in segments=. Default resolve filter is "
+                f"{segments} ({private_n} private of {total_n} total). "
+                "Re-call with operators_dry_run=false to replace (keeps all "
+                "segments on the table), then resolve with owner_segments=."
             )
             out["operators"] = op_res.get("operators")
             out["geo"] = op_res.get("geo")
             out["top_operators_sample"] = op_res.get("top_operators_sample")
             return out
 
-    # Status + resolve (only when not doing a dry rebuild)
+    # Resolve only selected segments — others remain on the table untouched.
+    seg_where = f"owner_segment IN {oseg.sql_in_list(segments)}"
+
     st = status(scope="operators", project_id=pid)
     out["per_stage"]["status_before"] = {
         k: st.get(k) for k in ("inventory", "serp_estimate", "outcome", "warning")
@@ -668,6 +681,7 @@ def run_owner_lane(
         key_column="operator_address",
         address_column="operator_address",
         name_column="operator_name",
+        where=seg_where,
         order_by="portfolio_value DESC NULLS LAST",
         project_id=pid,
         method=method,
@@ -684,7 +698,8 @@ def run_owner_lane(
     out["useful_with_domain"] = resolve_res.get("useful_with_domain")
     out["inventory_after"] = resolve_res.get("inventory_after")
     out["done_means"] = (
-        "Operator rows with real company name + domain. Next: enrich people "
-        "on those domains. resolved=true without domain is not done."
+        "Selected owner_segments rows with real company name + domain. "
+        "Other segments stay on the table for a later pass. "
+        "resolved=true without domain is not done."
     )
     return out

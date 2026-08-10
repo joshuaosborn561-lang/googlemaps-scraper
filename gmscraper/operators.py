@@ -14,6 +14,7 @@ from typing import Any
 from urllib import error, request
 
 from . import address_state
+from . import owner_segment as oseg
 from . import source_binding as sb
 from . import zips as zips_mod
 
@@ -131,6 +132,10 @@ def _aggregate_parcels(
         top_llc = ""
         if llcs:
             top_llc = sorted(llcs.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        segment = oseg.classify_owner_segment(
+            top_llc=top_llc,
+            operator_address=operator_address,
+        )
         rows.append(
             {
                 "operator_address": operator_address,
@@ -143,6 +148,7 @@ def _aggregate_parcels(
                 "top_llc": top_llc or None,
                 "top_parcel_address": top_parcel or None,
                 "has_local_llc": has_local,
+                "owner_segment": segment,
                 "operator_name": None,
                 "domain": None,
                 "website": None,
@@ -313,16 +319,33 @@ def build_operators(
     except Exception:  # noqa: BLE001
         pass
 
+    breakdown = oseg.segment_breakdown(rows)
     top_sample = [
         {
             "operator_address": r["operator_address"],
             "parcels": r["parcels"],
             "portfolio_value": r["portfolio_value"],
             "top_llc": r.get("top_llc"),
+            "owner_segment": r.get("owner_segment"),
             "counties": r.get("counties"),
         }
         for r in rows[:15]
     ]
+    # Per-segment tops so dry-run QA is not dominated by cities/ISDs.
+    top_by_segment: dict[str, list[dict[str, Any]]] = {}
+    for seg in oseg.SEGMENTS:
+        seg_rows = [r for r in rows if r.get("owner_segment") == seg][:5]
+        if not seg_rows:
+            continue
+        top_by_segment[seg] = [
+            {
+                "operator_address": r["operator_address"],
+                "parcels": r["parcels"],
+                "portfolio_value": r["portfolio_value"],
+                "top_llc": r.get("top_llc"),
+            }
+            for r in seg_rows
+        ]
 
     out: dict[str, Any] = {
         "project_id": binding.project_id,
@@ -331,17 +354,47 @@ def build_operators(
         "min_parcels": min_n,
         **stats,
         "geo": geo_meta or None,
+        "segments": breakdown,
+        "segment_vocabulary": list(oseg.SEGMENTS),
         "oos_examples_in_current_top": oos_examples,
         "top_operators_sample": top_sample,
+        "top_by_segment": top_by_segment,
         "note": (
             "Mailing must parse to allowed states. Optional center+radius filters "
-            "by parcel ZIP centroid (buildings in market), not mailing city."
+            "by parcel ZIP centroid (buildings in market), not mailing city. "
+            "owner_segment is classified at rebuild and stored on every row; "
+            "resolve filters by owner_segments= (default private) without dropping "
+            "other segments from the table."
         ),
     }
     if dry_run:
         out["started"] = False
         out["operators_built"] = 0
         return out
+
+    # Ensure classification column exists before replace.
+    op_binding = sb.SourceBinding(
+        project_id=binding.project_id,
+        schema="permit_parcel",
+        table="operators",
+        key_column="operator_address",
+        address_column="operator_address",
+        supabase_url=binding.supabase_url,
+        supabase_key=binding.supabase_key,
+    )
+    try:
+        sb.rpc(
+            op_binding,
+            "pp_ensure_columns",
+            {
+                "p_schema": "permit_parcel",
+                "p_table": "operators",
+                "p_columns": {"owner_segment": "text"},
+            },
+        )
+    except Exception:  # noqa: BLE001
+        # Replace may still work if column already exists / RPC allows extras.
+        pass
 
     secret = _env("SUPABASE_INGEST_SECRET") or _env("LEADS_SUPABASE_INGEST_SECRET")
     if not secret:
