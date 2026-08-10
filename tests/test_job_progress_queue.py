@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def test_live_progress_from_progress_dict(tmp_path: Path, monkeypatch) -> None:
 def _reset_queue_state() -> None:
     with jobs._lock:
         jobs._wait_queue.clear()
-        jobs._running_id = None
+        jobs._running_ids.clear()
         jobs._jobs.clear()
         jobs._fns.clear()
         jobs._cancel_requested.clear()
@@ -116,6 +117,95 @@ def test_queue_serializes_different_keys(tmp_path: Path, monkeypatch) -> None:
     assert jobs.get_job(j1.id).status == "completed"
     assert jobs.get_job(j2.id).status == "completed"
     # Serial: a fully finishes before b starts.
+    assert order == ["start:a", "end:a", "start:b", "end:b"]
+
+
+def test_classify_runs_beside_heavy_job(tmp_path: Path, monkeypatch) -> None:
+    """Light kinds (classify_leads) must not wait behind a long heavy runner."""
+    monkeypatch.setattr(jobs, "JOBS_DIR", tmp_path)
+    monkeypatch.setenv("MCP_MAX_PARALLEL_JOBS", "2")
+    _reset_queue_state()
+
+    overlap: list[str] = []
+    barrier = threading.Event()
+
+    def heavy() -> dict:
+        overlap.append("heavy_start")
+        barrier.wait(timeout=2.0)
+        overlap.append("heavy_end")
+        return {"ok": True}
+
+    def classify() -> dict:
+        overlap.append("classify_start")
+        # Prove we started while heavy is still running.
+        assert "heavy_start" in overlap and "heavy_end" not in overlap
+        barrier.set()
+        overlap.append("classify_end")
+        return {"ok": True}
+
+    h = jobs.start_job(
+        "resolve_via_serp",
+        heavy,
+        meta={"table": "operators"},
+        queue_key="heavy:serp",
+        priority=10,
+    )
+    # Let heavy claim the slot first.
+    time.sleep(0.05)
+    c = jobs.start_job(
+        "classify_leads",
+        classify,
+        meta={"limit": 100},
+        queue_key="classify:test",
+        priority=20,
+    )
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if (
+            jobs.get_job(h.id).status == "completed"
+            and jobs.get_job(c.id).status == "completed"
+        ):
+            break
+        time.sleep(0.05)
+
+    assert jobs.get_job(h.id).status == "completed"
+    assert jobs.get_job(c.id).status == "completed"
+    assert "classify_start" in overlap
+    # Classify overlapped heavy (did not wait for heavy_end first).
+    assert overlap.index("classify_start") < overlap.index("heavy_end")
+
+
+def test_two_heavy_jobs_still_serial(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(jobs, "JOBS_DIR", tmp_path)
+    monkeypatch.setenv("MCP_MAX_PARALLEL_JOBS", "2")
+    _reset_queue_state()
+
+    order: list[str] = []
+
+    def make(name: str):
+        def fn() -> dict:
+            order.append(f"start:{name}")
+            time.sleep(0.2)
+            order.append(f"end:{name}")
+            return {"name": name}
+
+        return fn
+
+    a = jobs.start_job(
+        "resolve_via_serp", make("a"), meta={}, queue_key="heavy:a", priority=10
+    )
+    b = jobs.start_job(
+        "run_owner_lane", make("b"), meta={}, queue_key="heavy:b", priority=10
+    )
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if (
+            jobs.get_job(a.id).status == "completed"
+            and jobs.get_job(b.id).status == "completed"
+        ):
+            break
+        time.sleep(0.05)
     assert order == ["start:a", "end:a", "start:b", "end:b"]
 
 

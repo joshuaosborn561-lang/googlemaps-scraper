@@ -2834,7 +2834,9 @@ def classify_leads(
                 **scope,
             }
             before = find_active_by_queue_key(make_queue_key("classify_leads", meta))
-            job = start_job("classify_leads", _run, meta=meta, priority=10)
+            # Priority 20 + light parallel slot so classify is not starved by
+            # long SERP / crawl / owner-lane jobs across container restarts.
+            job = start_job("classify_leads", _run, meta=meta, priority=20)
             return _json(
                 _started_response(
                     job, attached=before is not None and before.id == job.id
@@ -3941,7 +3943,7 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                     _classify,
                     meta={**meta, "auto_resumed_from": rec.get("id")},
                     queue_key=make_queue_key("classify_leads", meta),
-                    priority=int(meta.get("priority") or 10),
+                    priority=int(meta.get("priority") or 20),
                 )
                 resumed.append(job.id)
             elif kind == "resolve_places" and meta.get("table"):

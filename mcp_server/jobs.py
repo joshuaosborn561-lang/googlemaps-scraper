@@ -62,11 +62,48 @@ _jobs: dict[str, Job] = {}
 _fns: dict[str, Callable[[], dict[str, Any]]] = {}
 _cancel_requested: set[str] = set()
 _tls = threading.local()
-# FIFO of job ids waiting to run. At most one worker thread executes at a time.
+# Priority wait queue. Heavy jobs (SERP/crawl/scrape) are serial; light kinds
+# (classify_leads, …) may run in parallel with one heavy job so they are not
+# starved across container restarts.
 _wait_queue: list[str] = []
-_running_id: str | None = None
+_running_ids: set[str] = set()
 _dispatcher_wakeup = threading.Event()
 _dispatcher_started = False
+
+# Kinds allowed to share the runner with one heavy job.
+LIGHT_PARALLEL_KINDS = frozenset(
+    {
+        "classify_leads",
+        "extract_team_contacts",
+    }
+)
+
+
+def _max_parallel() -> int:
+    try:
+        return max(1, int(os.environ.get("MCP_MAX_PARALLEL_JOBS", "2")))
+    except ValueError:
+        return 2
+
+
+def _is_light(kind: str) -> bool:
+    return (kind or "") in LIGHT_PARALLEL_KINDS
+
+
+def _can_start_locked(kind: str) -> bool:
+    """Caller must hold ``_lock``. Decide if ``kind`` may start now."""
+    if len(_running_ids) >= _max_parallel():
+        return False
+    heavy_running = 0
+    for jid in _running_ids:
+        j = _jobs.get(jid)
+        if j is None:
+            continue
+        if not _is_light(j.kind):
+            heavy_running += 1
+    if _is_light(kind):
+        return True
+    return heavy_running == 0
 
 
 class JobCancelled(Exception):
@@ -267,10 +304,9 @@ def get_job(job_id: str) -> Job:
         _maybe_mark_stalled(job, persist=False)
         if job.status != before:
             persist_snap = Job(**asdict(job))
-            # Free the runner slot if this was the active job.
-            global _running_id
-            if _running_id == job.id:
-                _running_id = None
+            # Free the runner slot if this was an active job.
+            if job.id in _running_ids:
+                _running_ids.discard(job.id)
                 _dispatcher_wakeup.set()
         out = Job(**asdict(job))
     if persist_snap is not None:
@@ -298,7 +334,7 @@ def list_jobs(limit: int = 20) -> list[Job]:
 def queue_position(job_id: str) -> int | None:
     """1-based position in the wait queue, 0 if currently running, None if N/A."""
     with _lock:
-        if _running_id == job_id:
+        if job_id in _running_ids:
             return 0
         try:
             return _wait_queue.index(job_id) + 1
@@ -454,7 +490,7 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
     auto-resume-attempted (so a deploy that ships auto-resume can reclaim work
     killed by earlier restarts).
     """
-    global _running_id, _wait_queue
+    global _wait_queue
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     flipped: list[str] = []
     records: list[dict[str, Any]] = []
@@ -558,7 +594,7 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
         _record(job, mark_attempt=True)
 
     with _lock:
-        _running_id = None
+        _running_ids.clear()
         _wait_queue = []
         _fns.clear()
     return {
@@ -581,43 +617,46 @@ def _ensure_dispatcher() -> None:
 
 
 def _dispatcher_loop() -> None:
-    global _running_id
     while True:
         _dispatcher_wakeup.wait(timeout=2.0)
         _dispatcher_wakeup.clear()
-        job_id: str | None = None
-        fn: Callable[[], dict[str, Any]] | None = None
+        to_start: list[tuple[str, Callable[[], dict[str, Any]]]] = []
         with _lock:
-            if _running_id is not None:
-                # Still busy — confirm the runner hasn't vanished.
-                running = _jobs.get(_running_id)
-                if running is not None and running.status in ACTIVE_STATUSES:
-                    continue
-                _running_id = None
-            while _wait_queue:
-                candidate = _wait_queue[0]
+            # Drop slots whose workers vanished without clearing themselves.
+            for jid in list(_running_ids):
+                running = _jobs.get(jid)
+                if running is None or running.status not in ACTIVE_STATUSES:
+                    _running_ids.discard(jid)
+
+            i = 0
+            while i < len(_wait_queue):
+                if len(_running_ids) >= _max_parallel():
+                    break
+                candidate = _wait_queue[i]
                 job = _jobs.get(candidate)
                 if job is None or job.status != "queued":
-                    _wait_queue.pop(0)
+                    _wait_queue.pop(i)
                     _fns.pop(candidate, None)
                     continue
                 fn = _fns.get(candidate)
                 if fn is None:
-                    # Callable lost — fail the job rather than wedging the queue.
                     job.status = "failed"
                     job.error = "Internal error: job callable missing from queue"
                     job.finished_at = time.time()
-                    _wait_queue.pop(0)
+                    _wait_queue.pop(i)
                     try:
                         _persist(job)
                     except OSError:
                         pass
                     continue
-                _wait_queue.pop(0)
-                job_id = candidate
-                _running_id = candidate
-                break
-        if job_id and fn is not None:
+                if not _can_start_locked(job.kind):
+                    i += 1
+                    continue
+                _wait_queue.pop(i)
+                _running_ids.add(candidate)
+                to_start.append((candidate, fn))
+                # do not increment i — next item shifted into place
+        for job_id, fn in to_start:
             threading.Thread(
                 target=_run_worker,
                 args=(job_id, fn),
@@ -627,7 +666,6 @@ def _dispatcher_loop() -> None:
 
 
 def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
-    global _running_id
     with _lock:
         job = _jobs.get(job_id)
         if job is None:
@@ -635,7 +673,7 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
                 job = _load_from_disk(job_id)
                 _jobs[job_id] = job
             except ValueError:
-                _running_id = None
+                _running_ids.discard(job_id)
                 _dispatcher_wakeup.set()
                 return
         # Cancelled / non-queued jobs must never start work.
@@ -652,7 +690,7 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
                     _persist(job)
                 except OSError:
                     pass
-            _running_id = None
+            _running_ids.discard(job_id)
             _fns.pop(job_id, None)
             _dispatcher_wakeup.set()
             return
@@ -721,8 +759,7 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
             job.heartbeat_at = time.time()
             job.finished_at = time.time()
             snap = Job(**asdict(job))
-            if _running_id == job_id:
-                _running_id = None
+            _running_ids.discard(job_id)
             _cancel_requested.discard(job_id)
         try:
             _persist(snap)
@@ -751,7 +788,8 @@ def start_job(
     immediately with status=queued.
 
     Priority guidance:
-      10+  scoped client work (city/state/plan_id/…)
+      20   classify_leads (light; jumps ahead + may run beside one heavy)
+      10+  scoped client / resolve / scrape work
        5   interactive unscoped user jobs
        0   backlog drain / auto housekeeping
     """
@@ -761,9 +799,10 @@ def start_job(
     if priority is None:
         if meta.get("backlog_drain"):
             priority = 0
+        elif kind == "classify_leads":
+            priority = 20
         elif _scope_fingerprint(meta) or kind in (
             "resolve_places",
-            "classify_leads",
             "run_leads",
             "scrape_maps",
         ):
@@ -771,6 +810,7 @@ def start_job(
         else:
             priority = 5
     meta["priority"] = int(priority)
+    meta["parallel_class"] = "light" if _is_light(kind) else "heavy"
 
     if dedupe:
         existing = find_active_by_queue_key(key)

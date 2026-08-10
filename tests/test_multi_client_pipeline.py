@@ -15,7 +15,7 @@ from mcp_server import server
 def _reset_queue_state() -> None:
     with jobs._lock:
         jobs._wait_queue.clear()
-        jobs._running_id = None
+        jobs._running_ids.clear()
         jobs._jobs.clear()
         jobs._fns.clear()
         jobs._cancel_requested.clear()
