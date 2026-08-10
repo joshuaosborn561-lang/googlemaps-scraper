@@ -177,6 +177,28 @@ def test_sync_uses_state_scope_not_source_client_tag(tmp_path: Path, monkeypatch
     assert out2["scope"]["source_filtered_by_client_tag"] is True
 
 
+def test_row_for_supabase_coerces_empty_permit_count() -> None:
+    row = supabase_sync._row_for_supabase(
+        {
+            "place_id": "x",
+            "name": "Biz",
+            "reviews": "",
+            "permit_count": "",
+            "rating": "",
+            "in_icp": "no",
+            "icp_confidence": "",
+        },
+        "peterson",
+        "2026-01-01T00:00:00Z",
+        client_tag="peterson",
+    )
+    assert row["permit_count"] is None
+    assert row["reviews"] is None
+    assert row["rating"] is None
+    assert row["in_icp"] is False
+    assert row["client_tag"] == "peterson"
+
+
 def test_ensure_sql_contains_both_client_tables() -> None:
     client_reg.load_clients(reload=True)
     sql = client_reg.ensure_sql_all()

@@ -97,7 +97,7 @@ def _row_for_supabase(
                 out[col] = float(val) if val not in (None, "") else None
             except (TypeError, ValueError):
                 out[col] = None
-        elif col == "reviews":
+        elif col in ("reviews", "permit_count"):
             try:
                 out[col] = int(val) if val not in (None, "") else None
             except (TypeError, ValueError):
