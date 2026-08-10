@@ -251,11 +251,12 @@ def crawl(
         ),
         6,
     )
-    max_cost = float(settings.apify_max_cost_usd or 5.0)
+    max_cost = float(settings.apify_max_cost_usd or 0.0)
     base = {
         "domains": len(urls),
         "estimated_cost_usd": estimated,
-        "max_cost_usd": max_cost,
+        "max_cost_usd": max_cost if max_cost > 0 else None,
+        "cost_ceiling": "none" if max_cost <= 0 else f"${max_cost:.2f}",
         "max_pages_per_site": pages_per,
         "verify_emails": bool(verify_emails),
         "actor": settings.apify_contact_actor,
@@ -268,7 +269,7 @@ def crawl(
     if estimate_only:
         return {**base, "started": False, "blocked": False}
 
-    if estimated > max_cost:
+    if max_cost > 0 and estimated > max_cost:
         return {
             **base,
             "started": False,
@@ -302,9 +303,11 @@ def crawl(
     }
 
     start_url = f"{settings.apify_base_url}/v2/acts/{actor}/runs"
+    # max_cost <= 0 = no global ceiling; still bound this single actor run.
+    run_charge = max_cost if max_cost > 0 else max(float(estimated) * 3.0, 1.0)
     params = {
         "token": token,
-        "maxTotalChargeUsd": max_cost,
+        "maxTotalChargeUsd": run_charge,
         "timeout": 600,
         "memory": 1024,
     }

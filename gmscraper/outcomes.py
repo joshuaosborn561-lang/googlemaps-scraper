@@ -202,19 +202,21 @@ def _serp_lookup_batch(addresses: list[str], *, min_confidence: float) -> list[d
     if not (settings.openai_api_key or "").strip():
         raise RuntimeError("OPENAI_API_KEY is required to parse SERP results")
 
-    max_cost = float(getattr(settings, "apify_max_cost_usd", 5.0) or 5.0)
+    max_cost = float(getattr(settings, "apify_max_cost_usd", 0.0) or 0.0)
     llm = make_llm(settings)
     out: list[dict[str, Any]] = []
     batch_size = resolve_serp.BATCH_SIZE
     for i in range(0, len(addresses), batch_size):
         chunk = addresses[i : i + batch_size]
         est = resolve_serp.estimate_cost_usd(len(chunk))
-        if est > max_cost + 0.01:
+        if max_cost > 0 and est > max_cost + 0.01:
             raise RuntimeError(
                 f"SERP batch of {len(chunk)} est ${est:.4f} exceeds "
                 f"APIFY_MAX_COST_USD ${max_cost:.2f}. Lower limit or raise the ceiling."
             )
-        result = resolve_serp.run_serp_batch(chunk, max_cost=max_cost)
+        result = resolve_serp.run_serp_batch(
+            chunk, max_cost=resolve_serp.apify_run_charge_cap(max_cost, est)
+        )
         items = result.get("items") or []
         unused = list(items)
         for addr in chunk:
@@ -321,7 +323,8 @@ def resolve_addresses(
         else (int(len(addr_list) * 0.7) if method_l == "auto" else 0)
     )
     serp_cost = resolve_serp.estimate_cost_usd(serp_est_n if method_l != "maps" else 0)
-    max_cost = float(getattr(settings, "apify_max_cost_usd", 5.0) or 5.0)
+    max_cost = float(getattr(settings, "apify_max_cost_usd", 0.0) or 0.0)
+    blocked = bool(max_cost > 0 and method_l != "maps" and serp_cost > max_cost)
 
     if estimate_only:
         return {
@@ -331,13 +334,10 @@ def resolve_addresses(
             "method": method_l,
             "address_count": len(addr_list),
             "estimated_serp_cost_usd": round(serp_cost, 4),
-            "max_cost_usd": max_cost,
-            "blocked": method_l != "maps" and serp_cost > max_cost,
-            "block_reason": (
-                "exceeds_APIFY_MAX_COST_USD"
-                if method_l != "maps" and serp_cost > max_cost
-                else None
-            ),
+            "max_cost_usd": max_cost if max_cost > 0 else None,
+            "cost_ceiling": "none" if max_cost <= 0 else f"${max_cost:.2f}",
+            "blocked": blocked,
+            "block_reason": ("exceeds_APIFY_MAX_COST_USD" if blocked else None),
             "cost_note": maps_cost_note,
             "sample_addresses": addr_list[:5],
         }

@@ -91,6 +91,17 @@ def estimate_cost_usd(n_queries: int) -> float:
     return batches * COST_START_USD + n * COST_SERP_USD
 
 
+def apify_run_charge_cap(max_cost: float, batch_est: float) -> float:
+    """Per-run Apify maxTotalChargeUsd.
+
+    Global APIFY_MAX_COST_USD <= 0 means no ceiling; still pass Apify a
+    per-batch bound so a runaway actor cannot charge an absurd amount.
+    """
+    if max_cost and max_cost > 0:
+        return float(max_cost)
+    return max(float(batch_est) * 3.0, 1.0)
+
+
 def _actor_id(actor: str) -> str:
     return (actor or DEFAULT_ACTOR).strip().replace("/", "~")
 
@@ -467,8 +478,9 @@ def estimate(
     if limit and limit > 0:
         n = min(n, int(limit))
     cost = round(estimate_cost_usd(n), 4)
-    max_cost = float(getattr(settings, "apify_max_cost_usd", 5.0) or 5.0)
-    blocked = cost > max_cost
+    max_cost = float(getattr(settings, "apify_max_cost_usd", 0.0) or 0.0)
+    # max_cost <= 0 means unlimited (no hard ceiling).
+    blocked = bool(max_cost > 0 and cost > max_cost)
     warning = None
     if inv.get("total_rows") and inv.get("useful_rate", 0) < 0.05:
         warning = (
@@ -491,7 +503,8 @@ def estimate(
         "batch_size": BATCH_SIZE,
         "batches": (n + BATCH_SIZE - 1) // BATCH_SIZE if n else 0,
         "estimated_cost_usd": cost,
-        "max_cost_usd": max_cost,
+        "max_cost_usd": max_cost if max_cost > 0 else None,
+        "cost_ceiling": "none" if max_cost <= 0 else f"${max_cost:.2f}",
         "blocked": blocked,
         "block_reason": "exceeds_APIFY_MAX_COST_USD" if blocked else None,
         "actor": _serp_actor(),
@@ -572,7 +585,7 @@ def run(
     done = 0
     total = pending_total or 0
     max_rows = int(limit) if limit and limit > 0 else 0
-    max_cost = float(getattr(settings, "apify_max_cost_usd", 5.0) or 5.0)
+    max_cost = float(getattr(settings, "apify_max_cost_usd", 0.0) or 0.0)
 
     def _tick(**extra: Any) -> None:
         if not on_progress:
@@ -653,9 +666,9 @@ def run(
                 break
             continue
 
-        # Cost gate for this batch.
+        # Optional cost gate (disabled when APIFY_MAX_COST_USD <= 0).
         batch_est = estimate_cost_usd(len(work))
-        if counts["usage_usd"] + batch_est > max_cost + 0.01:
+        if max_cost > 0 and counts["usage_usd"] + batch_est > max_cost + 0.01:
             counts["blocked_mid_run"] = True
             counts["block_reason"] = (
                 f"remaining batch est ${batch_est:.4f} would exceed "
@@ -665,7 +678,9 @@ def run(
 
         queries = [q for _, q in work]
         try:
-            result = run_serp_batch(queries, max_cost=max_cost)
+            result = run_serp_batch(
+                queries, max_cost=apify_run_charge_cap(max_cost, batch_est)
+            )
         except Exception:  # noqa: BLE001
             counts["errors"] += len(work)
             done += len(work)

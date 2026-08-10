@@ -232,8 +232,9 @@ class Settings:
             "APIFY_GOOGLE_SEARCH_ACTOR", "apify/google-search-scraper"
         )
     )
+    # 0 = no ceiling (do not block Apify runs on estimated cost).
     apify_max_cost_usd: float = field(
-        default_factory=lambda: _env_float("APIFY_MAX_COST_USD", 5.0)
+        default_factory=lambda: _env_float("APIFY_MAX_COST_USD", 0.0)
     )
     apify_base_url: str = field(
         default_factory=lambda: _env("APIFY_BASE_URL", "https://api.apify.com").rstrip("/")
