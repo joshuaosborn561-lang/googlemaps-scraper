@@ -220,8 +220,9 @@ def test_cancel_queued_job_never_starts(tmp_path: Path, monkeypatch) -> None:
         time.sleep(0.5)
         return {"ok": True}
 
+    # Two heavies — enrich_sites is light-parallel and would not block.
     blocker = jobs.start_job(
-        "enrich_sites", slow, meta={"limit": 1}, queue_key="enrich_sites:limit=1"
+        "resolve_via_serp", slow, meta={"limit": 1}, queue_key="heavy:blocker"
     )
     target = jobs.start_job(
         "apify_contact_crawl",

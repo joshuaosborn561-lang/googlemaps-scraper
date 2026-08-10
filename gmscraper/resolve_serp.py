@@ -8,8 +8,10 @@ Maps text search. Proven on suite addresses where Maps returns an empty building
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -25,9 +27,25 @@ from .mapsdata import domain_of
 COST_START_USD = 0.001
 COST_SERP_USD = 0.0045
 DEFAULT_ACTOR = "apify/google-search-scraper"
-BATCH_SIZE = 100
+BATCH_SIZE = 150
 POLL_INTERVAL_SEC = 5.0
 POLL_MAX_WAIT_SEC = 60 * 45
+
+
+def _serp_batch_size(requested: int | None = None) -> int:
+    try:
+        env_n = int(os.environ.get("SERP_BATCH_SIZE", str(BATCH_SIZE)))
+    except ValueError:
+        env_n = BATCH_SIZE
+    n = int(requested or env_n or BATCH_SIZE)
+    return max(1, min(200, n))
+
+
+def _serp_extract_workers() -> int:
+    try:
+        return max(1, int(os.environ.get("SERP_EXTRACT_WORKERS", "8")))
+    except ValueError:
+        return 8
 
 EXTRACT_SYSTEM = """You extract the business occupying a mailing / suite address
 from Google organic search results.
@@ -564,7 +582,8 @@ def run(
         raise RuntimeError("OPENAI_API_KEY is required to parse SERP results")
     llm = make_llm(settings)
 
-    batch_n = max(1, min(200, int(batch_size or BATCH_SIZE)))
+    batch_n = _serp_batch_size(batch_size)
+    extract_workers = _serp_extract_workers()
     pending_total = int(est.get("pending_rows") or 0)
     counts = {
         "started": True,
@@ -580,6 +599,7 @@ def run(
         "estimated_cost_usd": est.get("estimated_cost_usd"),
         "actor": _serp_actor(),
         "batch_size": batch_n,
+        "extract_workers": extract_workers,
         "inventory_before": est.get("inventory"),
     }
     done = 0
@@ -692,17 +712,23 @@ def run(
         items = result.get("items") or []
         now = datetime.now(timezone.utc).isoformat()
 
-        # Index remaining items by order as fallback when query field missing.
+        # Match SERP items to queries first (sequential, cheap), then extract
+        # with a thread pool. Extract was the overnight bottleneck: 100 serial
+        # OpenAI calls per Apify batch, sharing a rate-limited key with classify.
         unused = list(items)
-
+        paired: list[tuple[dict[str, Any], str, list[dict[str, str]]]] = []
         for row, query in work:
             item = _match_item_to_query(unused, query)
             if item is None and unused:
                 item = unused.pop(0)
             elif item is not None and item in unused:
                 unused.remove(item)
+            paired.append((row, query, _organic_from_item(item or {})))
 
-            organic = _organic_from_item(item or {})
+        def _extract_one(
+            pair: tuple[dict[str, Any], str, list[dict[str, str]]]
+        ) -> tuple[dict[str, Any], str, dict[str, Any], list[dict[str, str]]]:
+            row, query, organic = pair
             try:
                 extracted = extract_business(llm, address=query, organic=organic)
             except Exception:  # noqa: BLE001
@@ -714,15 +740,26 @@ def run(
                     "officer_name": "",
                     "confidence": 0.0,
                 }
-                counts["errors"] += 1
+            return row, query, extracted, organic
 
+        extracted_rows: list[
+            tuple[dict[str, Any], str, dict[str, Any], list[dict[str, str]]]
+        ] = []
+        with ThreadPoolExecutor(max_workers=extract_workers) as pool:
+            futs = [pool.submit(_extract_one, p) for p in paired]
+            for fut in as_completed(futs):
+                try:
+                    extracted_rows.append(fut.result())
+                except Exception:  # noqa: BLE001
+                    counts["errors"] += 1
+
+        for row, query, extracted, organic in extracted_rows:
             conf = float(extracted.get("confidence") or 0)
             company = extracted.get("company_name") or ""
             website = extracted.get("website") or ""
             domain = extracted.get("domain") or ""
             phone = extracted.get("phone") or ""
             officer = extracted.get("officer_name") or ""
-            # A company name alone is a partial win; a domain unlocks enrichment.
             hit = bool(company) and conf >= float(min_confidence)
             useful = hit and bool(domain)
 
@@ -745,7 +782,6 @@ def run(
             }
             if hit:
                 patch["business_name"] = company
-                # Prefer writing company into name_column when present.
                 if binding.name_column:
                     patch[binding.name_column] = company
                 if domain:

@@ -87,6 +87,8 @@ def test_pending_sites_scoped_by_state(tmp_path: Path) -> None:
 
 def test_priority_queue_scoped_jumps_backlog(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(jobs, "JOBS_DIR", tmp_path)
+    # Force serial so wait-queue ordering is observable (enrich is light-parallel).
+    monkeypatch.setenv("MCP_MAX_PARALLEL_JOBS", "1")
     _reset_queue_state()
 
     order: list[str] = []

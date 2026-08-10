@@ -11,10 +11,11 @@ from gmscraper import source_binding as sb
 def test_estimate_cost_batching() -> None:
     assert rs.estimate_cost_usd(0) == 0.0
     assert rs.estimate_cost_usd(1) == rs.COST_START_USD + rs.COST_SERP_USD
-    assert rs.estimate_cost_usd(100) == rs.COST_START_USD + 100 * rs.COST_SERP_USD
-    # Second batch adds another start fee.
-    assert rs.estimate_cost_usd(101) == (
-        2 * rs.COST_START_USD + 101 * rs.COST_SERP_USD
+    batch = rs.BATCH_SIZE
+    assert rs.estimate_cost_usd(batch) == rs.COST_START_USD + batch * rs.COST_SERP_USD
+    # Second batch adds another start fee once we cross BATCH_SIZE.
+    assert rs.estimate_cost_usd(batch + 1) == (
+        2 * rs.COST_START_USD + (batch + 1) * rs.COST_SERP_USD
     )
 
 

@@ -17,7 +17,7 @@ from typing import Any, Callable, Sequence
 
 from .config import settings
 from .evidence import ICP_HINTS, condense
-from .llm import Ollama, OllamaError
+from .llm import Ollama, OllamaError, RateLimitError, is_rate_limit_error
 from .store import Store
 from .zips import haversine_miles, parse_center
 
@@ -78,7 +78,18 @@ def _eligible_clauses(
     clauses: list[str] = []
     args: list = []
     if not force:
-        clauses.append("b.place_id NOT IN (SELECT place_id FROM verdicts)")
+        # Retry rate-limit failures — those must not permanently burn a row.
+        clauses.append(
+            """(
+              b.place_id NOT IN (SELECT place_id FROM verdicts)
+              OR b.place_id IN (
+                SELECT place_id FROM verdicts
+                WHERE reason LIKE 'error:%429%'
+                   OR reason LIKE 'error:%rate limit%'
+                   OR reason LIKE 'error:%RateLimit%'
+              )
+            )"""
+        )
     if source:
         clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
         args.append(source.strip().lower())
@@ -193,6 +204,13 @@ def run(
     radius are rejected deterministically before any LLM call and saved as
     in_icp=false with reason 'outside_radius'.
     """
+    from .llm import OpenAICompat, llm_max_concurrency
+
+    workers = max(1, int(workers or 1))
+    if isinstance(ollama, OpenAICompat):
+        # Extra threads beyond the shared gate only stampede retries.
+        workers = min(workers, llm_max_concurrency())
+
     where, args = _eligible_clauses(
         source=source,
         force=force,
@@ -325,11 +343,28 @@ def run(
         f"{', force' if force else ''}"
         f"{f', geo_rejected={geo_rejected}' if geo_rejected else ''})"
     )
+    # Drop stale rate-limit burns so they become eligible again this run.
+    cur = store.conn.execute(
+        """DELETE FROM verdicts
+           WHERE reason LIKE 'error:%429%'
+              OR reason LIKE 'error:%rate limit%'
+              OR reason LIKE 'error:%RateLimit%'"""
+    )
+    cleared_429 = int(cur.rowcount or 0)
+    try:
+        store.conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    if cleared_429:
+        print(f"Cleared {cleared_429:,} rate-limit error verdicts for retry.")
+
     counts: dict[str, Any] = {
         "done": 0,
         "in_icp": 0,
         "errors": 0,
+        "rate_limited": 0,
         "geo_rejected": geo_rejected,
+        "cleared_rate_limit_verdicts": int(cleared_429 or 0),
         "source": source or None,
         "force": force,
         "require_geo": bool(use_geo),
@@ -338,8 +373,21 @@ def run(
         "center_lng": geo[1] if geo else None,
     }
     lock = threading.Lock()
+    stop = threading.Event()
+
+    def _cancelled() -> bool:
+        if stop.is_set():
+            return True
+        try:
+            from mcp_server.jobs import is_cancel_requested
+
+            return bool(is_cancel_requested())
+        except Exception:  # noqa: BLE001
+            return False
 
     def work(row) -> None:
+        if _cancelled():
+            return
         text = store.get_site_text(row["domain"]) if row["domain"] else None
         prompt = PROMPT.format(
             icp=icp.strip(),
@@ -350,6 +398,9 @@ def run(
             website=row["website"] or "(none)",
             text=condense(text, ICP_HINTS, cap) if text else NO_SITE_NOTE,
         )
+        in_icp = False
+        ok = False
+        rate_limited = False
         try:
             out = ollama.json_chat(SYSTEM, prompt, SCHEMA)
             in_icp = bool(out.get("in_icp"))
@@ -361,22 +412,33 @@ def run(
                 str(out.get("reason") or "")[:500], ollama.model,
             )
             ok = True
+        except RateLimitError:
+            # Leave no permanent verdict — row stays eligible.
+            rate_limited = True
+            stop.set()  # stop the stampede; resume later
         except (OllamaError, ValueError, TypeError) as exc:
-            store.save_verdict(row["place_id"], None, 0.0, f"error: {exc}"[:500],
-                               ollama.model)
-            in_icp, ok = False, False
+            if is_rate_limit_error(exc):
+                rate_limited = True
+                stop.set()
+            else:
+                store.save_verdict(
+                    row["place_id"], None, 0.0, f"error: {exc}"[:500],
+                    ollama.model,
+                )
 
         with lock:
             counts["done"] += 1
             counts["in_icp"] += int(in_icp)
-            counts["errors"] += int(not ok)
+            counts["errors"] += int(not ok and not rate_limited)
+            counts["rate_limited"] += int(rate_limited)
             done_n = int(counts["done"])
             in_icp_n = int(counts["in_icp"])
             err_n = int(counts["errors"])
+            rl_n = int(counts["rate_limited"])
             if done_n % 10 == 0 or done_n == len(llm_rows):
                 sys.stderr.write(
                     f"\r  {done_n:,}/{len(llm_rows):,} | "
-                    f"in-ICP {in_icp_n:,} | errors {err_n:,}   "
+                    f"in-ICP {in_icp_n:,} | errors {err_n:,} | 429 {rl_n:,}   "
                 )
                 sys.stderr.flush()
                 if on_progress is not None:
@@ -391,6 +453,7 @@ def run(
                             businesses_found=in_icp_n,
                             in_icp=in_icp_n,
                             errors=err_n,
+                            rate_limited=rl_n,
                             geo_rejected=geo_rejected,
                         )
                     except Exception:  # noqa: BLE001
@@ -427,20 +490,33 @@ def run(
         except Exception:  # noqa: BLE001
             pass
 
+    # Submit in chunks so cancel_job / rate-limit stop can take effect.
+    chunk = max(workers * 2, 16)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(work, r) for r in llm_rows]
         try:
-            for f in as_completed(futures):
-                f.exception()
+            for i in range(0, len(llm_rows), chunk):
+                if _cancelled():
+                    counts["cancelled"] = True
+                    break
+                batch = llm_rows[i : i + chunk]
+                futures = [pool.submit(work, r) for r in batch]
+                for f in as_completed(futures):
+                    f.exception()
+                if stop.is_set():
+                    counts["paused_rate_limit"] = True
+                    print(
+                        "\nPausing classify: OpenAI rate limit. "
+                        "Rows were not permanently burned; re-run to continue."
+                    )
+                    break
         except KeyboardInterrupt:
             print("\nInterrupted -- verdicts so far are saved.")
-            for f in futures:
-                f.cancel()
+            stop.set()
     sys.stderr.write("\n")
     counts["done"] = int(counts["done"]) + geo_rejected
     counts["processed"] = int(counts["done"])
     remaining = max(0, int(total_eligible) - int(counts["processed"]))
     counts["total_eligible"] = int(total_eligible)
     counts["remaining"] = remaining
-    counts["has_more"] = remaining > 0
+    counts["has_more"] = remaining > 0 or bool(counts.get("paused_rate_limit"))
     return counts

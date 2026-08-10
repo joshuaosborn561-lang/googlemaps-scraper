@@ -19,7 +19,9 @@ calls, and a malformed response is a silently missing row in the CSV.
 from __future__ import annotations
 
 import json
+import os
 import random
+import threading
 import time
 from typing import Any
 
@@ -30,7 +32,39 @@ class LLMError(RuntimeError):
     pass
 
 
+class RateLimitError(LLMError):
+    """OpenAI/provider 429 — caller must NOT persist a permanent failure."""
+
+
 OllamaError = LLMError          # historical name, still imported by the stages
+
+# Process-wide cap so classify + SERP extract cannot stampede one API key.
+_llm_sema: threading.BoundedSemaphore | None = None
+_llm_sema_n = 0
+_llm_sema_lock = threading.Lock()
+
+
+def llm_max_concurrency() -> int:
+    try:
+        return max(1, int(os.environ.get("LLM_MAX_CONCURRENCY", "6")))
+    except ValueError:
+        return 6
+
+
+def _llm_gate() -> threading.BoundedSemaphore:
+    """Shared semaphore; rebuilt if LLM_MAX_CONCURRENCY changes at runtime."""
+    global _llm_sema, _llm_sema_n
+    n = llm_max_concurrency()
+    with _llm_sema_lock:
+        if _llm_sema is None or _llm_sema_n != n:
+            _llm_sema = threading.BoundedSemaphore(n)
+            _llm_sema_n = n
+        return _llm_sema
+
+
+def is_rate_limit_error(exc: BaseException | str) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text or "rate_limit" in text
 
 
 def _metrics(body: dict[str, Any]) -> dict[str, float]:
@@ -213,22 +247,35 @@ class OpenAICompat(_Base):
             payload["provider"] = {"require_parameters": True}
 
         last: Exception | None = None
+        saw_429 = False
+        gate = _llm_gate()
         for attempt in range(self.max_retries + 1):
             try:
-                r = self.session.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    timeout=self.timeout,
-                )
+                with gate:
+                    r = self.session.post(
+                        f"{self.base_url}/chat/completions",
+                        json=payload,
+                        timeout=self.timeout,
+                    )
                 if r.status_code in (401, 403):
                     raise SystemExit(
                         f"HTTP {r.status_code} from {self.base_url}: check "
                         f"OPENAI_API_KEY. {r.text[:200]}"
                     )
                 if r.status_code == 429 or r.status_code >= 500:
-                    wait = float(r.headers.get("Retry-After") or 0) or 2 ** attempt
-                    last = LLMError(f"HTTP {r.status_code}")
-                    time.sleep(min(wait, 60) + random.uniform(0, 1))
+                    wait = float(r.headers.get("Retry-After") or 0) or (
+                        2 ** (attempt + 1)
+                    )
+                    if r.status_code == 429:
+                        saw_429 = True
+                        # Back off hard — stampeding retries make throughput worse.
+                        wait = max(wait, 15.0) * (1.0 + 0.25 * attempt)
+                    last = (
+                        RateLimitError("HTTP 429")
+                        if r.status_code == 429
+                        else LLMError(f"HTTP {r.status_code}")
+                    )
+                    time.sleep(min(wait, 90) + random.uniform(0, 1))
                     continue
                 r.raise_for_status()
                 body = r.json()
@@ -266,10 +313,21 @@ class OpenAICompat(_Base):
                 raise LLMError("schema mismatch: " + "; ".join(errs))
             except SystemExit:
                 raise
+            except RateLimitError as exc:
+                last = exc
+                saw_429 = True
+                if attempt < self.max_retries:
+                    time.sleep(min(30 * (attempt + 1), 90) + random.uniform(0, 1))
             except (requests.RequestException, ValueError, LLMError) as exc:
                 last = exc
+                if is_rate_limit_error(exc):
+                    saw_429 = True
                 if attempt < self.max_retries:
                     time.sleep(min(2 ** attempt, 30) + random.uniform(0, 1))
+        if saw_429 or isinstance(last, RateLimitError) or is_rate_limit_error(last or ""):
+            raise RateLimitError(
+                f"failed after {self.max_retries + 1} attempts: {last}"
+            )
         raise LLMError(f"failed after {self.max_retries + 1} attempts: {last}")
 
 
@@ -402,5 +460,10 @@ def make_llm(
 
 
 def default_workers(llm) -> int:
-    """Cloud calls are network-bound; local CPU calls contend for cores."""
-    return 8 if isinstance(llm, OpenAICompat) else 1
+    """Cloud calls are network-bound; local CPU calls contend for cores.
+
+    Cap at LLM_MAX_CONCURRENCY so "10 workers" cannot exceed the shared gate.
+    """
+    if isinstance(llm, OpenAICompat):
+        return llm_max_concurrency()
+    return 1

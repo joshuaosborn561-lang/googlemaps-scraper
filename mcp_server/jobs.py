@@ -75,15 +75,19 @@ LIGHT_PARALLEL_KINDS = frozenset(
     {
         "classify_leads",
         "extract_team_contacts",
+        # Site fetch is mostly network I/O in a subprocess — allow beside SERP
+        # so client enrich (e.g. Carlos/Basco) is not starved for hours.
+        "enrich_sites",
     }
 )
 
 
 def _max_parallel() -> int:
+    # Default 3: one heavy (SERP) + classify + enrich_sites without starvation.
     try:
-        return max(1, int(os.environ.get("MCP_MAX_PARALLEL_JOBS", "2")))
+        return max(1, int(os.environ.get("MCP_MAX_PARALLEL_JOBS", "3")))
     except ValueError:
-        return 2
+        return 3
 
 
 def _is_light(kind: str) -> bool:
