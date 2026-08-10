@@ -1,7 +1,12 @@
 """Push export-shaped leads into per-client Supabase tables.
 
-Default path: client_tag → client_<slug>.leads (never a shared maps_leads dump
+Default path: client_tag → {slug}_leads (never a shared maps_leads dump
 unless explicitly overridden with table= for legacy).
+
+Source rows may be selected by the same scope filters as classify/enrich
+(city/state/main_category/plan_id/run_id/source + optional radius) so
+historical SQLite rows that predate client_tag stamping are reachable.
+Destination rows are always stamped with the resolved client_tag.
 """
 
 from __future__ import annotations
@@ -181,8 +186,34 @@ def resolve_sync_target(
         "client_tag is required for sync_to_supabase so each client lands in "
         "its own table (e.g. client_tag='peterson' → peterson_leads, "
         "client_tag='basco' → basco_leads). "
-        "Call list_clients() for the registry."
+        "Call list_clients() for the registry. "
+        "Scope historical (untagged) SQLite rows with state/main_category/"
+        "plan_id/center+radius_miles — same filters as classify_leads."
     )
+
+
+def _source_scope_set(
+    *,
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    plan_id: str = "",
+    run_id: str = "",
+    source: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    center_lat: float = 0.0,
+    center_lng: float = 0.0,
+) -> bool:
+    """True when caller scoped by geography/plan/category (not destination tag)."""
+    if any(
+        (x or "").strip()
+        for x in (city, state, main_category, plan_id, run_id, source, center)
+    ):
+        return True
+    if radius_miles and (center_lat or center_lng or (center or "").strip()):
+        return True
+    return False
 
 
 def sync_to_supabase(
@@ -197,8 +228,24 @@ def sync_to_supabase(
     run_label: str = "",
     plan_id: str = "",
     run_id: str = "",
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    source: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    center_lat: float = 0.0,
+    center_lng: float = 0.0,
 ) -> dict[str, Any]:
-    """Batch-upsert leads into the client's Supabase table. Counts only."""
+    """Batch-upsert leads into the client's Supabase table. Counts only.
+
+    client_tag selects the destination table and stamps every written row.
+    Optional city/state/main_category/plan_id/run_id/source/center+radius
+    scope the *source* SQLite query — same pattern as classify_leads /
+    enrich_sites. When any of those source scopes are set, SQLite is NOT
+    filtered by client_tag (so pre-tagging historical rows sync). When no
+    source scope is set, SQLite is filtered by client_tag as before.
+    """
     target = resolve_sync_target(
         client_tag=client_tag, table=table, schema=schema
     )
@@ -209,6 +256,21 @@ def sync_to_supabase(
     if truncate:
         truncate_table(target["table"], schema=target["schema"])
 
+    scoped = _source_scope_set(
+        city=city,
+        state=state,
+        main_category=main_category,
+        plan_id=plan_id,
+        run_id=run_id,
+        source=source,
+        center=center,
+        radius_miles=float(radius_miles or 0),
+        center_lat=float(center_lat or 0),
+        center_lng=float(center_lng or 0),
+    )
+    # Destination stamp vs source filter: scope filters unlock untagged history.
+    source_client_tag = None if scoped else (target["client_tag"] or None)
+
     synced_at = datetime.now(timezone.utc).isoformat()
     rows = [
         _row_for_supabase(
@@ -218,9 +280,17 @@ def sync_to_supabase(
             store,
             icp_only=icp_only,
             with_email=with_email,
-            client_tag=target["client_tag"] or None,
+            client_tag=source_client_tag,
             plan_id=plan_id or None,
             run_id=run_id or None,
+            city=city or None,
+            state=state or None,
+            main_category=main_category or None,
+            source=source or None,
+            center=center or None,
+            radius_miles=float(radius_miles) if radius_miles else None,
+            center_lat=float(center_lat) if center_lat else None,
+            center_lng=float(center_lng) if center_lng else None,
             order="name",
         )
     ]
@@ -236,4 +306,15 @@ def sync_to_supabase(
         "run_label": label,
         "plan_id": plan_id or None,
         "run_id": run_id or None,
+        "scope": {
+            "city": city or None,
+            "state": state or None,
+            "main_category": main_category or None,
+            "source": source or None,
+            "center": center or None,
+            "radius_miles": float(radius_miles) if radius_miles else None,
+            "center_lat": float(center_lat) if center_lat else None,
+            "center_lng": float(center_lng) if center_lng else None,
+            "source_filtered_by_client_tag": not scoped,
+        },
     }

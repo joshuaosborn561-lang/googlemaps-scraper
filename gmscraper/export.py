@@ -65,6 +65,7 @@ def _build_where(
     states: list[str] | None = None,
     city: str | None = None,
     state: str | None = None,
+    main_category: str | None = None,
     q: str | None = None,
     source: str | None = None,
     client_tag: str | None = None,
@@ -106,14 +107,29 @@ def _build_where(
         clauses.append("COALESCE(b.permit_count, 0) >= ?")
         args.append(int(min_permits))
     if states:
-        clauses.append(f"b.state IN ({','.join('?' * len(states))})")
+        clauses.append(f"UPPER(COALESCE(b.state,'')) IN ({','.join('?' * len(states))})")
         args.extend(s.upper() for s in states)
     if state:
-        clauses.append("UPPER(b.state) = ?")
-        args.append(state.strip().upper())
+        # Comma-separated list matches store._business_scope_clauses / enrich.
+        state_list = [s.strip().upper() for s in str(state).split(",") if s.strip()]
+        if len(state_list) == 1:
+            clauses.append("UPPER(COALESCE(b.state,'')) = ?")
+            args.append(state_list[0])
+        elif state_list:
+            placeholders = ",".join("?" for _ in state_list)
+            clauses.append(f"UPPER(COALESCE(b.state,'')) IN ({placeholders})")
+            args.extend(state_list)
     if city:
         clauses.append("LOWER(b.city) = LOWER(?)")
         args.append(city.strip())
+    if main_category:
+        cats = [c.strip() for c in str(main_category).split(",") if c.strip()]
+        if cats:
+            ors = " OR ".join(
+                "LOWER(COALESCE(b.main_category,'')) LIKE ?" for _ in cats
+            )
+            clauses.append(f"({ors})")
+            args.extend(f"%{c.lower()}%" for c in cats)
     if source:
         clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
         args.append(source.strip().lower())
@@ -270,6 +286,7 @@ def iter_leads(
     states: list[str] | None = None,
     city: str | None = None,
     state: str | None = None,
+    main_category: str | None = None,
     q: str | None = None,
     source: str | None = None,
     client_tag: str | None = None,
@@ -298,6 +315,7 @@ def iter_leads(
         states=states,
         city=city,
         state=state,
+        main_category=main_category,
         q=q,
         source=source,
         client_tag=client_tag,

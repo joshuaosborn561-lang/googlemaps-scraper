@@ -72,6 +72,111 @@ def test_export_filters_by_client_tag(tmp_path: Path) -> None:
     assert len(carlos) == 1 and carlos[0]["name"] == "Carlos Biz"
 
 
+def test_export_scopes_untagged_by_state_and_category(tmp_path: Path) -> None:
+    """Historical rows without client_tag must be selectable by geo/category."""
+    store = Store(str(tmp_path / "t.db"))
+    store.upsert_businesses(
+        [
+            {
+                "place_id": "tx_old",
+                "name": "Old TX GC",
+                "domain": "oldtx.com",
+                "state": "TX",
+                "city": "Dallas",
+                "main_category": "General contractor",
+                "latitude": 32.78,
+                "longitude": -96.80,
+            },
+            {
+                "place_id": "nj_old",
+                "name": "Old NJ Dealer",
+                "domain": "oldnj.com",
+                "state": "NJ",
+                "city": "Clifton",
+                "main_category": "Car dealer",
+                "latitude": 40.88,
+                "longitude": -74.16,
+            },
+            {
+                "place_id": "ny_old",
+                "name": "Old NY Dealer",
+                "domain": "oldny.com",
+                "state": "NY",
+                "city": "Brooklyn",
+                "main_category": "Used car dealer",
+            },
+        ]
+    )
+    for pid in ("tx_old", "nj_old", "ny_old"):
+        store.save_verdict(pid, True, 0.9, "ok", "test")
+
+    tx = list(export.iter_leads(store, icp_only=True, state="TX"))
+    assert [r["place_id"] for r in tx] == ["tx_old"]
+
+    tri = list(export.iter_leads(store, icp_only=True, state="NJ,NY,CT"))
+    assert {r["place_id"] for r in tri} == {"nj_old", "ny_old"}
+
+    dealers = list(
+        export.iter_leads(
+            store, icp_only=True, state="NJ,NY,CT", main_category="dealer"
+        )
+    )
+    assert {r["place_id"] for r in dealers} == {"nj_old", "ny_old"}
+
+
+def test_sync_uses_state_scope_not_source_client_tag(tmp_path: Path, monkeypatch) -> None:
+    """Scoped sync selects untagged rows and stamps destination client_tag."""
+    store = Store(str(tmp_path / "t.db"))
+    store.upsert_businesses(
+        [
+            {
+                "place_id": "tx1",
+                "name": "Untagged TX",
+                "domain": "untaggedtx.com",
+                "state": "TX",
+                "city": "Dallas",
+            },
+            {
+                "place_id": "nj1",
+                "name": "Untagged NJ",
+                "domain": "untaggednj.com",
+                "state": "NJ",
+            },
+        ]
+    )
+    store.save_verdict("tx1", True, 0.9, "ok", "test")
+    store.save_verdict("nj1", True, 0.9, "ok", "test")
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-key")
+    captured: list[list[dict]] = []
+
+    def fake_upsert(table, rows, *, schema="public"):
+        captured.append(list(rows))
+        return len(rows)
+
+    monkeypatch.setattr(supabase_sync, "upsert_rows", fake_upsert)
+    monkeypatch.setattr(supabase_sync, "supabase_config", lambda: {"url": "u", "key": "k"})
+
+    out = supabase_sync.sync_to_supabase(
+        store, client_tag="peterson", state="TX", icp_only=True
+    )
+    assert out["rows_synced"] == 1
+    assert out["table"] == "peterson_leads"
+    assert out["scope"]["state"] == "TX"
+    assert out["scope"]["source_filtered_by_client_tag"] is False
+    assert len(captured) == 1
+    assert captured[0][0]["place_id"] == "tx1"
+    assert captured[0][0]["client_tag"] == "peterson"
+
+    # Unscoped sync still requires SQLite client_tag match → 0 historical rows.
+    out2 = supabase_sync.sync_to_supabase(
+        store, client_tag="peterson", icp_only=True
+    )
+    assert out2["rows_synced"] == 0
+    assert out2["scope"]["source_filtered_by_client_tag"] is True
+
+
 def test_ensure_sql_contains_both_client_tables() -> None:
     client_reg.load_clients(reload=True)
     sql = client_reg.ensure_sql_all()

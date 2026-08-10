@@ -2916,7 +2916,10 @@ def list_clients() -> str:
             "clients": client_reg.list_clients_public(),
             "usage": {
                 "scrape": "run_leads(..., client_tag='peterson'|'basco')",
-                "sync": "sync_to_supabase(client_tag='peterson'|'basco')",
+                "sync": (
+                    "sync_to_supabase(client_tag='peterson'|'basco', "
+                    "state=..., main_category=..., center=..., radius_miles=...)"
+                ),
                 "enrich": "enrich_waterfall(..., client_tag='peterson'|'basco')",
                 "aliases": "kyle→peterson, carlos→basco",
             },
@@ -2975,13 +2978,33 @@ def sync_to_supabase(
     run_label: str = "",
     plan_id: str = "",
     run_id: str = "",
+    city: str = "",
+    state: str = "",
+    main_category: str = "",
+    source: str = "",
+    center: str = "",
+    radius_miles: float = 0.0,
+    center_lat: float = 0.0,
+    center_lng: float = 0.0,
     background: bool = True,
 ) -> str:
     """Batch-upsert into the client's Supabase table. Counts only.
 
     dataset='' (default): requires client_tag ('peterson' or 'basco').
-    Writes to {slug}_leads (never a shared maps_leads dump).
-    Filters local SQLite by that client_tag so clients cannot mix.
+    Writes to {slug}_leads (never a shared maps_leads dump). Destination
+    rows are stamped with that client_tag.
+
+    Scope historical (untagged) SQLite rows with the same filters as
+    classify_leads / enrich_sites: city, state (comma-separated OK),
+    main_category, plan_id, run_id, source, and optional center+radius_miles.
+    Examples:
+      sync_to_supabase(client_tag='peterson', state='TX',
+                       center='Dallas, TX', radius_miles=60)
+      sync_to_supabase(client_tag='basco', state='NJ,NY,CT',
+                       main_category='dealer')
+    When any of those source scopes are set, SQLite is NOT filtered by
+    client_tag (pre-tagging rows become reachable). With no source scope,
+    SQLite is filtered by client_tag as before.
 
     dataset='parcels': page scrape_leads → permit_parcel.parcels with cursor
     pagination. Honour `county`. Upsert on natural key (county, account_id).
@@ -3034,6 +3057,14 @@ def sync_to_supabase(
             run_label=run_label,
             plan_id=plan_id,
             run_id=run_id,
+            city=city,
+            state=state,
+            main_category=main_category,
+            source=source,
+            center=center,
+            radius_miles=float(radius_miles or 0),
+            center_lat=float(center_lat or 0),
+            center_lng=float(center_lng or 0),
         )
         return _json(result)
     except Exception as exc:  # noqa: BLE001
