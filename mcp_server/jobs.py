@@ -467,6 +467,8 @@ _RESUMABLE_KINDS = frozenset(
         "scrape_maps",
         "enrich_sites",
         "resolve_places",
+        "resolve_via_serp",
+        "run_owner_lane",
         "pipeline_run",
         "crawl_team_pages",
         "classify_leads",

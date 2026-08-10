@@ -667,12 +667,14 @@ def run_owner_lane(
         meta = {
             "states": states,
             "rebuild_operators": rebuild_operators,
+            "operators_dry_run": bool(operators_dry_run),
             "center": center,
             "radius_miles": radius_miles,
             "min_parcels": min_parcels,
             "owner_segments": owner_segments,
             "resolve_limit": resolve_limit,
             "method": method,
+            "min_confidence": min_confidence,
             "project_id": resolved_project,
         }
         before = find_active_by_queue_key(make_queue_key("run_owner_lane", meta))
@@ -2801,6 +2803,7 @@ def classify_leads(
             plan_id=scope["plan_id"],
             run_id=scope["run_id"],
             client_tag=scope["client_tag"],
+            on_progress=lambda **p: _job_progress(**p),
         )
         out: dict[str, Any] = {
             "result": res,
@@ -3895,6 +3898,9 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 resumed.append(job.id)
             elif kind == "classify_leads":
                 m = dict(meta)
+                # Never re-force on resume — force=true wipes verdicts and
+                # restarts the starvation loop after every container restart.
+                m["force"] = False
 
                 def _classify(mm=m) -> dict[str, Any]:
                     from gmscraper import classify
@@ -3911,7 +3917,7 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                         text,
                         workers=int(mm.get("workers") or 0) or default_workers(llm),
                         source=str(mm.get("source") or ""),
-                        force=bool(mm.get("force")),
+                        force=False,
                         limit=int(mm.get("limit") or 0) or None,
                         include_no_site=bool(mm.get("include_no_site")),
                         center=str(mm.get("center") or ""),
@@ -3929,6 +3935,7 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                         plan_id=str(mm.get("plan_id") or ""),
                         run_id=str(mm.get("run_id") or ""),
                         client_tag=str(mm.get("client_tag") or ""),
+                        on_progress=lambda **p: _job_progress(**p),
                     )
                     return {
                         "result": res,
@@ -3941,9 +3948,45 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 job = start_job(
                     "classify_leads",
                     _classify,
-                    meta={**meta, "auto_resumed_from": rec.get("id")},
+                    meta={**meta, "force": False, "auto_resumed_from": rec.get("id")},
                     queue_key=make_queue_key("classify_leads", meta),
                     priority=int(meta.get("priority") or 20),
+                )
+                resumed.append(job.id)
+            elif kind == "run_owner_lane":
+                from gmscraper import outcomes as oc
+
+                m = dict(meta)
+                # Interrupted paid runs were never dry — default dry_run false on resume.
+                dry = bool(m.get("operators_dry_run", False))
+
+                def _owner(mm=m, dry=dry) -> dict[str, Any]:
+                    return oc.run_owner_lane(
+                        states=str(mm.get("states") or "TX"),
+                        rebuild_operators=bool(mm.get("rebuild_operators")),
+                        operators_dry_run=dry,
+                        min_parcels=int(mm.get("min_parcels") or 1),
+                        center=str(mm.get("center") or ""),
+                        radius_miles=float(mm.get("radius_miles") or 0),
+                        owner_segments=str(mm.get("owner_segments") or "private"),
+                        resolve_limit=int(mm.get("resolve_limit") or 0),
+                        method=str(mm.get("method") or "serp"),
+                        min_confidence=float(mm.get("min_confidence") or 0.35),
+                        project_id=str(mm.get("project_id") or ""),
+                        estimate_only=False,
+                        on_progress=lambda **p: _job_progress(**p),
+                    )
+
+                job = start_job(
+                    "run_owner_lane",
+                    _owner,
+                    meta={
+                        **meta,
+                        "operators_dry_run": dry,
+                        "auto_resumed_from": rec.get("id"),
+                    },
+                    queue_key=make_queue_key("run_owner_lane", meta),
+                    priority=int(meta.get("priority") or 10),
                 )
                 resumed.append(job.id)
             elif kind == "resolve_places" and meta.get("table"):

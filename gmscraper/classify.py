@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .config import settings
 from .evidence import ICP_HINTS, condense
@@ -179,6 +179,7 @@ def run(
     plan_id: str = "",
     run_id: str = "",
     client_tag: str = "",
+    on_progress: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     """Classify businesses against an ICP.
 
@@ -369,12 +370,31 @@ def run(
             counts["done"] += 1
             counts["in_icp"] += int(in_icp)
             counts["errors"] += int(not ok)
-            if counts["done"] % 10 == 0 or counts["done"] == len(llm_rows):
+            done_n = int(counts["done"])
+            in_icp_n = int(counts["in_icp"])
+            err_n = int(counts["errors"])
+            if done_n % 10 == 0 or done_n == len(llm_rows):
                 sys.stderr.write(
-                    f"\r  {counts['done']:,}/{len(llm_rows):,} | "
-                    f"in-ICP {counts['in_icp']:,} | errors {counts['errors']:,}   "
+                    f"\r  {done_n:,}/{len(llm_rows):,} | "
+                    f"in-ICP {in_icp_n:,} | errors {err_n:,}   "
                 )
                 sys.stderr.flush()
+                if on_progress is not None:
+                    try:
+                        on_progress(
+                            stage="classify",
+                            done=done_n,
+                            total=len(llm_rows),
+                            jobs_done=done_n,
+                            jobs_total=len(llm_rows),
+                            jobs_pending=max(0, len(llm_rows) - done_n),
+                            businesses_found=in_icp_n,
+                            in_icp=in_icp_n,
+                            errors=err_n,
+                            geo_rejected=geo_rejected,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
 
     if not llm_rows:
         counts["done"] = geo_rejected
@@ -389,6 +409,23 @@ def run(
         counts["remaining"] = remaining
         counts["has_more"] = remaining > 0
         return counts
+
+    if on_progress is not None:
+        try:
+            on_progress(
+                stage="classify",
+                done=0,
+                total=len(llm_rows),
+                jobs_done=0,
+                jobs_total=len(llm_rows),
+                jobs_pending=len(llm_rows),
+                businesses_found=0,
+                in_icp=0,
+                errors=0,
+                geo_rejected=geo_rejected,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(work, r) for r in llm_rows]
