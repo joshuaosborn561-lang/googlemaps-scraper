@@ -229,17 +229,22 @@ def resolve_one_row(
         }
 
     # Confidence cleared and we will write — Place Details for website / phone.
-    details = client.place_details(str(best.get("place_id") or ""))
+    # Always attempt Details on the main/batch path (not details_only); record the
+    # attempt even when the provider returns an empty shell so backfill can skip.
+    place_id = str(best.get("place_id") or "").strip()
+    details = client.place_details(place_id) if place_id else None
     website = ""
     phone = ""
     if details:
         website = (details.get("website") or "").strip()
         phone = (details.get("phone") or "").strip()
-        raw_store["details"] = {
-            "place_id": details.get("place_id"),
-            "website": website,
-            "phone": phone,
-        }
+    raw_store["details"] = {
+        "place_id": (details or {}).get("place_id") or place_id,
+        "website": website,
+        "phone": phone,
+        "attempted": True,
+        "provider_hit": bool(details),
+    }
     # Fall back to search-hit fields only when details omitted them.
     if not website:
         website = (best.get("website") or "").strip()
@@ -256,7 +261,7 @@ def resolve_one_row(
         binding.resolved_column: True,
         "website": website or None,
         "phone": phone or None,
-        "place_id": best.get("place_id") or None,
+        "place_id": place_id or None,
         "latitude": best.get("latitude"),
         "longitude": best.get("longitude"),
         "business_name": best.get("name") or None,
@@ -265,14 +270,17 @@ def resolve_one_row(
         "resolve_raw": raw_store,
     }
     sb.patch_row(binding, key, patch)
+    # details_ok / details_empty so batch progress counters match reality
+    # (previously always "resolved", which left details_ok stuck at 0).
     return {
         "key": key,
-        "status": "resolved",
+        "status": "details_ok" if (website or phone) else "details_empty",
         "confidence": conf,
         "domain": domain,
         "website": website,
         "phone": phone,
         "candidates": n_cand,
+        "place_id": place_id,
     }
 
 
@@ -502,6 +510,7 @@ def run(
                 total=total or done,
                 resolved=counts["resolved"],
                 details_ok=counts["details_ok"],
+                details_empty=counts["details_empty"],
                 no_match=counts["no_match"],
                 errors=counts["errors"],
                 requests=counts["requests"],
@@ -540,7 +549,11 @@ def run(
                 counts["details_ok"] += 1
                 counts["resolved"] += 1
             elif status == "details_empty":
+                # Main path: place matched, Details returned no website/phone.
+                # details_only path: backfill found nothing — not a new resolve.
                 counts["details_empty"] += 1
+                if not details_only:
+                    counts["resolved"] += 1
             elif status == "low_confidence":
                 counts["low_confidence"] += 1
             elif status == "kept_existing":
