@@ -1982,10 +1982,12 @@ def estimate_resolve_via_serp(
     limit: int = 0,
     project_id: str = "",
 ) -> str:
-    """Read-only Apify SERP cost estimate for resolve_via_serp. No spend.
+    """Read-only Apify SERP cost estimate + Lane-3 inventory. No spend.
 
     Pricing model: $0.001 actor start per batch of ≤100 queries + $0.0045/SERP.
-    OpenAI parse cost is separate (LLM bill). Prefer this before starting a run.
+    Returns an inventory truth table (with_domain, building_name_no_web,
+    pending_for_serp). Maps resolved=true does NOT mean useful — pending is
+    rows missing domain+website that have not been tried via SERP.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_serp as rs
@@ -1993,6 +1995,9 @@ def estimate_resolve_via_serp(
 
     resolved_project = _default_leads_project_id(table, project_id)
     resolved_schema = _default_source_schema(table, schema)
+    resolved_order = order_by or (
+        "portfolio_value DESC NULLS LAST" if table == "operators" else ""
+    )
     try:
         return _json(
             rs.run(
@@ -2003,7 +2008,7 @@ def estimate_resolve_via_serp(
                 name_column=name_column,
                 city_column=city_column,
                 where=where,
-                order_by=order_by,
+                order_by=resolved_order,
                 limit=int(limit or 0),
                 project_id=resolved_project,
                 estimate_only=True,
@@ -2038,19 +2043,19 @@ def resolve_via_serp(
     batch_size: int = 100,
     background: bool = True,
 ) -> str:
-    """Resolve source rows via Google SERP when Maps returns an empty building.
+    """Resolve source rows via Google SERP when Maps returns a building pin.
 
-    Same source-binding pattern as resolve_places. Queues unresolved rows plus
-    Maps-resolved empties (no operator_name/business_name/domain) that have not
-    yet been tried via SERP — so low-confidence Maps misses stay eligible.
-    Batches address strings into apify/google-search-scraper (100 queries/run,
-    $0.0045/SERP + $0.001 start), parses top organic with OpenAI, writes
-    operator_name, business_name, domain, website, phone, confidence, and marks
-    resolved (resumable — rows with resolve_raw.via='serp' are skipped).
+    Eligibility is missing domain+website and not yet tried via SERP — NOT
+    resolved=false. Maps often stamps resolved=true while writing the building
+    street address as business_name with no website; those rows stay eligible.
+    Operators default to portfolio_value DESC so the highest-value mailings run
+    first. Batches into apify/google-search-scraper (100/query, $0.0045/SERP +
+    $0.001 start), OpenAI-parses organics, writes operator_name/business_name/
+    domain/website/phone/confidence. Result includes outcome/useful_rate —
+    a run that touches many rows but writes 0 domains reports outcome=no_value.
 
-    Proven on suite addresses like "3102 MAPLE AVE STE 500, DALLAS TX" where
-    Maps left a Weitzman candidate at confidence 0.2 with nothing written.
-    Prefer estimate_resolve_via_serp for a cost check first. Counts only.
+    Proven on "3102 MAPLE AVE STE 500, DALLAS TX" → Weitzman. Prefer
+    estimate_resolve_via_serp first (shows inventory + cost). Counts only.
     """
     _ensure_repo_cwd()
     from gmscraper import resolve_serp as rs
@@ -2058,6 +2063,9 @@ def resolve_via_serp(
 
     resolved_project = _default_leads_project_id(table, project_id)
     resolved_schema = _default_source_schema(table, schema)
+    resolved_order = order_by or (
+        "portfolio_value DESC NULLS LAST" if table == "operators" else ""
+    )
 
     def _run() -> dict[str, Any]:
         try:
@@ -2069,7 +2077,7 @@ def resolve_via_serp(
                 name_column=name_column,
                 city_column=city_column,
                 where=where,
-                order_by=order_by,
+                order_by=resolved_order,
                 limit=int(limit or 0),
                 min_confidence=float(min_confidence or 0.35),
                 project_id=resolved_project,
@@ -2091,7 +2099,7 @@ def resolve_via_serp(
             "name_column": name_column,
             "city_column": city_column,
             "where": where,
-            "order_by": order_by,
+            "order_by": resolved_order,
             "limit": limit,
             "min_confidence": min_confidence,
             "batch_size": int(batch_size or 100),
@@ -3657,15 +3665,21 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 m["schema"] = schema
 
                 def _resolve_serp(mm=m) -> dict[str, Any]:
+                    tbl = mm.get("table") or ""
+                    order = mm.get("order_by") or (
+                        "portfolio_value DESC NULLS LAST"
+                        if tbl == "operators"
+                        else ""
+                    )
                     return rs.run(
                         schema=mm.get("schema") or "",
-                        table=mm.get("table") or "",
+                        table=tbl,
                         key_column=mm.get("key_column") or "operator_address",
                         address_column=mm.get("address_column") or "",
                         name_column=mm.get("name_column") or "",
                         city_column=mm.get("city_column") or "",
                         where=mm.get("where") or "",
-                        order_by=mm.get("order_by") or "",
+                        order_by=order,
                         limit=int(mm.get("limit") or 0),
                         min_confidence=float(mm.get("min_confidence") or 0.35),
                         batch_size=int(mm.get("batch_size") or 100),

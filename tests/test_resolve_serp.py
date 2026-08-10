@@ -67,7 +67,8 @@ def test_match_item_to_query() -> None:
     assert hit["organicResults"][0]["title"] == "Weitzman"
 
 
-def test_serp_pending_where_includes_maps_empty() -> None:
+def test_serp_pending_where_ignores_resolved_and_building_name() -> None:
+    """Building-as-business_name must NOT block SERP; resolved flag neither."""
     binding = sb.SourceBinding(
         project_id="kemvx",
         schema="permit_parcel",
@@ -79,10 +80,20 @@ def test_serp_pending_where_includes_maps_empty() -> None:
         resolved_column="resolved",
     )
     where = rs.serp_pending_where(binding)
-    assert "resolved = false" in where
-    assert "business_name" in where
-    assert "via" in where
+    assert "business_name" not in where  # name residue must not gate eligibility
+    assert "resolved" not in where
+    assert "domain" in where
+    assert "website" in where
     assert "serp" in where
+
+
+def test_is_address_like_name() -> None:
+    from gmscraper.resolve_places import is_address_like_name
+
+    assert is_address_like_name("3819 Maple Ave", "3819 MAPLE AVE, DALLAS TX")
+    assert is_address_like_name("2323 Victory Ave Ste 1500", "2323 VICTORY AVE STE 1500")
+    assert not is_address_like_name("Weitzman", "3102 MAPLE AVE STE 500, DALLAS TX")
+    assert not is_address_like_name("Hillwood Investment Properties", "9800 HILLWOOD")
 
 
 def test_run_writes_hit_and_marks_resolved(monkeypatch) -> None:
@@ -111,7 +122,22 @@ def test_run_writes_hit_and_marks_resolved(monkeypatch) -> None:
     monkeypatch.setattr(rs.sb, "resolve_binding", lambda **kw: binding)
     monkeypatch.setattr(rs.sb, "validate_binding", lambda b: None)
     monkeypatch.setattr(rs.sb, "ensure_writeback_columns", lambda b: {"ok": True})
-    monkeypatch.setattr(rs, "count_serp_pending", lambda b: 1)
+    monkeypatch.setattr(
+        rs,
+        "estimate",
+        lambda binding, limit=0: {
+            "pending_rows": 1,
+            "estimated_cost_usd": 0.0055,
+            "blocked": False,
+            "inventory": {
+                "total_rows": 1,
+                "pending_for_serp": 1,
+                "useful_with_domain": 0,
+                "useful_rate": 0.0,
+                "building_name_no_web": 0,
+            },
+        },
+    )
     calls = {"n": 0}
 
     def _fetch(b, limit=100, offset=0):
@@ -197,6 +223,23 @@ def test_estimate_only_no_spend(monkeypatch) -> None:
     monkeypatch.setattr(rs.sb, "resolve_binding", lambda **kw: binding)
     monkeypatch.setattr(rs.sb, "validate_binding", lambda b: None)
     monkeypatch.setattr(rs, "count_serp_pending", lambda b: 50)
+    monkeypatch.setattr(
+        rs,
+        "inventory",
+        lambda b: {
+            "total_rows": 100,
+            "with_domain": 2,
+            "with_website": 2,
+            "with_operator_name": 1,
+            "with_business_name": 80,
+            "via_serp": 1,
+            "building_name_no_web": 78,
+            "pending_for_serp": 50,
+            "useful_with_domain": 2,
+            "useful_rate": 0.02,
+            "note": "",
+        },
+    )
     monkeypatch.setattr(rs.settings, "apify_max_cost_usd", 5.0)
 
     out = rs.run(

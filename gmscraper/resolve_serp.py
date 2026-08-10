@@ -328,30 +328,81 @@ def run_serp_batch(queries: list[str], *, max_cost: float) -> dict[str, Any]:
 def serp_pending_where(binding: sb.SourceBinding) -> str:
     """Rows SERP should process.
 
-    Includes classic unresolved rows plus Maps-resolved empties (no name /
-    business_name / domain) that have not yet been tried via SERP. Without the
-    empty-fallback branch, suite mailings Maps marks resolved at low confidence
-    (e.g. Maple Ave → Weitzman candidate, score 0.2, nothing written) would
-    never enter the SERP queue.
+    Eligibility is about *usable identity* (a website/domain), not the Maps
+    ``resolved`` flag. Maps commonly stamps ``resolved=true`` and writes the
+    building's street address as ``business_name`` with no website — those rows
+    are exactly the ones SERP exists to fix. Requiring an empty business_name
+    previously hid ~10k of the highest-portfolio operators.
+
+    Queue = not yet tried via SERP AND still missing domain AND website.
     """
-    empty_bits = [
-        f"COALESCE({binding.domain_column}, '') = ''",
-        "COALESCE(business_name, '') = ''",
-    ]
-    if binding.name_column:
-        empty_bits.append(f"COALESCE({binding.name_column}, '') = ''")
-    empty = " AND ".join(empty_bits)
     not_serp_yet = (
         "(resolve_raw IS NULL OR COALESCE(resolve_raw->>'via', '') <> 'serp')"
     )
-    unresolved = (
-        f"({binding.resolved_column} IS NULL OR {binding.resolved_column} = false)"
+    no_web = (
+        f"COALESCE({binding.domain_column}, '') = '' "
+        f"AND COALESCE(website, '') = ''"
     )
-    maps_empty = f"(({empty}) AND {not_serp_yet})"
-    base = f"({unresolved} OR {maps_empty})"
+    base = f"({not_serp_yet} AND {no_web})"
     if binding.where:
         return f"({base}) AND ({binding.where})"
     return base
+
+
+def _count_where(binding: sb.SourceBinding, where: str | None) -> int:
+    n = sb.rpc(
+        binding,
+        "pp_count_rows",
+        {
+            "p_schema": binding.schema,
+            "p_table": binding.table,
+            "p_where": where,
+        },
+    )
+    return int(n or 0)
+
+
+def inventory(binding: sb.SourceBinding) -> dict[str, Any]:
+    """Truth table for Lane-3 last-mile — what Maps left vs what SERP can do."""
+    name_col = binding.name_column or "operator_name"
+    total = _count_where(binding, None)
+    with_domain = _count_where(
+        binding, f"COALESCE({binding.domain_column}, '') <> ''"
+    )
+    with_website = _count_where(binding, "COALESCE(website, '') <> ''")
+    with_name = _count_where(binding, f"COALESCE({name_col}, '') <> ''")
+    with_business = _count_where(binding, "COALESCE(business_name, '') <> ''")
+    via_serp = _count_where(binding, "resolve_raw->>'via' = 'serp'")
+    pending = count_serp_pending(binding)
+    # Building-as-name residue from Maps (has business_name, no web, not SERP).
+    building_only = _count_where(
+        binding,
+        (
+            "COALESCE(business_name, '') <> '' "
+            f"AND COALESCE({binding.domain_column}, '') = '' "
+            "AND COALESCE(website, '') = '' "
+            "AND (resolve_raw IS NULL OR COALESCE(resolve_raw->>'via', '') <> 'serp')"
+        ),
+    )
+    useful = with_domain  # domain is what unlocks contact enrichment
+    return {
+        "total_rows": total,
+        "with_domain": with_domain,
+        "with_website": with_website,
+        "with_operator_name": with_name,
+        "with_business_name": with_business,
+        "via_serp": via_serp,
+        "building_name_no_web": building_only,
+        "pending_for_serp": pending,
+        "useful_with_domain": useful,
+        "useful_rate": round(useful / total, 4) if total else 0.0,
+        "note": (
+            "Maps 'resolved=true' is NOT the same as useful. "
+            "SERP queues rows missing domain+website that have not been "
+            "tried via SERP — including rows where Maps wrote a building "
+            "address as business_name."
+        ),
+    }
 
 
 def count_serp_pending(binding: sb.SourceBinding) -> int:
@@ -411,12 +462,27 @@ def estimate(
     *,
     limit: int = 0,
 ) -> dict[str, Any]:
-    n = count_serp_pending(binding)
+    inv = inventory(binding)
+    n = int(inv.get("pending_for_serp") or 0)
     if limit and limit > 0:
         n = min(n, int(limit))
     cost = round(estimate_cost_usd(n), 4)
     max_cost = float(getattr(settings, "apify_max_cost_usd", 5.0) or 5.0)
     blocked = cost > max_cost
+    warning = None
+    if inv.get("total_rows") and inv.get("useful_rate", 0) < 0.05:
+        warning = (
+            f"Only {inv.get('useful_with_domain')}/{inv.get('total_rows')} rows "
+            f"currently have a domain ({inv.get('useful_rate'):.1%}). "
+            f"{inv.get('building_name_no_web')} still have a Maps building-name "
+            f"with no website — those are included in pending_for_serp."
+        )
+    if n == 0:
+        warning = (
+            "No SERP-eligible rows (every row already has domain/website or "
+            "resolve_raw.via='serp'). If Maps marked resolved without websites, "
+            "that is expected to still be eligible — check inventory."
+        )
     return {
         "project_id": binding.project_id,
         "schema": binding.schema,
@@ -429,7 +495,9 @@ def estimate(
         "blocked": blocked,
         "block_reason": "exceeds_APIFY_MAX_COST_USD" if blocked else None,
         "actor": _serp_actor(),
-        "pending_mode": "unresolved_or_maps_empty",
+        "pending_mode": "missing_web_not_yet_serp",
+        "inventory": inv,
+        "warning": warning,
         "cost_model": {
             "start_usd": COST_START_USD,
             "per_serp_usd": COST_SERP_USD,
@@ -490,6 +558,7 @@ def run(
         "rows": 0,
         "resolved": 0,
         "hit": 0,
+        "useful_with_domain": 0,
         "no_match": 0,
         "errors": 0,
         "batches": 0,
@@ -498,6 +567,7 @@ def run(
         "estimated_cost_usd": est.get("estimated_cost_usd"),
         "actor": _serp_actor(),
         "batch_size": batch_n,
+        "inventory_before": est.get("inventory"),
     }
     done = 0
     total = pending_total or 0
@@ -637,7 +707,9 @@ def run(
             domain = extracted.get("domain") or ""
             phone = extracted.get("phone") or ""
             officer = extracted.get("officer_name") or ""
+            # A company name alone is a partial win; a domain unlocks enrichment.
             hit = bool(company) and conf >= float(min_confidence)
+            useful = hit and bool(domain)
 
             raw_store = {
                 "via": "serp",
@@ -646,6 +718,9 @@ def run(
                 "run_id": result.get("run_id"),
                 "organic": organic[:5],
                 "extracted": extracted,
+                "status": (
+                    "useful" if useful else ("hit_no_domain" if hit else "no_match")
+                ),
             }
             patch: dict[str, Any] = {
                 binding.resolved_column: True,
@@ -664,10 +739,11 @@ def run(
                     patch["website"] = website
                 if phone:
                     patch["phone"] = phone
-                if officer and binding.name_column:
-                    # Keep company as operator_name; officer lives in resolve_raw.
+                if officer:
                     raw_store["officer_name"] = officer
                 counts["hit"] += 1
+                if useful:
+                    counts["useful_with_domain"] += 1
             else:
                 counts["no_match"] += 1
             counts["resolved"] += 1
@@ -684,6 +760,31 @@ def run(
 
     counts["rows"] = done
     _tick(finished=True)
+
+    useful = int(counts["useful_with_domain"])
+    rows_n = int(counts["rows"])
+    if rows_n == 0:
+        outcome = "nothing_to_do"
+        warning = (
+            "No eligible rows processed. Check inventory.pending_for_serp — "
+            "eligibility is missing domain+website, not resolved=false."
+        )
+    elif useful == 0:
+        outcome = "no_value"
+        warning = (
+            f"Processed {rows_n} rows but wrote 0 domains. "
+            "Job completed mechanically; produced nothing enrichable."
+        )
+    elif useful / rows_n < 0.1:
+        outcome = "low_value"
+        warning = (
+            f"Only {useful}/{rows_n} rows got a domain "
+            f"({useful / rows_n:.1%}). Treat as a weak run."
+        )
+    else:
+        outcome = "ok"
+        warning = None
+
     return {
         **counts,
         "project_id": binding.project_id,
@@ -692,4 +793,7 @@ def run(
         "min_confidence": min_confidence,
         "ensured": ensured,
         "usage_usd": round(counts["usage_usd"], 4),
+        "outcome": outcome,
+        "warning": warning,
+        "useful_rate": round(useful / rows_n, 4) if rows_n else 0.0,
     }

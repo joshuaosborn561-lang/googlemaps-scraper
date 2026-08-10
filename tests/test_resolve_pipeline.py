@@ -120,6 +120,57 @@ def test_resolve_one_row_calls_details_only_on_pass(monkeypatch) -> None:
     assert patches[-1]["phone"] == "+12145551212"
 
 
+def test_resolve_one_row_building_pin_not_written_as_company(monkeypatch) -> None:
+    """Maps building address-as-name with no website must not pollute business_name."""
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(
+        project_id="x",
+        schema="s",
+        table="t",
+        key_column="id",
+        address_column="addr",
+        domain_column="domain",
+        resolved_column="resolved",
+        confidence_column="confidence",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    patches: list[dict] = []
+    monkeypatch.setattr(
+        resolve_places.sb, "patch_row", lambda b, key, patch: patches.append(patch)
+    )
+
+    client = MagicMock()
+    client.request_count = 0
+    client.search.return_value = [
+        {
+            "place_id": "ChIJbldg",
+            "name": "3819 Maple Ave",
+            "address": "3819 Maple Ave, Dallas, TX 75219",
+            "zip": "75219",
+            "website": "",
+            "phone": "",
+            "latitude": 1.0,
+            "longitude": 2.0,
+        }
+    ]
+    client.place_details.return_value = {
+        "place_id": "ChIJbldg",
+        "website": "",
+        "phone": "",
+    }
+
+    row = {"id": 1, "addr": "3819 MAPLE AVE, DALLAS TX 75219"}
+    out = resolve_places.resolve_one_row(
+        client, binding, row, strategy="address", min_confidence=0.6
+    )
+    assert out["status"] == "building_only"
+    assert "business_name" not in patches[-1]
+    assert patches[-1]["resolved"] is True
+    assert patches[-1]["resolve_raw"]["status"] == "building_only"
+
+
 def test_resolve_one_row_skips_details_on_low_confidence(monkeypatch) -> None:
     from gmscraper import source_binding as sb
 

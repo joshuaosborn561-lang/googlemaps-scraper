@@ -29,6 +29,34 @@ VIRTUAL_OFFICE = re.compile(
     re.I,
 )
 
+# Maps often returns the building pin whose "name" is just the street address.
+_STREET_TOKEN = re.compile(
+    r"\b(ave|avenue|st|street|rd|road|blvd|boulevard|dr|drive|ln|lane|"
+    r"pkwy|parkway|hwy|highway|way|ct|court|pl|place|cir|circle|trl|trail)\b",
+    re.I,
+)
+
+
+def is_address_like_name(name: str, query_address: str = "") -> bool:
+    """True when Maps 'business name' is really just a street address / suite."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    # Leading house number + street token → building label.
+    if STREET_NUM.search(n) and _STREET_TOKEN.search(n):
+        return True
+    # Name equals / is contained in the query address (normalized).
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+    nn, qq = _norm(n), _norm(query_address)
+    if nn and qq and (nn == qq or nn in qq or qq in nn):
+        return True
+    # Suite-only labels like "Suite 500" / "#770" (prefix required).
+    if re.fullmatch(r"(?:ste|suite|unit|#)\s*[A-Za-z0-9\-]+", n, re.I):
+        return True
+    return False
+
 
 def _street_number(addr: str) -> str:
     m = STREET_NUM.search(addr or "")
@@ -250,6 +278,35 @@ def resolve_one_row(
     raw_store["picked"]["phone"] = phone
     raw_store["picked"]["domain"] = domain
 
+    name = str(best.get("name") or "").strip()
+    # Building pin with no website is not a company. Mark Maps spend done so we
+    # do not re-query Places, but do NOT write the street address as a company
+    # name — that previously blocked SERP eligibility and corrupted the top of
+    # the operator list with "3819 Maple Ave"-style labels.
+    if is_address_like_name(name, address or used_query) and not website:
+        raw_store["status"] = "building_only"
+        patch = {
+            binding.confidence_column: round(conf, 4),
+            binding.resolved_column: True,
+            "place_id": best.get("place_id") or None,
+            "latitude": best.get("latitude"),
+            "longitude": best.get("longitude"),
+            "candidates": n_cand,
+            "resolved_at": now,
+            "resolve_raw": raw_store,
+        }
+        sb.patch_row(binding, key, patch)
+        return {
+            "key": key,
+            "status": "building_only",
+            "confidence": conf,
+            "domain": "",
+            "website": "",
+            "phone": "",
+            "candidates": n_cand,
+        }
+
+    raw_store["status"] = "resolved"
     patch = {
         binding.domain_column: domain or None,
         binding.confidence_column: round(conf, 4),
@@ -259,7 +316,7 @@ def resolve_one_row(
         "place_id": best.get("place_id") or None,
         "latitude": best.get("latitude"),
         "longitude": best.get("longitude"),
-        "business_name": best.get("name") or None,
+        "business_name": name or None,
         "candidates": n_cand,
         "resolved_at": now,
         "resolve_raw": raw_store,
@@ -273,6 +330,7 @@ def resolve_one_row(
         "website": website,
         "phone": phone,
         "candidates": n_cand,
+        "useful": bool(domain),
     }
 
 
@@ -476,6 +534,8 @@ def run(
         "started": True,
         "rows": 0,
         "resolved": 0,
+        "useful_with_domain": 0,
+        "building_only": 0,
         "details_ok": 0,
         "details_empty": 0,
         "low_confidence": 0,
@@ -501,6 +561,8 @@ def run(
                 done=done,
                 total=total or done,
                 resolved=counts["resolved"],
+                useful_with_domain=counts["useful_with_domain"],
+                building_only=counts["building_only"],
                 details_ok=counts["details_ok"],
                 no_match=counts["no_match"],
                 errors=counts["errors"],
@@ -536,9 +598,16 @@ def run(
             counts["requests"] += local.request_count
             if status == "resolved":
                 counts["resolved"] += 1
+                if result.get("useful") or result.get("domain"):
+                    counts["useful_with_domain"] += 1
+            elif status == "building_only":
+                counts["building_only"] += 1
+                counts["resolved"] += 1  # Maps spend done; not a useful company
             elif status == "details_ok":
                 counts["details_ok"] += 1
                 counts["resolved"] += 1
+                if result.get("domain") or result.get("website"):
+                    counts["useful_with_domain"] += 1
             elif status == "details_empty":
                 counts["details_empty"] += 1
             elif status == "low_confidence":
@@ -604,6 +673,27 @@ def run(
     counts["rows"] = done
     _tick(batch=batch_n, finished=True)
 
+    useful = int(counts["useful_with_domain"])
+    rows_n = int(counts["rows"])
+    building = int(counts["building_only"])
+    if rows_n == 0:
+        outcome, warning = "nothing_to_do", "No pending rows."
+    elif useful == 0:
+        outcome = "no_value"
+        warning = (
+            f"Processed {rows_n} rows but wrote 0 domains "
+            f"({building} were building-only pins). "
+            "This is NOT a successful company resolve — use resolve_via_serp."
+        )
+    elif useful / rows_n < 0.1:
+        outcome = "low_value"
+        warning = (
+            f"Only {useful}/{rows_n} rows got a domain "
+            f"({building} building-only). Prefer resolve_via_serp for the rest."
+        )
+    else:
+        outcome, warning = "ok", None
+
     return {
         **counts,
         "project_id": binding.project_id,
@@ -612,4 +702,7 @@ def run(
         "strategy": strategy,
         "min_confidence": min_confidence,
         "ensured": ensured,
+        "outcome": outcome,
+        "warning": warning,
+        "useful_rate": round(useful / rows_n, 4) if rows_n else 0.0,
     }
