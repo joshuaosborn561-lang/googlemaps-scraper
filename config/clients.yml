@@ -1,0 +1,27 @@
+# Canonical client registry for multi-client isolation.
+# Each client gets its own Supabase tables in public (PostgREST-visible):
+#   {slug}_leads / {slug}_contacts / {slug}_companies
+# Always pass client_tag on scrape / enrich / sync so rows never mix.
+
+clients:
+  peterson:
+    display_name: Roofs by Peterson
+    contact_name: Kyle Peterson
+    aliases: [kyle, roofs_by_peterson, rbp, dfw_roofing]
+    supabase_schema: public
+    leads_table: peterson_leads
+    contacts_table: peterson_contacts
+    companies_table: peterson_companies
+    default_geo: "Dallas-Fort Worth, TX"
+    notes: "Commercial roofing — GCs, property managers, property owners"
+
+  basco:
+    display_name: Basco Warranty Services
+    contact_name: Carlos Vasquez
+    aliases: [carlos, basco_warranty, dealerships, ny_dealers]
+    supabase_schema: public
+    leads_table: basco_leads
+    contacts_table: basco_contacts
+    companies_table: basco_companies
+    default_geo: "Clifton, NJ"
+    notes: "Franchise new-car dealerships — service / fixed ops directors"
