@@ -1,17 +1,46 @@
-"""LeadMagic client — waterfall tier 3 (email finder)."""
+"""LeadMagic client — email finder + people search (DM discovery)."""
 
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Sequence
 
 import requests
 
 from .base import EmailHit, PersonHit, split_name
 
+# LeadMagic people-search accepts at most 12 title terms.
+_MAX_TITLES = 12
+
 
 def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
+
+
+def _norm_titles(titles: Sequence[str] | None) -> list[str]:
+    """Cap + dedupe titles for /v3/people/search (max 12)."""
+    if not titles:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in titles:
+        t = str(raw or "").strip()
+        if not t:
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        # API examples use Title Case; keep acronyms like GM / VP uppercase.
+        if key in {"gm", "vp", "ceo", "coo", "cfo", "cto", "cmo"}:
+            out.append(key.upper())
+        elif t.islower():
+            out.append(t.title())
+        else:
+            out.append(t)
+        if len(out) >= _MAX_TITLES:
+            break
+    return out
 
 
 class LeadMagicClient:
@@ -75,21 +104,40 @@ class LeadMagicClient:
         )
 
     def find_people(
-        self, domain: str, company_name: str = "", limit: int = 5
+        self,
+        domain: str,
+        company_name: str = "",
+        limit: int = 10,
+        titles: Sequence[str] | None = None,
+        *,
+        include_contact_details: bool = False,
     ) -> list[PersonHit]:
-        """Optional role search — best-effort; email-finder is the primary use."""
+        """DM discovery via POST /v3/people/search (not role-finder).
+
+        Pass ``titles`` (up to 12) — e.g. Service Director, Service Manager.
+        Without titles the call is skipped (broad search burns credits poorly).
+        Contact-detail unlocks stay off by default (1 credit / person; email
+        finder fills emails in a later step).
+        """
         if not self.enabled or not domain:
             return []
-        body = {
+        title_list = _norm_titles(titles)
+        if not title_list:
+            return []
+
+        body: dict[str, Any] = {
             "company_domain": domain,
-            "domain": domain,
-            "company_name": company_name or domain,
-            "limit": limit,
+            "titles": title_list,
+            "limit": max(1, min(int(limit or 10), 50)),
+            "include_contact_details": bool(include_contact_details),
         }
+        if company_name:
+            body["company_name"] = company_name
+
         self.calls += 1
         try:
             r = requests.post(
-                f"{self.base_url}/v1/people/role-finder",
+                f"{self.base_url}/v3/people/search",
                 json=body,
                 headers=self._headers(),
                 timeout=self.timeout,
@@ -99,28 +147,63 @@ class LeadMagicClient:
             data = r.json()
         except (requests.RequestException, ValueError):
             return []
-        rows = data.get("data") or data.get("people") or data.get("results") or []
-        if isinstance(data, list):
+
+        rows = []
+        if isinstance(data, dict):
+            rows = data.get("people") or data.get("data") or data.get("results") or []
+        elif isinstance(data, list):
             rows = data
+
         out: list[PersonHit] = []
         for row in (rows or [])[:limit]:
             if not isinstance(row, dict):
                 continue
-            first = str(row.get("first_name") or "").strip()
-            last = str(row.get("last_name") or "").strip()
-            full = str(row.get("full_name") or row.get("name") or "").strip()
+            first = str(
+                row.get("contact_first_name")
+                or row.get("first_name")
+                or ""
+            ).strip()
+            last = str(
+                row.get("contact_last_name")
+                or row.get("last_name")
+                or ""
+            ).strip()
+            full = str(
+                row.get("contact_full_name")
+                or row.get("full_name")
+                or row.get("name")
+                or ""
+            ).strip()
             if not first and full:
                 first, last = split_name(full)
             if not (first or full):
                 continue
+            title = str(
+                row.get("contact_job_title")
+                or row.get("title")
+                or row.get("job_title")
+                or ""
+            )
+            email = str(
+                row.get("contact_email")
+                or row.get("email")
+                or ""
+            ).strip().lower()
+            linkedin = str(
+                row.get("contact_linkedin_url")
+                or row.get("linkedin_url")
+                or row.get("profile_url")
+                or ""
+            )
             out.append(
                 PersonHit(
                     first_name=first,
                     last_name=last,
                     full_name=full or f"{first} {last}".strip(),
-                    title=str(row.get("title") or row.get("job_title") or ""),
-                    email=str(row.get("email") or "").strip().lower(),
-                    linkedin_url=str(row.get("linkedin_url") or row.get("profile_url") or ""),
+                    title=title,
+                    email=email,
+                    linkedin_url=linkedin,
+                    job_level=str(row.get("contact_job_level") or ""),
                     source_tier=self.tier,
                     raw=row,
                 )

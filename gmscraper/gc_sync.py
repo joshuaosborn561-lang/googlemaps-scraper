@@ -87,12 +87,81 @@ def _request(
         ) from exc
 
 
+def _prefer_str(a: Any, b: Any) -> Any:
+    """Keep a unless empty and b is set."""
+    if a is None or a == "" or a == {}:
+        return b if b not in (None, "", {}) else a
+    return a
+
+
+def merge_company_rows(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    """Merge two company rows for the same domain (prefer found DM / richer fields)."""
+    out = dict(a)
+    # Prefer dm found over not_found / empty.
+    a_status = str(a.get("dm_lookup_status") or "")
+    b_status = str(b.get("dm_lookup_status") or "")
+    if b_status == "found" and a_status != "found":
+        out["dm_lookup_status"] = "found"
+        out["dm_source_tier"] = b.get("dm_source_tier") or a.get("dm_source_tier")
+    elif a_status != "found":
+        out["dm_lookup_status"] = _prefer_str(a_status, b_status) or None
+        out["dm_source_tier"] = _prefer_str(
+            a.get("dm_source_tier"), b.get("dm_source_tier")
+        )
+
+    out["email_source_tier"] = _prefer_str(
+        a.get("email_source_tier"), b.get("email_source_tier")
+    )
+    out["company_name"] = _prefer_str(a.get("company_name"), b.get("company_name"))
+    out["source"] = _prefer_str(a.get("source"), b.get("source"))
+    out["place"] = _prefer_str(a.get("place"), b.get("place"))
+    out["address_city"] = _prefer_str(a.get("address_city"), b.get("address_city"))
+    out["address_state"] = _prefer_str(a.get("address_state"), b.get("address_state"))
+    out["website"] = _prefer_str(a.get("website"), b.get("website"))
+    out["in_maps_icp"] = bool(a.get("in_maps_icp") or b.get("in_maps_icp"))
+    out["in_shovels"] = bool(a.get("in_shovels") or b.get("in_shovels"))
+    if a.get("permit_count") is None and b.get("permit_count") is not None:
+        out["permit_count"] = b.get("permit_count")
+
+    tier_a = a.get("source_tier") if isinstance(a.get("source_tier"), dict) else {}
+    tier_b = b.get("source_tier") if isinstance(b.get("source_tier"), dict) else {}
+    out["source_tier"] = {**tier_a, **{k: v for k, v in tier_b.items() if v}}
+    if b.get("updated_at"):
+        out["updated_at"] = b["updated_at"]
+    if b.get("client_tag") and not a.get("client_tag"):
+        out["client_tag"] = b["client_tag"]
+    return out
+
+
+def dedupe_companies_by_domain(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per domain — Postgres ON CONFLICT DO UPDATE rejects duplicates in one batch."""
+    by_domain: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        domain = str(r.get("domain") or "").strip().lower()
+        if not domain:
+            continue
+        row = {**r, "domain": domain}
+        if domain not in by_domain:
+            by_domain[domain] = row
+            order.append(domain)
+        else:
+            by_domain[domain] = merge_company_rows(by_domain[domain], row)
+    return [by_domain[d] for d in order]
+
+
 def upsert_companies(
     rows: list[dict[str, Any]],
     *,
     client_tag: str = "",
     schema: str = "",
 ) -> int:
+    if not rows:
+        return 0
+    # Same domain on multiple input rows → 21000 without this.
+    rows = dedupe_companies_by_domain(rows)
     if not rows:
         return 0
     target = resolve_write_schema(client_tag, schema)
@@ -113,7 +182,7 @@ def upsert_companies(
         prefer="resolution=merge-duplicates,return=minimal",
         schema=target["schema"],
     )
-    return len(rows)
+    return len(payload)
 
 
 def insert_contacts(

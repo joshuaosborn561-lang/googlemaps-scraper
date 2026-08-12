@@ -47,12 +47,12 @@ DM_TITLE_HINTS = (
 )
 
 # Basco / warranty-admin default when callers pass nothing explicit.
+# First 12 are sent to LeadMagic /v3/people/search (API title cap); keep
+# GM / Dealer Principal inside that window. Trailing synonyms are local-only.
 DEFAULT_DM_TARGET_TITLES = (
     "service director",
     "fixed operations director",
     "fixed ops director",
-    "fixed operations",
-    "fixed ops",
     "service manager",
     "warranty manager",
     "warranty administrator",
@@ -62,6 +62,8 @@ DEFAULT_DM_TARGET_TITLES = (
     "general manager",
     "dealer principal",
     "gm",
+    "fixed operations",
+    "fixed ops",
 )
 
 
@@ -427,14 +429,19 @@ class Waterfall:
             else:
                 self._skip("getleads", "no_people_returned")
 
-        # 4) LeadMagic
+        # 4) LeadMagic — /v3/people/search with titles[] (not role-finder).
         if not self._allowed("leadmagic"):
             self._skip("leadmagic", "max_tier_excludes_leadmagic")
         elif not self.leadmagic.enabled:
             self._skip("leadmagic", "vendor_disabled_or_missing_key")
         else:
+            lm_titles = titles or list(DEFAULT_DM_TARGET_TITLES)
             self._bump("leadmagic", "calls")
-            people = self.leadmagic.find_people(domain, row.get("company_name") or "")
+            people = self.leadmagic.find_people(
+                domain,
+                row.get("company_name") or "",
+                titles=lm_titles,
+            )
             picked = self._pick(people)
             if picked:
                 self._bump("leadmagic", "dm_hits")
