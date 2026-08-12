@@ -229,6 +229,94 @@ def resolve_urls(
     return out
 
 
+# Paid social-profile enrichment stays OFF — flat false object satisfies the
+# current actor schema (object required; boolean 400s since ~Aug 2026).
+_SOCIAL_PROFILES_OFF: dict[str, bool] = {
+    "facebooks": False,
+    "instagrams": False,
+    "youtubes": False,
+    "tiktoks": False,
+    "twitters": False,
+}
+
+
+def build_contact_actor_input(
+    urls: list[str],
+    *,
+    max_pages_per_site: int = 3,
+    use_proxy: bool = True,
+) -> dict[str, Any]:
+    """Build vdrmota/contact-info-scraper input matching the current schema.
+
+    Validates required shapes so we fail in-process instead of Apify 400s.
+    Paid leads-enrichment / social-profile add-ons stay disabled.
+    """
+    pages_per = max(1, int(max_pages_per_site or 3))
+    start_urls = [{"url": u} for u in urls if u]
+    if not start_urls:
+        raise ValueError("build_contact_actor_input requires at least one URL")
+
+    run_input: dict[str, Any] = {
+        "startUrls": start_urls,
+        "maxRequestsPerStartUrl": pages_per,
+        "mergeContacts": True,
+        "maxDepth": 2,
+        "sameDomain": True,
+        "considerChildFrames": False,
+        # Keep paid leads / email-verify / social add-ons OFF.
+        "maximumLeadsEnrichmentRecords": 0,
+        "verifyLeadsEnrichmentEmails": False,
+        "scrapeSocialMediaProfiles": dict(_SOCIAL_PROFILES_OFF),
+        "useBrowser": False,
+        "waitUntil": "domcontentloaded",
+        "proxyConfig": {"useApifyProxy": bool(use_proxy)},
+    }
+    validate_contact_actor_input(run_input)
+    return run_input
+
+
+def validate_contact_actor_input(run_input: dict[str, Any]) -> None:
+    """Raise ValueError if payload would 400 against the actor input schema."""
+    if not isinstance(run_input.get("startUrls"), list) or not run_input["startUrls"]:
+        raise ValueError("startUrls must be a non-empty list of {url} objects")
+    for item in run_input["startUrls"]:
+        if not isinstance(item, dict) or not str(item.get("url") or "").strip():
+            raise ValueError(f"startUrls entries must be {{url: ...}}; got {item!r}")
+
+    social = run_input.get("scrapeSocialMediaProfiles")
+    if not isinstance(social, dict):
+        raise ValueError(
+            "scrapeSocialMediaProfiles must be an object "
+            f"(facebooks/instagrams/…); got {type(social).__name__}"
+        )
+    for key in _SOCIAL_PROFILES_OFF:
+        if key not in social:
+            raise ValueError(f"scrapeSocialMediaProfiles missing key {key!r}")
+        if not isinstance(social[key], bool):
+            raise ValueError(
+                f"scrapeSocialMediaProfiles.{key} must be bool; got {social[key]!r}"
+            )
+
+    proxy = run_input.get("proxyConfig")
+    if proxy is not None and not isinstance(proxy, dict):
+        raise ValueError("proxyConfig must be an object")
+
+    # Legacy boolean flag removed from schema — reject if callers sneak it in.
+    if "leadsEnrichment" in run_input and not isinstance(
+        run_input.get("leadsEnrichment"), (list, type(None))
+    ):
+        # Actor no longer accepts a bare boolean; strip would be silent — fail loud.
+        if isinstance(run_input.get("leadsEnrichment"), bool):
+            raise ValueError(
+                "leadsEnrichment boolean is invalid; use "
+                "maximumLeadsEnrichmentRecords=0 to disable paid leads"
+            )
+
+    for int_key in ("maxRequestsPerStartUrl", "maxDepth", "maximumLeadsEnrichmentRecords"):
+        if int_key in run_input and not isinstance(run_input[int_key], int):
+            raise ValueError(f"{int_key} must be int")
+
+
 def crawl(
     store: Store,
     *,
@@ -284,23 +372,11 @@ def crawl(
         raise RuntimeError("APIFY_TOKEN failed validation against /v2/users/me")
 
     actor = _actor_id(settings.apify_contact_actor)
-    # vdrmota/contact-info-scraper input schema
-    run_input: dict[str, Any] = {
-        "startUrls": [{"url": u} for u in urls],
-        "maxRequestsPerStartUrl": pages_per,
-        "mergeContacts": True,
-        "maxDepth": 2,
-        "sameDomain": True,
-        "considerChildFrames": False,
-        # Keep paid leads / email-verify / social add-ons OFF.
-        # Any of these at ~$0.10/event turns a $64 job into a $1k+ job.
-        "maximumLeadsEnrichmentRecords": 0,
-        "verifyLeadsEnrichmentEmails": False,
-        "leadsEnrichment": False,
-        "scrapeSocialMediaProfiles": False,
-        "useBrowser": False,
-        "proxyConfig": {"useApifyProxy": bool(use_proxy)},
-    }
+    run_input = build_contact_actor_input(
+        urls,
+        max_pages_per_site=pages_per,
+        use_proxy=bool(use_proxy),
+    )
 
     start_url = f"{settings.apify_base_url}/v2/acts/{actor}/runs"
     # max_cost <= 0 = no global ceiling; still bound this single actor run.

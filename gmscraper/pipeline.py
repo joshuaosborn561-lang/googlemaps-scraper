@@ -296,6 +296,7 @@ def run(
                         "company_name": d,
                     }
                 )
+            titles = [t.strip() for t in (target_titles or "").split(",") if t.strip()]
             wf = waterfall.enrich_waterfall(
                 rows_in,
                 need="both",
@@ -304,6 +305,7 @@ def run(
                 max_tier=max_tier,
                 run_apify=False,  # discovery already handled by extract/resolve
                 on_progress=lambda **p: _tick("contacts", **p),
+                target_titles=titles or None,
             )
             out["per_stage"]["contacts"] = {
                 k: wf.get(k)

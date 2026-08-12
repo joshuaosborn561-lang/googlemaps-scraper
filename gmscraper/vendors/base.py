@@ -35,9 +35,30 @@ class EmailHit:
 
 
 def split_name(full: str) -> tuple[str, str]:
-    parts = [p for p in (full or "").strip().split() if p]
+    """Split a full name into (first, last), dropping generational suffixes.
+
+    ``Leo Karl III`` → ``("Leo", "Karl")`` — not last=``III``.
+    """
+    parts = [p for p in (full or "").replace(",", " ").split() if p]
+    while len(parts) >= 2 and _is_name_suffix(parts[-1]):
+        parts = parts[:-1]
     if not parts:
         return "", ""
     if len(parts) == 1:
         return parts[0], ""
     return parts[0], parts[-1]
+
+
+_NAME_SUFFIXES = {
+    "jr", "sr", "esq", "md", "phd", "phd.", "cpa", "dds", "do", "dvm",
+}
+_NAME_SUFFIX_ROMAN = {"ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+
+
+def _is_name_suffix(token: str) -> bool:
+    t = (token or "").strip().rstrip(".").lower()
+    if not t:
+        return False
+    if t in _NAME_SUFFIXES or t in _NAME_SUFFIX_ROMAN:
+        return True
+    return False

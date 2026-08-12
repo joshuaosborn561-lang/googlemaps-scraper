@@ -3234,8 +3234,10 @@ def enrich_waterfall(
     run_apify: bool = True,
     background: bool = True,
     client_tag: str = "",
+    target_titles: str = "",
+    require_title_match: bool = True,
 ) -> str:
-    """Walk apify → AI Ark → getleads → LeadMagic → FullEnrich.
+    """Walk site/team crawl → AI Ark → getleads → LeadMagic → FullEnrich.
 
     Pass client_tag ('peterson' / 'basco') so contacts write to
     {slug}_contacts / {slug}_companies. Omitting client_tag falls back to
@@ -3245,6 +3247,12 @@ def enrich_waterfall(
     need = 'email' | 'dm' | 'both'.
     max_tier = 'apify' | 'aiark' | 'getleads' | 'leadmagic' | 'fullenrich'
     (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
+
+    target_titles = comma-separated roles to rank/reject against for need=dm.
+    For client_tag=basco defaults to Service Director → Fixed Ops → Service
+    Manager → Warranty Manager → GM / Dealer Principal. Without titles,
+    loose DM hints still reject non-DM staff (porter, clerk, …).
+    require_title_match=false accepts the first usable person regardless of title.
     Response is counts only.
     """
     _ensure_repo_cwd()
@@ -3270,6 +3278,8 @@ def enrich_waterfall(
                 run_apify=bool(run_apify),
                 on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
                 client_tag=client_tag,
+                target_titles=target_titles or None,
+                require_title_match=bool(require_title_match),
             )
         except Exception as exc:  # noqa: BLE001
             return tool_error_from_exception(exc)
@@ -3283,6 +3293,7 @@ def enrich_waterfall(
             "need": need_norm,
             "max_tier": max_tier_n,
             "client_tag": client_tag or None,
+            "target_titles": (target_titles or "")[:200] or None,
             "rows_chars": len(rows or ""),
             "rows_fingerprint": hashlib.sha1((rows or "").encode()).hexdigest()[:16],
         }

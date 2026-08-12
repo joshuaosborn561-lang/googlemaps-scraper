@@ -50,7 +50,7 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `estimate_apify_contact_crawl` | no | Read-only Apify cost estimate |
 | `apify_contact_crawl` | Apify | Website contact crawl (no approval) |
 | `parse_contacts_openai` | LLM | Parse Apify raw → people in `gc.*` (no approval) |
-| `enrich_waterfall` | paid vendors | apify→AI Ark→getleads→LeadMagic (`max_tier` default leadmagic) → `gc.*` |
+| `enrich_waterfall` | paid vendors | site/team crawl → AI Ark → getleads → LeadMagic (`max_tier` default leadmagic; FullEnrich opt-in). `target_titles` ranks/rejects DMs. → `gc.*` / `{client}_*` |
 | `fullenrich_find_email` | FullEnrich | Last-tier email only |
 | `export_csv` | no | CSV text in response (`total_matching`, `capped_at`, `csv`); optional `out_path` |
 | `query_leads` | no | Paginated rows (`page` / `page_size` max 50) |

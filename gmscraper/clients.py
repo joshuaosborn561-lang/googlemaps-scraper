@@ -237,8 +237,8 @@ CREATE TABLE IF NOT EXISTS {schema}.{contacts} (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS {contacts}_domain_email
-    ON {schema}.{contacts} (domain, email) WHERE email IS NOT NULL AND email <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS {contacts}_domain_email_key
+    ON {schema}.{contacts} (domain, email);
 CREATE INDEX IF NOT EXISTS {contacts}_client ON {schema}.{contacts} (client_tag);
 CREATE INDEX IF NOT EXISTS {contacts}_domain ON {schema}.{contacts} (domain);
 """

@@ -1,17 +1,21 @@
 """Email / DM enrichment waterfall.
 
-Order (fixed): apify(+OpenAI discovery) → AI Ark → getleads → LeadMagic → FullEnrich.
+Order for need='dm' (fixed): site/team-page (local + Apify crawl) → AI Ark →
+getleads → LeadMagic → FullEnrich.
 
-- Apify is a discovery tier for domains with no known person (before paid lookups).
-- AI Ark is people discovery only (never email-to-profile reverse lookup) — tier 2.
+- Apify is discovery for domains with no known person (before paid lookups).
+- Local team/about contacts are preferred when they match target titles.
+- AI Ark / getleads / LeadMagic only accept people that match target_titles
+  when that list is provided (otherwise legacy loose DM_TITLE_HINTS).
 - FullEnrich is email-only and runs only when max_tier allows it (default does not).
-- Results write to Supabase gc.companies / gc.contacts (not MCP response body).
+- Results write to Supabase gc.companies / gc.contacts (or per-client tables).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+import re
+from typing import Any, Literal, Sequence
 
 from . import apify_contacts, gc_sync
 from .config import settings
@@ -25,7 +29,7 @@ from .vendors.leadmagic import LeadMagicClient
 Need = Literal["email", "dm", "both"]
 MaxTier = Literal["apify", "aiark", "getleads", "leadmagic", "fullenrich"]
 
-# Discovery first, AI Ark second, then paid person/email vendors. FullEnrich last.
+# Discovery first (Apify site crawl), then paid people vendors. FullEnrich last.
 TIER_ORDER: list[str] = [
     "apify",
     "aiark",
@@ -36,9 +40,28 @@ TIER_ORDER: list[str] = [
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
 DEFAULT_MAX_TIER: MaxTier = "leadmagic"
 
+# Loose fallback when no target_titles are supplied.
 DM_TITLE_HINTS = (
     "owner", "founder", "principal", "president", "ceo", "partner",
-    "director", "vp", "vice president", "managing",
+    "director", "vp", "vice president", "managing", "manager", "dealer",
+)
+
+# Basco / warranty-admin default when callers pass nothing explicit.
+DEFAULT_DM_TARGET_TITLES = (
+    "service director",
+    "fixed operations director",
+    "fixed ops director",
+    "fixed operations",
+    "fixed ops",
+    "service manager",
+    "warranty manager",
+    "warranty administrator",
+    "director of service",
+    "vp of service",
+    "vice president of service",
+    "general manager",
+    "dealer principal",
+    "gm",
 )
 
 
@@ -64,9 +87,64 @@ def tier_allowed(tier: str, max_tier: str) -> bool:
     return TIER_RANK[tier] <= TIER_RANK[normalize_max_tier(max_tier)]
 
 
-def _is_dm_title(title: str) -> bool:
-    t = (title or "").lower()
-    return any(h in t for h in DM_TITLE_HINTS)
+def _is_dm_title(title: str, target_titles: Sequence[str] | None = None) -> bool:
+    """True when title matches target list, or loose hints if no targets."""
+    return _title_rank(title, target_titles) > 0
+
+
+def _title_rank(title: str, target_titles: Sequence[str] | None = None) -> int:
+    """Higher is better. 0 = no match.
+
+    When target_titles is provided, only those keys score (order = preference).
+    When omitted, fall back to loose DM_TITLE_HINTS.
+    Short keys (≤3 chars, e.g. ``gm``) require a word boundary so they do not
+    match inside unrelated words like ``segment``.
+    """
+    t = (title or "").lower().strip()
+    if not t:
+        return 0
+    keys = (
+        [k.lower() for k in target_titles]
+        if target_titles is not None
+        else list(DM_TITLE_HINTS)
+    )
+    if not keys:
+        return 0
+    for i, key in enumerate(keys):
+        key = (key or "").strip().lower()
+        if not key:
+            continue
+        if len(key) <= 3:
+            if re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", t):
+                return 1000 - i
+        elif key in t:
+            return 1000 - i
+    return 0
+
+
+def _pick_person(
+    people: Sequence[PersonHit],
+    *,
+    target_titles: Sequence[str] | None = None,
+    require_title_match: bool = False,
+) -> PersonHit | None:
+    """Choose the best person by target-title rank; optionally reject non-matches.
+
+    When target_titles is None, ranking uses DM_TITLE_HINTS. With
+    require_title_match=True, titles that score 0 are rejected either way.
+    """
+    ranked: list[tuple[int, PersonHit]] = []
+    for p in people:
+        if not apify_contacts._looks_like_person(p.first_name, p.last_name):
+            continue
+        rank = _title_rank(p.title, target_titles)
+        if require_title_match and rank <= 0:
+            continue
+        ranked.append((rank, p))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda x: (-x[0], x[1].name.lower()))
+    return ranked[0][1]
 
 
 def _parse_rows(rows: Any) -> list[dict[str, Any]]:
@@ -81,6 +159,28 @@ def _parse_rows(rows: Any) -> list[dict[str, Any]]:
         if isinstance(r, dict):
             out.append(r)
     return out
+
+
+def _norm_target_titles(target_titles: Any) -> list[str] | None:
+    """None / blank = omitted (caller applies defaults). Non-empty = ranked targets."""
+    if target_titles is None:
+        return None
+    if isinstance(target_titles, str):
+        if not target_titles.strip():
+            return None
+        return [t.strip() for t in target_titles.split(",") if t.strip()]
+    if isinstance(target_titles, (list, tuple)):
+        parts = [str(t).strip() for t in target_titles if str(t).strip()]
+        return parts or None
+    raise ValueError("target_titles must be a comma-string or list of strings")
+
+
+def _default_dm_titles(client_tag: str = "") -> list[str] | None:
+    """Basco dealership DMs get service/fixed-ops titles; others use loose hints."""
+    slug = (client_tag or "").strip().lower()
+    if slug in ("basco", "carlos", "basco_warranty", "dealerships", "ny_dealers"):
+        return list(DEFAULT_DM_TARGET_TITLES)
+    return None
 
 
 def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
@@ -147,6 +247,8 @@ class Waterfall:
         fullenrich: FullEnrichClient | None = None,
         store: Store | None = None,
         max_tier: str = DEFAULT_MAX_TIER,
+        target_titles: Sequence[str] | None = None,
+        require_title_match: bool = True,
     ):
         self.getleads = getleads or GetLeadsClient()
         self.ai_ark = ai_ark or AiArkClient()
@@ -154,6 +256,12 @@ class Waterfall:
         self.fullenrich = fullenrich or FullEnrichClient()
         self.store = store
         self.max_tier = normalize_max_tier(max_tier)
+        # None → loose hints; non-empty list → ranked targets (reject non-matches
+        # when require_title_match).
+        self.target_titles = (
+            list(target_titles) if target_titles is not None else None
+        )
+        self.require_title_match = bool(require_title_match)
         self.tier_stats = {
             "apify": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
             "getleads": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
@@ -163,6 +271,18 @@ class Waterfall:
             "team_page": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
         }
         self.apify_meta: dict[str, Any] = {}
+
+    def _titles(self) -> list[str] | None:
+        return self.target_titles
+
+    def _pick(self, people: Sequence[PersonHit]) -> PersonHit | None:
+        # When target_titles is None, _title_rank falls back to DM_TITLE_HINTS.
+        # require_title_match still rejects porter / clerk / etc.
+        return _pick_person(
+            people,
+            target_titles=self._titles(),
+            require_title_match=self.require_title_match,
+        )
 
     def _bump(self, tier: str, field: str) -> None:
         self.tier_stats.setdefault(
@@ -217,24 +337,42 @@ class Waterfall:
         return None
 
     def resolve_dm(self, row: dict[str, Any]) -> PersonHit | None:
-        """Discover a decision-maker: local → apify → AI Ark → getleads → LeadMagic."""
+        """Discover a decision-maker: team-page → AI Ark → getleads → LeadMagic.
+
+        Apify site crawl runs as a batch before this (see enrich_waterfall).
+        When target_titles is set, people whose titles do not match are rejected
+        so a service porter / accounting clerk cannot count as a dm_hit.
+        """
         domain = row["domain"]
         if not domain:
             return None
+        titles = self._titles()
+        require = self.require_title_match
 
-        # Local contacts that look like real people (filters junk team_page titles).
+        # 1) Local team/about contacts (free crawl / prior extract).
         if self.store:
             self._bump("team_page", "calls")
+            local: list[PersonHit] = []
             for c in self.store.contacts_for_domain(domain):
                 person = _person_from_local_contact(c)
-                if person and (_is_dm_title(person.title) or person.source_tier == "apify_openai"):
-                    self._bump(
-                        "apify" if person.source_tier == "apify_openai" else "team_page",
-                        "dm_hits",
-                    )
-                    return person
+                if person:
+                    local.append(person)
+            picked = self._pick(local)
+            if picked:
+                tier = (
+                    "apify"
+                    if picked.source_tier == "apify_openai"
+                    else "team_page"
+                )
+                self._bump(tier, "dm_hits")
+                return picked
+            if local:
+                self._skip("team_page", "local_people_title_mismatch")
+            else:
+                self._skip("team_page", "no_local_contacts")
 
-        if row.get("full_name") and _is_dm_title(row.get("title") or "owner"):
+        # Input row already has a usable person+title.
+        if row.get("full_name") and _is_dm_title(row.get("title") or "", titles):
             first, last = row["first_name"], row["last_name"]
             if apify_contacts._looks_like_person(first, last):
                 return PersonHit(
@@ -246,6 +384,7 @@ class Waterfall:
                     source_tier="input",
                 )
 
+        # 2) AI Ark
         if not self._allowed("aiark"):
             self._skip("ai_ark", "max_tier_excludes_aiark")
         elif not self.ai_ark.enabled:
@@ -259,15 +398,19 @@ class Waterfall:
             except Exception as exc:  # noqa: BLE001
                 self._skip("ai_ark", f"error:{type(exc).__name__}:{exc}"[:180])
                 people = []
-            for p in people:
-                if apify_contacts._looks_like_person(p.first_name, p.last_name):
-                    self._bump("ai_ark", "dm_hits")
-                    return p
+            picked = self._pick(people)
+            if picked:
+                self._bump("ai_ark", "dm_hits")
+                return picked
             if people:
-                self._skip("ai_ark", "returned_non_person_names")
+                self._skip(
+                    "ai_ark",
+                    "title_mismatch" if require else "returned_non_person_names",
+                )
             else:
                 self._skip("ai_ark", "no_people_returned")
 
+        # 3) getleads
         if not self._allowed("getleads"):
             self._skip("getleads", "max_tier_excludes_getleads")
         elif not self.getleads.enabled:
@@ -275,12 +418,16 @@ class Waterfall:
         else:
             self._bump("getleads", "calls")
             people = self.getleads.find_people(domain, row.get("company_name") or "")
-            for p in people:
-                if _is_dm_title(p.title) or not p.title:
-                    if apify_contacts._looks_like_person(p.first_name, p.last_name):
-                        self._bump("getleads", "dm_hits")
-                        return p
+            picked = self._pick(people)
+            if picked:
+                self._bump("getleads", "dm_hits")
+                return picked
+            if people:
+                self._skip("getleads", "title_mismatch_or_non_person")
+            else:
+                self._skip("getleads", "no_people_returned")
 
+        # 4) LeadMagic
         if not self._allowed("leadmagic"):
             self._skip("leadmagic", "max_tier_excludes_leadmagic")
         elif not self.leadmagic.enabled:
@@ -288,10 +435,14 @@ class Waterfall:
         else:
             self._bump("leadmagic", "calls")
             people = self.leadmagic.find_people(domain, row.get("company_name") or "")
-            for p in people:
-                if apify_contacts._looks_like_person(p.first_name, p.last_name):
-                    self._bump("leadmagic", "dm_hits")
-                    return p
+            picked = self._pick(people)
+            if picked:
+                self._bump("leadmagic", "dm_hits")
+                return picked
+            if people:
+                self._skip("leadmagic", "title_mismatch_or_non_person")
+            else:
+                self._skip("leadmagic", "no_people_returned")
         return None
 
     def discover_apify(self, domains: list[str]) -> dict[str, Any]:
@@ -387,12 +538,19 @@ def enrich_waterfall(
     run_apify: bool = True,
     on_progress: Any | None = None,
     client_tag: str = "",
+    target_titles: Any = None,
+    require_title_match: bool = True,
 ) -> dict[str, Any]:
     """Walk tiers per row; upsert companies/contacts to Supabase; return counts only.
 
     max_tier (default leadmagic) hard-stops the walk so FullEnrich never fires
     unless explicitly requested. Pass client_tag so writes go to
     client_<slug>.contacts / .companies instead of the shared gc.* schema.
+
+    target_titles: comma-string or list. For need='dm'/'both' with client_tag
+    basco, defaults to service/fixed-ops/warranty → GM/Dealer Principal.
+    Otherwise loose DM_TITLE_HINTS still reject non-DM staff when
+    require_title_match is True. Pass require_title_match=False to accept any.
     """
     max_tier_n = normalize_max_tier(max_tier)
     parsed = [_norm_row(r) for r in _parse_rows(rows)]
@@ -408,6 +566,10 @@ def enrich_waterfall(
             "need": need,
             "max_tier": max_tier_n,
         }
+
+    titles = _norm_target_titles(target_titles)
+    if titles is None and need in ("dm", "both"):
+        titles = _default_dm_titles(client_tag)
 
     def _tick(**extra: Any) -> None:
         if on_progress is None:
@@ -427,7 +589,12 @@ def enrich_waterfall(
         emails_found=0,
     )
 
-    wf = Waterfall(store=store, max_tier=max_tier_n)
+    wf = Waterfall(
+        store=store,
+        max_tier=max_tier_n,
+        target_titles=titles,
+        require_title_match=require_title_match,
+    )
     company_rows: list[dict[str, Any]] = []
     contact_rows: list[dict[str, Any]] = []
     emails_found = 0
@@ -708,6 +875,8 @@ def enrich_waterfall(
         "tier_breakdown": tier_breakdown,
         "need": need,
         "max_tier": max_tier_n,
+        "target_titles": titles,
+        "require_title_match": bool(require_title_match),
         "client_tag": write_target.get("client_tag") or None,
         "supabase_schema": write_target.get("schema"),
         "apify": apify_result or None,
