@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from gmscraper import classify, resolve_places, team_contacts, waterfall
+from gmscraper import classify, resolve_places, team_contacts
 from gmscraper import source_binding as sb
 from mcp_server.errors import ToolError, classify_exception, tool_error_from_exception
 
@@ -73,40 +73,6 @@ def test_tool_error_never_approval_kind() -> None:
     te = ToolError("token bad", kind="missing_or_invalid_credential")
     assert te.to_dict()["error"]["kind"] == "missing_or_invalid_credential"
 
-
-def test_ai_ark_skip_reason_when_email_with_names(monkeypatch) -> None:
-    monkeypatch.setenv("AI_ARK_API_KEY", "test-key")
-    for key in (
-        "GETLEADS_API_KEY",
-        "LEADMAGIC_API_KEY",
-        "FULLENRICH_API_KEY",
-        "APIFY_TOKEN",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-    rows = [
-        {
-            "domain": "acme.com",
-            "first_name": "Jane",
-            "last_name": "Doe",
-            "company_name": "Acme",
-            "email": "",
-            "title": "Owner",
-            "full_name": "Jane Doe",
-        }
-    ]
-    out = waterfall.enrich_waterfall(
-        rows,
-        need="email",
-        store=None,
-        write_supabase=False,
-        run_apify=False,
-        max_tier="leadmagic",
-    )
-    stats = out["tier_stats"]["ai_ark"]
-    assert stats.get("calls", 0) == 0
-    assert "people_discovery_only" in (stats.get("last_skip_reason") or "")
-    assert out["vendors_enabled"]["ai_ark"] is True
 
 
 def test_looks_like_person_rejects_title_company_truncated() -> None:

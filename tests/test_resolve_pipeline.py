@@ -1,4 +1,4 @@
-"""Generic resolve_places, source binding, LLM extract filters, waterfall max_tier."""
+"""Generic resolve_places, source binding, LLM extract filters."""
 
 from __future__ import annotations
 
@@ -6,8 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gmscraper import resolve_places, team_contacts, waterfall
-from gmscraper.vendors.base import EmailHit, PersonHit
+from gmscraper import resolve_places, team_contacts
 
 
 def test_address_confidence_suite_mismatch() -> None:
@@ -330,121 +329,6 @@ def test_llm_extract_rejects_junk_names() -> None:
     assert "Dale Construction Corporation" not in names
     assert "Steve W." not in names
 
-
-def test_waterfall_tier_order_aiark_is_second() -> None:
-    assert waterfall.TIER_ORDER == [
-        "apify",
-        "aiark",
-        "getleads",
-        "leadmagic",
-        "fullenrich",
-    ]
-    assert waterfall.tier_allowed("aiark", "aiark")
-    assert waterfall.tier_allowed("aiark", "getleads")
-    assert not waterfall.tier_allowed("getleads", "aiark")
-
-
-def test_waterfall_aiark_runs_before_getleads(monkeypatch) -> None:
-    gl = MagicMock()
-    gl.enabled = True
-    gl.calls = 0
-    gl.hits = 0
-    gl.find_email.return_value = None
-    gl.find_people.return_value = [
-        PersonHit(
-            first_name="Gary",
-            last_name="Lopez",
-            title="Owner",
-            source_tier="getleads",
-        )
-    ]
-
-    ark = MagicMock(enabled=True, calls=0, hits=0)
-    ark.find_people.return_value = [
-        PersonHit(
-            first_name="Alice",
-            last_name="Baker",
-            title="CEO",
-            source_tier="ai_ark",
-        )
-    ]
-    lm = MagicMock(enabled=True, calls=0, hits=0)
-    lm.find_email.return_value = EmailHit(email="x@y.com", source_tier="leadmagic")
-    lm.find_people.return_value = []
-    fe = MagicMock(enabled=True, calls=0, hits=0)
-    fe.find_email_bulk.return_value = []
-    fe.find_email.return_value = None
-
-    monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
-    monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
-    monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
-    monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
-    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
-    monkeypatch.setattr(
-        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows, **kw: len(rows)
-    )
-    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows, **kw: len(rows))
-
-    out = waterfall.enrich_waterfall(
-        [{"domain": "acme.test", "company_name": "Acme"}],
-        need="dm",
-        store=None,
-        write_supabase=True,
-        max_tier="leadmagic",
-        run_apify=False,
-    )
-    assert out["dms_found"] == 1
-    ark.find_people.assert_called()
-    gl.find_people.assert_not_called()
-    lm.find_people.assert_not_called()
-
-
-def test_waterfall_max_tier_aiark_blocks_later(monkeypatch) -> None:
-    gl = MagicMock()
-    gl.enabled = True
-    gl.calls = 0
-    gl.hits = 0
-    gl.find_email.return_value = EmailHit(email="g@acme.test", source_tier="getleads")
-    gl.find_people.return_value = []
-
-    ark = MagicMock(enabled=True, calls=0, hits=0)
-    ark.find_people.return_value = []
-    lm = MagicMock(enabled=True, calls=0, hits=0)
-    lm.find_email.return_value = EmailHit(email="x@y.com", source_tier="leadmagic")
-    lm.find_people.return_value = []
-    fe = MagicMock(enabled=True, calls=0, hits=0)
-    fe.find_email_bulk.return_value = []
-    fe.find_email.return_value = None
-
-    monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
-    monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
-    monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
-    monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
-    monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
-    monkeypatch.setattr(
-        waterfall.gc_sync, "insert_contacts_ignore_conflict", lambda rows, **kw: len(rows)
-    )
-    monkeypatch.setattr(waterfall.gc_sync, "insert_contacts", lambda rows, **kw: len(rows))
-
-    out = waterfall.enrich_waterfall(
-        [{"domain": "acme.test", "company_name": "Acme"}],
-        need="both",
-        store=None,
-        write_supabase=True,
-        max_tier="aiark",
-        run_apify=False,
-    )
-    assert out["max_tier"] == "aiark"
-    ark.find_people.assert_called()
-    gl.find_people.assert_not_called()
-    gl.find_email.assert_not_called()
-    lm.find_email.assert_not_called()
-    lm.find_people.assert_not_called()
-    fe.find_email_bulk.assert_not_called()
-    assert out["vendors_enabled"]["ai_ark"] is True
-    assert out["vendors_enabled"]["getleads"] is False
-    assert out["vendors_enabled"]["leadmagic"] is False
-    assert out["vendors_enabled"]["fullenrich"] is False
 
 
 def test_looks_like_person_rejects_acceptance_cases() -> None:

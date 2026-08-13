@@ -217,11 +217,6 @@ class Settings:
             "APIFY_SERP_ACTOR", "scraperlink/google-search-results-serp-scraper"
         )
     )
-    apify_contact_actor: str = field(
-        default_factory=lambda: _env(
-            "APIFY_CONTACT_ACTOR", "vdrmota/contact-info-scraper"
-        )
-    )
     apify_content_actor: str = field(
         default_factory=lambda: _env(
             "APIFY_CONTENT_ACTOR", "apify/website-content-crawler"
@@ -247,16 +242,6 @@ class Settings:
     maps_max_cost_usd: float = field(
         default_factory=lambda: _env_float("MAPS_MAX_COST_USD", 25.0)
     )
-
-    # Contact enrichment waterfall (AI Ark → getleads → LeadMagic → FullEnrich)
-    getleads_api_key: str = field(default_factory=lambda: _env("GETLEADS_API_KEY"))
-    ai_ark_api_key: str = field(
-        default_factory=lambda: _env("AI_ARK_API_KEY") or _env("AIARK_API_KEY")
-    )
-    leadmagic_api_key: str = field(
-        default_factory=lambda: _env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY")
-    )
-    fullenrich_api_key: str = field(default_factory=lambda: _env("FULLENRICH_API_KEY"))
 
     @property
     def plan(self) -> Plan:

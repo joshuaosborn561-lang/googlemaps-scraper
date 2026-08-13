@@ -460,7 +460,7 @@ def health() -> str:
         (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
         or (os.environ.get("SUPABASE_ANON_KEY") or "").strip()
     )
-    from gmscraper.apify_contacts import apify_token_valid
+    from gmscraper.apify_auth import apify_token_valid
 
     apify_token_set = bool(settings.apify_token)
     apify_token_ok = apify_token_set and apify_token_valid(settings.apify_token)
@@ -476,7 +476,6 @@ def health() -> str:
             "apify_token_set": apify_token_set,
             "apify_token_valid": apify_token_ok,
             "apify_configured": apify_token_ok,
-            "apify_contact_actor": settings.apify_contact_actor,
             "apify_content_actor": settings.apify_content_actor,
             "apify_max_cost_usd": settings.apify_max_cost_usd,
             "supabase_configured": bool(supabase_url and supabase_key),
@@ -2550,7 +2549,7 @@ def build_operators(
 
 @mcp.tool(
     annotations=_ann(
-        'Pipeline: resolve → enrich → extract → contacts',
+        'Pipeline: resolve → enrich → extract',
         read_only=False,
         destructive=False,
         idempotent=True,
@@ -2561,14 +2560,13 @@ def pipeline_run(
     schema: str,
     table: str,
     key_column: str,
-    stages: str = "resolve,enrich,extract,contacts",
+    stages: str = "resolve,enrich,extract",
     address_column: str = "",
     name_column: str = "",
     city_column: str = "",
     where: str = "",
     order_by: str = "",
     limit: int = 0,
-    max_tier: str = "getleads",
     use_llm: bool = True,
     strategy: str = "address",
     min_confidence: float = 0.6,
@@ -2578,11 +2576,11 @@ def pipeline_run(
     estimate_only: bool = False,
     background: bool = True,
 ) -> str:
-    """Chain optional stages from a raw list to contactable people.
+    """Chain optional maps/crawl stages: resolve → site enrich → team extract.
 
-    stages = comma list of resolve,enrich,extract,contacts.
-    max_tier caps the contacts waterfall (default getleads).
-    target_titles steers LLM extraction (comma-separated).
+    stages = comma list of resolve,enrich,extract.
+    Paid DM/email waterfall is a separate MCP — not available here.
+    target_titles steers local LLM team-page extraction (comma-separated).
     Returns per-stage counts + cumulative cost. Never returns rows.
     """
     _ensure_repo_cwd()
@@ -2603,7 +2601,6 @@ def pipeline_run(
             where=where,
             order_by=order_by,
             limit=int(limit or 0),
-            max_tier=max_tier or "getleads",
             use_llm=bool(use_llm),
             estimate_only=bool(estimate_only),
             project_id=project_id or "",
@@ -2627,7 +2624,6 @@ def pipeline_run(
             "where": where,
             "order_by": order_by,
             "stages": stages,
-            "max_tier": max_tier,
             "limit": limit,
             "use_llm": bool(use_llm),
             "strategy": strategy,
@@ -2938,262 +2934,6 @@ def find_owners(
 
 @mcp.tool(
     annotations=_ann(
-        'Estimate Apify contact crawl cost',
-        read_only=True,
-        destructive=False,
-        idempotent=True,
-        open_world=False,
-    )
-)
-def estimate_apify_contact_crawl(
-    domains: str = "",
-    source: str = "",
-    limit: int = 0,
-    verify_emails: bool = False,
-) -> str:
-    """Read-only Apify cost estimate. No crawl starts. No approval required.
-
-    Prefer this over apify_contact_crawl(estimate_only=true). Then call
-    apify_contact_crawl to run.
-    """
-    _ensure_repo_cwd()
-    from gmscraper import apify_contacts
-
-    return _json(
-        apify_contacts.crawl(
-            _store(),
-            domains=domains or "",
-            source=source or "",
-            limit=int(limit or 0),
-            verify_emails=bool(verify_emails),
-            estimate_only=True,
-        )
-    )
-
-
-@mcp.tool(
-    annotations=_ann(
-        'Apify contact crawl',
-        read_only=False,
-        destructive=False,
-        idempotent=True,
-        open_world=True,
-    )
-)
-def apify_contact_crawl(
-    domains: str = "",
-    source: str = "",
-    limit: int = 0,
-    max_pages_per_site: int = 3,
-    verify_emails: bool = False,
-    use_proxy: bool = True,
-    estimate_only: bool = False,
-    run_label: str = "",
-    background: bool = True,
-) -> str:
-    """Run vdrmota/contact-info-scraper; persist raw items locally.
-
-    Pass domains as comma-separated hosts/URLs, or source='maps_no_owner' /
-    'icp_no_owner' to select from local SQLite. Prefer estimate_apify_contact_crawl
-    for cost checks. Refuses when estimate exceeds APIFY_MAX_COST_USD.
-    Default max_pages_per_site=3. Paid leadsEnrichment/social/email-verify
-    add-ons are never enabled. Failures return typed ToolError JSON.
-    """
-    _ensure_repo_cwd()
-    from gmscraper import apify_contacts
-    from mcp_server.errors import tool_error_from_exception
-
-    store = _store()
-
-    def _run() -> dict[str, Any]:
-        try:
-            return apify_contacts.crawl(
-                store,
-                domains=domains or "",
-                source=source or "",
-                limit=int(limit or 0),
-                max_pages_per_site=int(max_pages_per_site or 3),
-                verify_emails=bool(verify_emails),
-                use_proxy=bool(use_proxy),
-                estimate_only=bool(estimate_only),
-                run_label=run_label or "",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return tool_error_from_exception(exc)
-
-    # Long live runs go to background; estimates stay sync.
-    if (
-        background
-        and _http_mode()
-        and not estimate_only
-        and (domains or source)
-    ):
-        from mcp_server.jobs import start_job
-
-        job = start_job(
-            "apify_contact_crawl",
-            _run,
-            meta={
-                "limit": limit,
-                "source": source or None,
-                "domains_chars": len(domains or ""),
-                "estimate_only": False,
-            },
-        )
-        return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
-        )
-    return _json(_run())
-
-
-@mcp.tool(
-    annotations=_ann(
-        'Parse Apify contacts via OpenAI',
-        read_only=False,
-        destructive=False,
-        idempotent=True,
-        open_world=True,
-    )
-)
-def parse_contacts_openai(
-    run_id: str = "",
-    source: str = "",
-    limit: int = 0,
-    model: str = "gpt-4o-mini",
-    workers: int = 8,
-    background: bool = True,
-) -> str:
-    """Extract real people from Apify crawl text with OpenAI; write to gc.*.
-
-    Rejects job titles and company names in name fields. Never invents emails.
-    Writes gc.companies / gc.contacts server-side. Response is counts only.
-    No approval / spend confirmation required.
-    """
-    _ensure_repo_cwd()
-    from gmscraper import apify_contacts
-
-    store = _store()
-
-    def _run() -> dict[str, Any]:
-        return apify_contacts.parse_contacts_openai(
-            store,
-            run_id=run_id or "",
-            source=source or "",
-            limit=int(limit or 0),
-            model=model or "gpt-4o-mini",
-            workers=int(workers or 8),
-        )
-
-    if background and _http_mode():
-        from mcp_server.jobs import start_job
-
-        job = start_job(
-            "parse_contacts_openai",
-            _run,
-            meta={"run_id": run_id or None, "source": source or None, "limit": limit},
-        )
-        return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-            }
-        )
-    return _json(_run())
-
-
-@mcp.tool(
-    annotations=_ann(
-        'FullEnrich find email',
-        read_only=False,
-        destructive=False,
-        idempotent=True,
-        open_world=True,
-    )
-)
-def fullenrich_find_email(
-    first_name: str,
-    last_name: str,
-    domain: str,
-    company_name: str = "",
-) -> str:
-    """FullEnrich email lookup (last tier). 1 credit on work-email hit, 0 on miss.
-
-    Call only after earlier waterfall tiers miss — or use enrich_waterfall
-    with max_tier='fullenrich'. Default waterfall max_tier is leadmagic.
-    Requires FULLENRICH_API_KEY.
-    """
-    _ensure_repo_cwd()
-    from gmscraper.vendors.fullenrich import FullEnrichClient
-
-    client = FullEnrichClient()
-    if not client.enabled:
-        raise ValueError("FULLENRICH_API_KEY is not set on this MCP service.")
-    hit = client.find_email(first_name, last_name, domain, company_name or domain)
-    return _json(
-        {
-            "email": hit.email if hit else None,
-            "status": hit.status if hit else "not_found",
-            "source_tier": "fullenrich",
-            "credits_used": client.credits_used,
-        }
-    )
-
-
-@mcp.tool(
-    annotations=_ann(
-        'FullEnrich find email (bulk)',
-        read_only=False,
-        destructive=False,
-        idempotent=True,
-        open_world=True,
-    )
-)
-def fullenrich_find_email_bulk(rows: str) -> str:
-    """Bulk FullEnrich email lookup. `rows` = JSON list of
-    {first_name, last_name, domain, company_name?}. Max 100.
-
-    Returns counts + per-row email/status only (no raw vendor payloads).
-    """
-    _ensure_repo_cwd()
-    from gmscraper.vendors.fullenrich import FullEnrichClient
-
-    client = FullEnrichClient()
-    if not client.enabled:
-        raise ValueError("FULLENRICH_API_KEY is not set on this MCP service.")
-    try:
-        parsed = json.loads(rows) if isinstance(rows, str) else rows
-    except json.JSONDecodeError as exc:
-        raise ValueError("rows must be a JSON list") from exc
-    if not isinstance(parsed, list):
-        raise ValueError("rows must be a JSON list")
-    hits = client.find_email_bulk(
-        [r for r in parsed if isinstance(r, dict)][:100]
-    )
-    results = [
-        {
-            "email": h.email if h else None,
-            "status": h.status if h else "not_found",
-            "source_tier": "fullenrich" if h else None,
-        }
-        for h in hits
-    ]
-    return _json(
-        {
-            "rows": len(results),
-            "found": sum(1 for r in results if r["email"]),
-            "credits_used": client.credits_used,
-            "results": results,
-        }
-    )
-
-
-@mcp.tool(
-    annotations=_ann(
         "Debug echo (annotation probe)",
         read_only=False,
         destructive=False,
@@ -3202,11 +2942,10 @@ def fullenrich_find_email_bulk(rows: str) -> str:
     )
 )
 def debug_echo(message: str = "ping") -> str:
-    """Return the input string. Same annotations as enrich_waterfall.
+    """Return the input string. Annotation / approval-gate probe.
 
     If this tool is refused with 'No approval received' while other tools work,
-    the gate is annotations/registration — not the enrich_waterfall body.
-    If this succeeds, call enrich_waterfall / classify_leads next.
+    the gate is annotations/registration — not the tool body.
     """
     return _json(
         {
@@ -3216,93 +2955,6 @@ def debug_echo(message: str = "ping") -> str:
             "note": "Reached MCP tool body — client approval gate did not block.",
         }
     )
-
-
-@mcp.tool(
-    annotations=_ann(
-        'Enrich waterfall → Supabase gc.*',
-        read_only=False,
-        destructive=False,
-        idempotent=True,
-        open_world=True,
-    )
-)
-def enrich_waterfall(
-    rows: str,
-    need: str = "both",
-    max_tier: str = "leadmagic",
-    run_apify: bool = True,
-    background: bool = True,
-    client_tag: str = "",
-    target_titles: str = "",
-    require_title_match: bool = True,
-) -> str:
-    """Walk site/team crawl → AI Ark → getleads → LeadMagic → FullEnrich.
-
-    Pass client_tag ('peterson' / 'basco') so contacts write to
-    {slug}_contacts / {slug}_companies. Omitting client_tag falls back to
-    the legacy shared gc.* schema (discouraged for new runs).
-
-    `rows` = JSON list of {domain, first_name?, last_name?, company_name?, ...}.
-    need = 'email' | 'dm' | 'both'.
-    max_tier = 'apify' | 'aiark' | 'getleads' | 'leadmagic' | 'fullenrich'
-    (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
-
-    target_titles = comma-separated roles to rank/reject against for need=dm.
-    For client_tag=basco defaults to Service Director → Fixed Ops → Service
-    Manager → Warranty Manager → GM / Dealer Principal. Without titles,
-    loose DM hints still reject non-DM staff (porter, clerk, …).
-    require_title_match=false accepts the first usable person regardless of title.
-    Response is counts only.
-    """
-    _ensure_repo_cwd()
-    from gmscraper import waterfall as wf
-
-    need_norm = (need or "both").strip().lower()
-    if need_norm not in ("email", "dm", "both"):
-        raise ValueError("need must be 'email', 'dm', or 'both'")
-    max_tier_n = wf.normalize_max_tier(max_tier)
-
-    store = _store()
-
-    def _run() -> dict[str, Any]:
-        from mcp_server.errors import tool_error_from_exception
-
-        try:
-            return wf.enrich_waterfall(
-                rows,
-                need=need_norm,  # type: ignore[arg-type]
-                store=store,
-                write_supabase=True,
-                max_tier=max_tier_n,
-                run_apify=bool(run_apify),
-                on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
-                client_tag=client_tag,
-                target_titles=target_titles or None,
-                require_title_match=bool(require_title_match),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return tool_error_from_exception(exc)
-
-    if background and _http_mode() and len(rows or "") > 2000:
-        import hashlib
-
-        from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
-
-        meta = {
-            "need": need_norm,
-            "max_tier": max_tier_n,
-            "client_tag": client_tag or None,
-            "target_titles": (target_titles or "")[:200] or None,
-            "rows_chars": len(rows or ""),
-            "rows_fingerprint": hashlib.sha1((rows or "").encode()).hexdigest()[:16],
-        }
-        before = find_active_by_queue_key(make_queue_key("enrich_waterfall", meta))
-        job = start_job("enrich_waterfall", _run, meta=meta)
-        return _json(
-            _started_response(job, attached=before is not None and before.id == job.id)
-        )
-    return _json(_run())
 
 
 @mcp.tool(
@@ -3529,7 +3181,7 @@ def list_clients() -> str:
                     "sync_to_supabase(client_tag='peterson'|'basco', "
                     "state=..., main_category=..., center=..., radius_miles=...)"
                 ),
-                "enrich": "enrich_waterfall(..., client_tag='peterson'|'basco')",
+                "enrich": "use the separate enrichment MCP (not this maps/crawl service)",
                 "aliases": "kyle→peterson, carlos→basco",
             },
         }
@@ -3799,7 +3451,7 @@ def _health_payload() -> dict[str, Any]:
     """HTTP probe payload — mirrors key fields from the health MCP tool."""
     try:
         settings = _settings()
-        from gmscraper.apify_contacts import apify_token_valid
+        from gmscraper.apify_auth import apify_token_valid
 
         supabase_url = (os.environ.get("SUPABASE_URL") or "").strip()
         apify_set = bool(settings.apify_token)
@@ -3820,7 +3472,6 @@ def _health_payload() -> dict[str, Any]:
             "apify_token_set": apify_set,
             "apify_token_valid": apify_ok,
             "apify_configured": apify_ok,
-            "apify_contact_actor": settings.apify_contact_actor,
             "auto_resume": os.environ.get("MCP_AUTO_RESUME", "true").lower()
             not in ("0", "false", "no"),
             "claude_web": (
@@ -4175,8 +3826,7 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                         city_column=mm.get("city_column") or "",
                         where=mm.get("where") or "",
                         order_by=mm.get("order_by") or "",
-                        stages=mm.get("stages") or "resolve,enrich,extract,contacts",
-                        max_tier=mm.get("max_tier") or "getleads",
+                        stages=mm.get("stages") or "resolve,enrich,extract",
                         limit=int(mm.get("limit") or 0),
                         use_llm=bool(mm.get("use_llm", True)),
                         strategy=mm.get("strategy") or "address",
@@ -4306,7 +3956,7 @@ def main() -> None:
 
     # Validate Apify token at boot — env-var presence alone is not enough.
     try:
-        from gmscraper.apify_contacts import apify_token_valid
+        from gmscraper.apify_auth import apify_token_valid
         from gmscraper.config import settings as _cfg
 
         if _cfg.apify_token:
@@ -4318,7 +3968,7 @@ def main() -> None:
             if not ok:
                 print(
                     "WARNING: APIFY_TOKEN set but GET /v2/users/me failed — "
-                    "apify_contact_crawl will return missing_or_invalid_credential.",
+                    "Apify SERP / owner fallback will fail until APIFY_TOKEN is valid.",
                     flush=True,
                 )
         else:

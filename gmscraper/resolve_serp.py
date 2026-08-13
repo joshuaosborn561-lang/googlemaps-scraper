@@ -266,7 +266,7 @@ def _start_actor_run(
     token = settings.apify_token
     if not token:
         raise RuntimeError("APIFY_TOKEN is not set")
-    from .apify_contacts import apify_token_valid
+    from .apify_auth import apify_token_valid
 
     if not apify_token_valid(token):
         raise RuntimeError("APIFY_TOKEN failed validation against /v2/users/me")

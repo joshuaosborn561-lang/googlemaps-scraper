@@ -51,8 +51,9 @@ No login/auth and no spend-approval gate. Never ask the user to approve a tool.
 
 ## Advanced / internal tools
 `plan_leads`, `run_leads`, `resolve_places`, `resolve_via_serp`, `build_operators`,
-`pipeline_run`, `classify_leads`, `enrich_sites`, `enrich_waterfall`,
-`apify_contact_crawl`, etc. exist for debugging and single-step reruns.
+`pipeline_run`, `classify_leads`, `enrich_sites`, `extract_team_contacts`,
+etc. exist for debugging and single-step reruns.
+Paid DM/email enrichment is a separate MCP — not this service.
 Prefer primary tools. If you use an advanced tool, say why in one line.
 
 ## Geography

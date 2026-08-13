@@ -9,8 +9,9 @@ from mcp_server.errors import tool_error_from_exception
 def test_every_tool_has_all_four_hints() -> None:
     tools = {t.name: t for t in server._iter_registered_tools()}
     assert "classify_leads" in tools
-    assert "enrich_waterfall" in tools
+    assert "enrich_sites" in tools
     assert "debug_echo" in tools
+    assert "enrich_waterfall" not in tools
     for name, tool in sorted(tools.items()):
         ann = tool.annotations
         assert ann is not None, f"{name} missing annotations"
@@ -26,11 +27,10 @@ def test_every_tool_has_all_four_hints() -> None:
         assert dest is False, f"{name} destructiveHint must be False (got {dest})"
 
 
-def test_classify_and_waterfall_match_spec() -> None:
+def test_classify_and_debug_match_spec() -> None:
     tools = {t.name: t for t in server._iter_registered_tools()}
     for name, expect in (
         ("classify_leads", (False, False, True, False)),
-        ("enrich_waterfall", (False, False, True, True)),
         ("debug_echo", (False, False, True, True)),
     ):
         dump = tools[name].annotations.model_dump()
@@ -68,3 +68,16 @@ def test_primary_outcome_tools_registered() -> None:
         assert name in tools, name
         dump = tools[name].annotations.model_dump()
         assert dump.get("destructive_hint") is False
+
+
+def test_enrichment_tools_retired() -> None:
+    tools = {t.name for t in server._iter_registered_tools()}
+    for name in (
+        "enrich_waterfall",
+        "fullenrich_find_email",
+        "fullenrich_find_email_bulk",
+        "apify_contact_crawl",
+        "estimate_apify_contact_crawl",
+        "parse_contacts_openai",
+    ):
+        assert name not in tools, name

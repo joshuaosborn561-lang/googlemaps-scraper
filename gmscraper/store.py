@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS owners (
     updated_at   TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Multiple people per company (team-page crawl, waterfall DMs, etc.).
+-- Multiple people per company (team-page crawl / local extract).
 CREATE TABLE IF NOT EXISTS contacts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     place_id    TEXT,
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     name        TEXT NOT NULL,
     title       TEXT,
     email       TEXT,
-    source      TEXT,            -- team_page|getleads|ai_ark|leadmagic|fullenrich
+    source      TEXT,            -- team_page|owner|local extract
     source_tier TEXT,
     confidence  REAL,
     source_url  TEXT,

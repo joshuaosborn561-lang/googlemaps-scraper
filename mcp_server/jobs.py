@@ -212,12 +212,6 @@ def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
         table = meta.get("table") or ""
         stages = meta.get("stages") or ""
         return f"pipeline_run:{schema}.{table}:{stages}"
-    if kind == "enrich_waterfall":
-        need = meta.get("need") or ""
-        max_tier = meta.get("max_tier") or ""
-        rows_chars = meta.get("rows_chars")
-        fingerprint = meta.get("rows_fingerprint") or rows_chars or ""
-        return f"enrich_waterfall:{need}:{max_tier}:{fingerprint}"
     if kind in (
         "enrich_sites",
         "crawl_team_pages",
@@ -487,9 +481,7 @@ _RESUMABLE_KINDS = frozenset(
 # Kinds that spend money and must NOT auto-resume without an approval flag.
 _PAID_RESUME_KINDS = frozenset(
     {
-        "apify_contact_crawl",
-        "enrich_waterfall",  # may hit paid tiers; resume only with approve_paid
-        "find_owners",  # paid when use_paid_fallback
+        "find_owners",  # paid when use_paid_fallback (Apify SERP)
     }
 )
 

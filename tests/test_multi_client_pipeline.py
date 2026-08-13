@@ -156,11 +156,11 @@ def test_sweep_skips_global_enrich_and_paid(tmp_path: Path, monkeypatch) -> None
 
     paid = jobs.Job(
         id="paidjob000001",
-        kind="enrich_waterfall",
+        kind="find_owners",
         status="interrupted",
         created_at=time.time() - 10,
         finished_at=time.time() - 5,
-        meta={"max_tier": "leadmagic", "need": "email"},
+        meta={"use_paid_fallback": True},
     )
     jobs._persist(paid)
     global_enrich = jobs.Job(

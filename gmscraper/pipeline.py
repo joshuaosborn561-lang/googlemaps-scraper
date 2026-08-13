@@ -1,5 +1,6 @@
-"""Generic resolve → enrich → extract → contacts pipeline.
+"""Generic resolve → enrich → extract pipeline (maps + site crawl).
 
+Paid DM/email enrichment lives in a separate service.
 Every stage is optional. Stages skip work that already exists. Counts only.
 """
 
@@ -8,14 +9,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import enrich_site, resolve_places, source_binding as sb, team_contacts, waterfall
+from . import enrich_site, resolve_places, source_binding as sb, team_contacts
 from .config import settings
 from .llm import make_llm
 from .store import Store
 
 
 def _parse_stages(stages: str) -> list[str]:
-    allowed = {"resolve", "enrich", "extract", "contacts"}
+    allowed = {"resolve", "enrich", "extract"}
     parts = [p.strip().lower() for p in (stages or "").split(",") if p.strip()]
     out = [p for p in parts if p in allowed]
     if not out:
@@ -31,14 +32,13 @@ def run(
     schema: str,
     table: str,
     key_column: str,
-    stages: str = "resolve,enrich,extract,contacts",
+    stages: str = "resolve,enrich,extract",
     address_column: str = "",
     name_column: str = "",
     city_column: str = "",
     where: str = "",
     order_by: str = "",
     limit: int = 0,
-    max_tier: str = "getleads",
     use_llm: bool = True,
     estimate_only: bool = False,
     project_id: str = "",
@@ -52,9 +52,12 @@ def run(
     out: dict[str, Any] = {
         "stages": stage_list,
         "estimate_only": bool(estimate_only),
-        "max_tier": max_tier,
         "per_stage": {},
         "cumulative_cost_usd": 0.0,
+        "note": (
+            "Paid DM/email enrichment is a separate MCP. "
+            "After extract, export domains and enrich there."
+        ),
     }
 
     def _tick(stage: str, **extra: Any) -> None:
@@ -77,7 +80,7 @@ def run(
     )
 
     binding = None
-    if any(s in stage_list for s in ("resolve", "enrich", "extract", "contacts")):
+    if any(s in stage_list for s in ("resolve", "enrich", "extract")):
         binding = sb.resolve_binding(
             project_id=project_id,
             schema=schema,
@@ -147,7 +150,7 @@ def run(
 
     # Domains available after resolve (or already on the table).
     domains: list[str] = []
-    if binding and any(s in stage_list for s in ("enrich", "extract", "contacts")):
+    if binding and any(s in stage_list for s in ("enrich", "extract")):
         rows = sb.rpc(
             binding,
             "pp_select_rows",
@@ -264,67 +267,6 @@ def run(
             businesses_found=len(domains),
         )
 
-    # ---- contacts waterfall ----
-    if "contacts" in stage_list:
-        _tick(
-            "contacts",
-            jobs_total=len(stage_list),
-            jobs_done=stages_done,
-            jobs_pending=max(0, len(stage_list) - stages_done),
-            businesses_found=len(domains),
-        )
-        if not domains:
-            out["per_stage"]["contacts"] = {"rows_in": 0, "skipped": True, "reason": "no_domains"}
-        else:
-            rows_in = []
-            for d in domains:
-                contact = store.contacts_for_domain(d)
-                first = last = title = email = ""
-                if contact:
-                    from .vendors.base import split_name
-
-                    first, last = split_name(contact[0].get("name") or "")
-                    title = contact[0].get("title") or ""
-                    email = contact[0].get("email") or ""
-                rows_in.append(
-                    {
-                        "domain": d,
-                        "first_name": first,
-                        "last_name": last,
-                        "title": title,
-                        "email": email,
-                        "company_name": d,
-                    }
-                )
-            titles = [t.strip() for t in (target_titles or "").split(",") if t.strip()]
-            wf = waterfall.enrich_waterfall(
-                rows_in,
-                need="both",
-                store=store,
-                write_supabase=True,
-                max_tier=max_tier,
-                run_apify=False,  # discovery already handled by extract/resolve
-                on_progress=lambda **p: _tick("contacts", **p),
-                target_titles=titles or None,
-            )
-            out["per_stage"]["contacts"] = {
-                k: wf.get(k)
-                for k in (
-                    "rows_in", "companies_upserted", "contacts_written",
-                    "emails_found", "dms_found", "tier_stats", "max_tier",
-                )
-            }
-        stages_done += 1
-        _tick(
-            "contacts",
-            done=1,
-            total=1,
-            jobs_total=len(stage_list),
-            jobs_done=stages_done,
-            jobs_pending=0,
-            businesses_found=len(domains),
-            percent_complete=100.0,
-        )
 
     out["started"] = True
     out["domains"] = len(domains)
