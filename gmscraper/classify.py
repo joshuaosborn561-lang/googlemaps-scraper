@@ -22,13 +22,13 @@ from .store import Store
 from .zips import haversine_miles, parse_center
 
 SYSTEM = (
-    "You qualify local businesses for a B2B prospect list. You are given an "
-    "ICP with INCLUDE and EXCLUDE rules plus evidence about one business. "
-    "Decide whether the business matches. Judge only from the evidence. "
-    "EXCLUSIONS are hard rules: if Maps category, name, or website text "
-    "matches an exclusion, in_icp must be false. "
-    "When evidence is thin or ambiguous, answer false with low confidence — "
-    "never pad the list. Do not invent facts."
+    "You answer a short yes/no checklist about one local business. "
+    "Read each numbered question in order. "
+    "in_icp is true only if EVERY question is yes. Any no → false. "
+    "Do not invent extra rules, exclusions, or gotchas that are not in the "
+    "questions. If a row still looks like a yes, say yes — a human will "
+    "filter edge cases later. Do not invent facts. "
+    "A repair shop, parts store, or body shop is not a car dealership."
 )
 
 SCHEMA = {
@@ -41,7 +41,9 @@ SCHEMA = {
     "required": ["in_icp", "confidence", "reason"],
 }
 
-PROMPT = """ICP:
+PROMPT = """Answer each question yes or no. in_icp is true only if every question is yes.
+
+QUESTIONS:
 {icp}
 
 BUSINESS
@@ -56,10 +58,10 @@ WEBSITE TEXT (homepage/about/team/contact, truncated):
 {text}
 ---
 
-Does this business match the ICP? Answer with JSON:
-  in_icp     - true ONLY if it clearly matches INCLUDE and hits NONE of the EXCLUDE rules
-  confidence - 0.0 to 1.0, how sure you are given the evidence
-  reason     - one short sentence citing the evidence (category, name, or site text)
+Answer with JSON:
+  in_icp     - true if every question is yes; false if any question is no
+  confidence - 0.0 to 1.0
+  reason     - short phrase (e.g. "Honda dealer" or "auto repair, not a dealership")
 """
 
 NO_SITE_NOTE = "(no website text available - judge from the Maps data alone)"
@@ -207,7 +209,7 @@ def run(
     workers: int = 1,
     limit: int | None = None,
     include_no_site: bool = False,
-    min_confidence: float = 0.55,
+    min_confidence: float = 0.0,
     max_evidence_chars: int | None = None,
     source: str = "",
     force: bool = False,
@@ -225,21 +227,12 @@ def run(
     exclude_categories: str | Sequence[str] = "",
     on_progress: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
-    """Classify businesses against an ICP.
+    """Classify with a short yes/no checklist (in_icp = every question yes).
 
-    By default only unclassified rows with fetched site text are eligible.
-    Pass source= to scope (e.g. 'shovels'), force=True to re-classify, and
-    limit= to cap the batch. Scope further with city/state/main_category/
-    plan_id/run_id/client_tag so one client's rows can be classified without
-    draining another client's backlog.
-
-    When require_geo=True (or center+radius_miles are set), rows outside the
-    radius are rejected deterministically before any LLM call and saved as
-    in_icp=false with reason 'outside_radius'.
-
-    exclude_categories is a free hard gate on Maps main_category/types
-    (substring match, case-insensitive) — same idea as geo: do not spend
-    tokens on rows the ICP already forbids.
+    `icp` should be numbered questions, not a legal INCLUDE/EXCLUDE brief.
+    Optional exclude_categories skips obvious Maps-category fails before the
+    LLM (e.g. auto repair when the first question is "is this a dealership?").
+    Geo gate: require_geo or center+radius → outside_radius before LLM.
     """
     from .llm import OpenAICompat, llm_max_concurrency
 

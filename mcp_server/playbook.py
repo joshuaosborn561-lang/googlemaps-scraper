@@ -45,25 +45,22 @@ No login/auth and no spend-approval gate. Never ask the user to approve a tool.
    (hard budget / Maps limit).
 7. Be decisive. Report counts of **usable** businesses/people, not stage lectures.
 
-## ICP / classify_leads (critical — do not skip)
-The classifier was loosened once and over-included junk. It is now **strict**.
-When you call `classify_leads`:
-1. Pass structured ICP text with both sections, e.g.
-   ```
-   INCLUDE: franchise new-car dealership rooftops (OEM brand in name).
-   EXCLUDE: auto repair shops, auto parts stores, used-only lots without
-   franchise brand, body shops, tire shops, oil-change chains, salvage.
-   ```
-2. Also pass `exclude_categories` for hard Maps-category rejects
-   (comma-separated), e.g.
-   `auto repair shop, auto parts store, car repair and maintenance service,
-   tire shop, oil change service, auto body shop`.
-3. Always pass geo: `require_geo=true` + `center` + `radius_miles`, and/or
-   `state='NJ,NY,CT'`. Never classify a whole client_tag nationwide.
-4. After classify, **sample accepts AND rejects** with `sample_leads` /
-   `export_csv` before trusting in_icp counts. If junk remains, tighten
-   EXCLUDE + exclude_categories and re-run with `force=true` — do not re-scrape.
-5. Never lower the ICP bar to inflate counts.
+## ICP / classify_leads — keep it SIMPLE
+This stage is bulk triage, not final QA. You (Claude) filter edge cases after.
+
+Pass 2–3 numbered questions. in_icp = yes to ALL of them. Do **not** write a
+legal-style INCLUDE/EXCLUDE brief — that made the model over-reject.
+
+Basco / Carlos example:
+```
+1. Is this a car dealership (sells cars from a lot — not a repair shop, parts store, or body shop)?
+2. Is it one of these brands: Honda, Toyota, Ford, Chevrolet, Nissan, Hyundai, Kia, BMW, Mercedes-Benz, Volkswagen, …?
+```
+Optional cheap skip: `exclude_categories="auto repair shop, auto parts store, auto body shop, tire shop, oil change service"` so those never hit the LLM.
+
+Always pass geo (`state=` and/or center+radius) plus `client_tag`. Tag ≠ geography.
+
+After classify: sample a handful of yeses. Drop remaining junk yourself (used-only lots, duplicates). Re-run with `force=true` only if the *questions* were wrong — not to encode every edge case.
 
 ## What "done" means
 - **Address lookup:** each address → business_name + domain/website (phone nice).

@@ -1,4 +1,4 @@
-"""Deterministic classify gates + strict prompt contract."""
+"""Classify is a short yes/no checklist plus cheap category skips."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from gmscraper import classify
 from gmscraper.store import Store
 
 
-def test_strict_prompt_rejects_padding() -> None:
-    assert "ONLY if it clearly matches" in classify.PROMPT
-    assert "NONE of the EXCLUDE" in classify.PROMPT
-    assert "never pad the list" in classify.SYSTEM.lower() or "Never pad" in classify.SYSTEM
-    assert "EXCLUSIONS are hard" in classify.SYSTEM
+def test_prompt_is_simple_checklist() -> None:
+    assert "every question is yes" in classify.PROMPT
+    assert "QUESTIONS:" in classify.PROMPT
+    assert "Do not invent extra rules" in classify.SYSTEM
+    assert "not a car dealership" in classify.SYSTEM
+    assert "EXCLUDE" not in classify.PROMPT
+    assert "obviously not" not in classify.PROMPT
 
 
 def test_parse_exclude_categories() -> None:
@@ -32,7 +34,7 @@ def test_category_excluded_matches_main_and_types() -> None:
     assert classify._category_excluded(row, ["dealership"]) is None
 
 
-def test_category_gate_rejects_before_llm(tmp_path: Path, monkeypatch) -> None:
+def test_category_gate_skips_repair_before_llm(tmp_path: Path) -> None:
     store = Store(str(tmp_path / "t.db"))
     store.upsert_businesses(
         [
@@ -64,21 +66,23 @@ def test_category_gate_rejects_before_llm(tmp_path: Path, monkeypatch) -> None:
         model = "test-model"
 
         def json_chat(self, system, prompt, schema):
-            # Extract name from prompt for assertion.
             for line in prompt.splitlines():
                 if line.startswith("Name:"):
                     calls.append(line.split(":", 1)[1].strip())
                     break
-            return {"in_icp": True, "confidence": 0.9, "reason": "franchise dealer"}
+            return {"in_icp": True, "confidence": 0.9, "reason": "Honda dealer"}
 
+    icp = (
+        "1. Is this a car dealership?\n"
+        "2. Is it one of these brands: Honda, Toyota?"
+    )
     out = classify.run(
         store,
         FakeLLM(),  # type: ignore[arg-type]
-        "INCLUDE: franchise dealers\nEXCLUDE: repair shops",
+        icp,
         workers=1,
         force=True,
         exclude_categories="auto repair shop",
-        min_confidence=0.55,
         client_tag="basco",
     )
     assert out["category_rejected"] == 1
@@ -92,7 +96,7 @@ def test_category_gate_rejects_before_llm(tmp_path: Path, monkeypatch) -> None:
     assert v_repair["model"] == "category_gate"
 
 
-def test_min_confidence_floor_rejects_weak_yes(tmp_path: Path) -> None:
+def test_min_confidence_only_applies_when_set(tmp_path: Path) -> None:
     store = Store(str(tmp_path / "t.db"))
     store.upsert_businesses(
         [
@@ -112,21 +116,25 @@ def test_min_confidence_floor_rejects_weak_yes(tmp_path: Path) -> None:
         model = "soft"
 
         def json_chat(self, system, prompt, schema):
-            return {"in_icp": True, "confidence": 0.2, "reason": "unsure"}
+            return {"in_icp": True, "confidence": 0.2, "reason": "looks like a dealer"}
 
     out = classify.run(
         store,
         SoftLLM(),  # type: ignore[arg-type]
-        "INCLUDE: franchise\nEXCLUDE: used only",
+        "1. Is this a car dealership?",
+        workers=1,
+        force=True,
+        client_tag="basco",
+    )
+    assert out["in_icp"] == 1
+
+    out2 = classify.run(
+        store,
+        SoftLLM(),  # type: ignore[arg-type]
+        "1. Is this a car dealership?",
         workers=1,
         force=True,
         min_confidence=0.55,
         client_tag="basco",
     )
-    assert out["done"] == 1
-    assert out["in_icp"] == 0
-    row = store.conn.execute(
-        "SELECT in_icp, confidence FROM verdicts WHERE place_id='weak1'"
-    ).fetchone()
-    assert int(row["in_icp"]) == 0
-    assert float(row["confidence"]) == 0.2
+    assert out2["in_icp"] == 0

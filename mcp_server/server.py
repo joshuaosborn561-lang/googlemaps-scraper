@@ -2779,28 +2779,22 @@ def classify_leads(
     run_id: str = "",
     client_tag: str = "",
     exclude_categories: str = "",
-    min_confidence: float = 0.55,
+    min_confidence: float = 0.0,
 ) -> str:
-    """LLM-classify businesses against an ICP (LLM cost only; not Maps).
+    """LLM-classify businesses with a short yes/no checklist (LLM cost only).
 
-    ICP text MUST use INCLUDE + EXCLUDE sections. The model is strict:
-    exclusions win; unsure → not in ICP. Do not pass vague one-liners.
+    Pass numbered questions in `icp`, not a wall of exclusions. Example
+    (Basco / Carlos):
+      1. Is this a car dealership (sells cars from a lot — not repair/parts/body)?
+      2. Is it one of these brands: Honda, Toyota, Ford, …?
+    in_icp is true only if every question is yes. Claude filters edge cases
+    after the bulk pass — do not encode every gotcha here.
 
-    Only businesses with fetched website text are eligible by default. Scope
-    with source/city/state/main_category/plan_path/plan_id/run_id/client_tag,
-    re-run with force=true, and cap with limit. Foreground batches that hit
-    the timeout return has_more=true + remaining instead of a generic error.
+    Optional exclude_categories: comma-separated Maps categories to skip
+    before the LLM (cheap Q1 fails: "auto repair shop, auto parts store").
 
-    On Railway/HTTP, background=true (default) returns job_id immediately and
-    classifies on the worker — use limit=0 to drain all eligible rows.
-
-    Free deterministic gates BEFORE the LLM:
-    - Geography (default require_geo=true): center + radius_miles.
-    - exclude_categories: comma-separated Maps categories to hard-reject
-      (e.g. "auto repair shop, auto parts store, car repair").
-
-    client_tag is ownership, NOT geography — always pass geo/states too.
-    When nothing is eligible, result.reason explains why.
+    Scope with client_tag + geo (require_geo + center/radius and/or state).
+    client_tag is ownership, NOT geography. force=true to re-classify.
     """
     _ensure_repo_cwd()
     from mcp_server.errors import tool_error_from_exception
