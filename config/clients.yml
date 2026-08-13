@@ -2,6 +2,10 @@
 # Each client gets its own Supabase tables in public (PostgREST-visible):
 #   {slug}_leads / {slug}_contacts / {slug}_companies
 # Always pass client_tag on scrape / enrich / sync so rows never mix.
+#
+# Classify is client-agnostic: numbered yes/no questions in icp_questions.
+# in_icp = yes to ALL of them. New client = add questions here; no code change.
+# Claude can override per-run by passing icp= / exclude_categories= on classify_leads.
 
 clients:
   peterson:
@@ -14,6 +18,9 @@ clients:
     companies_table: peterson_companies
     default_geo: "Dallas-Fort Worth, TX"
     notes: "Commercial roofing — GCs, property managers, property owners"
+    icp_questions: |
+      1. Is this a commercial general contractor, property management company, or commercial property owner (not a residential roofer, material supplier, or national chain)?
+    exclude_categories: "roofing contractor, roofing supply store"
 
   basco:
     display_name: Basco Warranty Services
@@ -25,3 +32,7 @@ clients:
     companies_table: basco_companies
     default_geo: "Clifton, NJ"
     notes: "Franchise new-car dealerships — service / fixed ops directors"
+    icp_questions: |
+      1. Is this a car dealership (sells cars from a lot — not a repair shop, parts store, or body shop)?
+      2. Is it one of these brands: Honda, Toyota, Ford, Chevrolet, Nissan, Hyundai, Kia, BMW, Mercedes-Benz, Volkswagen, Lexus, Acura, Infiniti, Subaru, Mazda, Volvo, Audi, Jeep, Ram, Dodge, Chrysler, GMC, Buick, Cadillac, Lincoln, Genesis, Mitsubishi?
+    exclude_categories: "auto repair shop, auto parts store, auto body shop, tire shop, oil change service, car repair and maintenance service"

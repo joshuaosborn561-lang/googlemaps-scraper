@@ -212,3 +212,26 @@ def test_list_clients_public() -> None:
     pubs = client_reg.list_clients_public()
     slugs = {p["client_tag"] for p in pubs}
     assert slugs == {"peterson", "basco"}
+    by_tag = {p["client_tag"]: p for p in pubs}
+    assert by_tag["basco"]["icp_questions"]
+    assert "dealership" in by_tag["basco"]["icp_questions"].lower()
+    assert by_tag["peterson"]["icp_questions"]
+    assert "contractor" in by_tag["peterson"]["icp_questions"].lower()
+
+
+def test_resolve_classify_brief_uses_client_defaults() -> None:
+    client_reg.load_clients(reload=True)
+    auto = client_reg.resolve_classify_brief("carlos")
+    assert auto["client_tag"] == "basco"
+    assert auto["icp"].startswith("1.")
+    assert "auto repair" in auto["exclude_categories"]
+
+    override = client_reg.resolve_classify_brief(
+        "basco", icp="1. Is this a used-car lot?", exclude_categories="junkyard"
+    )
+    assert override["icp"] == "1. Is this a used-car lot?"
+    assert override["exclude_categories"] == "junkyard"
+
+    kyle = client_reg.resolve_classify_brief("peterson")
+    assert "contractor" in kyle["icp"].lower()
+    assert kyle["client_tag"] == "peterson"

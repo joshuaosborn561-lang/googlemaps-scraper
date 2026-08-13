@@ -12,9 +12,10 @@ def test_prompt_is_simple_checklist() -> None:
     assert "every question is yes" in classify.PROMPT
     assert "QUESTIONS:" in classify.PROMPT
     assert "Do not invent extra rules" in classify.SYSTEM
-    assert "not a car dealership" in classify.SYSTEM
     assert "EXCLUDE" not in classify.PROMPT
     assert "obviously not" not in classify.PROMPT
+    assert "car dealership" not in classify.SYSTEM.lower()
+    assert "Honda" not in classify.PROMPT
 
 
 def test_parse_exclude_categories() -> None:

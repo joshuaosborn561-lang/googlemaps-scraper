@@ -104,7 +104,7 @@ without re-scraping).
 |---|---|
 | "get me X in Y" | the default flow above — plan, one cost line, run, report |
 | "/leads <brief>" | same thing; the slash command just wraps it |
-| "that list is too broad / has junk in it" | keep classify as 2–3 yes/no questions (e.g. dealership? + brand list?). Pass `exclude_categories` only for obvious Maps skips. Re-run `classify` with `force=true` if the *questions* were wrong. Claude filters leftover edge cases — do not encode every gotcha into the prompt. Do **not** re-scrape. |
+| "that list is too broad / has junk in it" | keep classify as 2–3 yes/no questions on the *client* (saved in `config/clients.yml` as `icp_questions`). Pass `exclude_categories` only for obvious Maps skips. Re-run `classify` with `force=true` if the *questions* were wrong. Claude filters leftover edge cases — do not encode every gotcha into the prompt. Do **not** re-scrape. |
 | "I need more of them" | add category aliases (the usual cause of a short list), `estimate`, then scrape the new categories — existing ones are already checkpointed and won't re-charge |
 | "no emails in the CSV" | check `stats` for `domains with email`. Maps returns no emails; they come from the website scrape, so coverage is partial by nature. Say so plainly rather than implying it's a bug |
 | "classify/owners is too slow" | on cloud, raise `--workers`; it is network-bound. On local, `bench` first. Then lower `LLM_MAX_EVIDENCE_CHARS` before reaching for a smaller model — a 12k-char prompt is ~3k tokens of prefill and most of it is nav and footer boilerplate |

@@ -36,6 +36,10 @@ class Client:
     leads_table: str = ""
     contacts_table: str = ""
     companies_table: str = ""
+    # Numbered yes/no checklist used by classify_leads when icp= is omitted.
+    icp_questions: str = ""
+    # Optional Maps-category skips before the LLM (comma-separated).
+    exclude_categories: str = ""
 
     def __post_init__(self) -> None:
         schema = self.supabase_schema or "public"
@@ -73,6 +77,8 @@ class Client:
             },
             "default_geo": self.default_geo or None,
             "notes": self.notes or None,
+            "icp_questions": self.icp_questions or None,
+            "exclude_categories": self.exclude_categories or None,
         }
 
 
@@ -127,6 +133,8 @@ def load_clients(path: Path | None = None, *, reload: bool = False) -> dict[str,
             or f"{slug}_companies",
             default_geo=str(body.get("default_geo") or ""),
             notes=str(body.get("notes") or ""),
+            icp_questions=str(body.get("icp_questions") or "").strip(),
+            exclude_categories=str(body.get("exclude_categories") or "").strip(),
         )
         out[slug] = client
         aliases[slug] = slug
@@ -135,6 +143,34 @@ def load_clients(path: Path | None = None, *, reload: bool = False) -> dict[str,
     _CLIENTS = out
     _ALIAS_CACHE = aliases
     return out
+
+
+def resolve_classify_brief(
+    client_tag: str = "",
+    *,
+    icp: str = "",
+    exclude_categories: str = "",
+) -> dict[str, str]:
+    """Merge per-run classify args with the client's saved checklist.
+
+    Explicit icp= / exclude_categories= win. Otherwise use clients.yml.
+    """
+    text = (icp or "").strip()
+    excludes = (exclude_categories or "").strip()
+    slug = ""
+    if (client_tag or "").strip():
+        client = resolve_client(client_tag, required=False)
+        if client:
+            slug = client.slug
+            if not text:
+                text = (client.icp_questions or "").strip()
+            if not excludes:
+                excludes = (client.exclude_categories or "").strip()
+    return {
+        "icp": text,
+        "exclude_categories": excludes,
+        "client_tag": slug,
+    }
 
 
 def resolve_client(client_tag: str, *, required: bool = True) -> Client | None:

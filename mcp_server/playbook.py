@@ -45,22 +45,24 @@ No login/auth and no spend-approval gate. Never ask the user to approve a tool.
    (hard budget / Maps limit).
 7. Be decisive. Report counts of **usable** businesses/people, not stage lectures.
 
-## ICP / classify_leads — keep it SIMPLE
+## ICP / classify_leads — keep it SIMPLE (any client)
 This stage is bulk triage, not final QA. You (Claude) filter edge cases after.
 
-Pass 2–3 numbered questions. in_icp = yes to ALL of them. Do **not** write a
-legal-style INCLUDE/EXCLUDE brief — that made the model over-reject.
+Pass 2–3 numbered questions in `icp`. in_icp = yes to ALL of them.
+Do **not** write a legal-style INCLUDE/EXCLUDE brief.
 
-Basco / Carlos example:
-```
-1. Is this a car dealership (sells cars from a lot — not a repair shop, parts store, or body shop)?
-2. Is it one of these brands: Honda, Toyota, Ford, Chevrolet, Nissan, Hyundai, Kia, BMW, Mercedes-Benz, Volkswagen, …?
-```
-Optional cheap skip: `exclude_categories="auto repair shop, auto parts store, auto body shop, tire shop, oil change service"` so those never hit the LLM.
+If `icp` is omitted, `classify_leads` uses `icp_questions` (and
+`exclude_categories`) from `config/clients.yml` for that `client_tag`.
+A new client needs those fields in YAML — no code change.
 
-Always pass geo (`state=` and/or center+radius) plus `client_tag`. Tag ≠ geography.
+Override per run with `icp=` / `exclude_categories=` when the saved
+questions are wrong for this batch.
 
-After classify: sample a handful of yeses. Drop remaining junk yourself (used-only lots, duplicates). Re-run with `force=true` only if the *questions* were wrong — not to encode every edge case.
+Always pass geo (`state=` and/or center+radius) plus `client_tag`.
+Tag ≠ geography.
+
+After classify: sample a handful of yeses. Drop remaining junk yourself.
+Re-run with `force=true` only if the *questions* were wrong.
 
 ## What "done" means
 - **Address lookup:** each address → business_name + domain/website (phone nice).

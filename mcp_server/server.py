@@ -2781,17 +2781,17 @@ def classify_leads(
     exclude_categories: str = "",
     min_confidence: float = 0.0,
 ) -> str:
-    """LLM-classify businesses with a short yes/no checklist (LLM cost only).
+    """LLM-classify businesses with a short yes/no checklist (any client).
 
-    Pass numbered questions in `icp`, not a wall of exclusions. Example
-    (Basco / Carlos):
-      1. Is this a car dealership (sells cars from a lot — not repair/parts/body)?
-      2. Is it one of these brands: Honda, Toyota, Ford, …?
-    in_icp is true only if every question is yes. Claude filters edge cases
-    after the bulk pass — do not encode every gotcha here.
+    Pass numbered questions in `icp`. in_icp is true only if every question
+    is yes. This is bulk triage — Claude filters edge cases after.
+
+    If icp is empty and client_tag is set, uses that client's icp_questions
+    from config/clients.yml. Same for exclude_categories. New client = add
+    questions in clients.yml; no code change. Per-run icp= overrides.
 
     Optional exclude_categories: comma-separated Maps categories to skip
-    before the LLM (cheap Q1 fails: "auto repair shop, auto parts store").
+    before the LLM (cheap fails for question 1).
 
     Scope with client_tag + geo (require_geo + center/radius and/or state).
     client_tag is ownership, NOT geography. force=true to re-classify.
@@ -2809,6 +2809,13 @@ def classify_leads(
         client_tag=client_tag,
         source=source,
     )
+    from gmscraper import clients as client_reg
+
+    brief = client_reg.resolve_classify_brief(
+        scope["client_tag"] or "",
+        icp=icp,
+        exclude_categories=exclude_categories,
+    )
 
     def _run() -> dict[str, Any]:
         from gmscraper import classify
@@ -2817,11 +2824,15 @@ def classify_leads(
         from gmscraper.llm import default_workers
         from mcp_server.jobs import current_job_id, heartbeat as _hb
 
-        text = icp
+        text = brief["icp"]
+        excludes = brief["exclude_categories"]
         if not text and vertical:
             text, _ = pick_vertical(DEFAULT_CATEGORIES, vertical)
         if not text:
-            raise ValueError("Provide icp text or a known vertical.")
+            raise ValueError(
+                "Provide icp= numbered questions, a known vertical, or a "
+                "client_tag whose clients.yml has icp_questions."
+            )
         # Capture job id on the worker thread — classify pool threads have no TLS.
         jid = current_job_id()
 
@@ -2851,7 +2862,7 @@ def classify_leads(
             plan_id=scope["plan_id"],
             run_id=scope["run_id"],
             client_tag=scope["client_tag"],
-            exclude_categories=exclude_categories,
+            exclude_categories=excludes,
             min_confidence=float(min_confidence),
             on_progress=_prog,
         )
@@ -2873,7 +2884,8 @@ def classify_leads(
             from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
             meta = {
-                "icp": (icp or vertical or "")[:200],
+                "icp": (brief["icp"] or vertical or "")[:200],
+                "exclude_categories": (brief["exclude_categories"] or "")[:300],
                 "vertical": vertical,
                 "force": force,
                 "limit": limit,

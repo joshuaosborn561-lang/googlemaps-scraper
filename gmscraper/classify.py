@@ -27,8 +27,7 @@ SYSTEM = (
     "in_icp is true only if EVERY question is yes. Any no → false. "
     "Do not invent extra rules, exclusions, or gotchas that are not in the "
     "questions. If a row still looks like a yes, say yes — a human will "
-    "filter edge cases later. Do not invent facts. "
-    "A repair shop, parts store, or body shop is not a car dealership."
+    "filter edge cases later. Do not invent facts."
 )
 
 SCHEMA = {
@@ -61,7 +60,7 @@ WEBSITE TEXT (homepage/about/team/contact, truncated):
 Answer with JSON:
   in_icp     - true if every question is yes; false if any question is no
   confidence - 0.0 to 1.0
-  reason     - short phrase (e.g. "Honda dealer" or "auto repair, not a dealership")
+  reason     - short phrase citing which question matched or failed
 """
 
 NO_SITE_NOTE = "(no website text available - judge from the Maps data alone)"
