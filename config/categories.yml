@@ -1,0 +1,229 @@
+# Category lists, one block per vertical.
+#
+# The point of this file is the nuance the post calls out: a business hides
+# under more categories than the obvious one.  A funeral home is also a
+# "memorial park", a "cremation service" and a "mortuary" -- search only
+# "funeral home" and you leave half the market on the table.
+#
+# Each block has:
+#   icp        one sentence describing who you actually want. This is fed
+#              verbatim to the local model in the `classify` stage, so write it
+#              the way you would brief a teammate -- include the exclusions.
+#   categories the Google Maps category strings to search, one request each.
+#
+# Cost is linear in the number of categories:
+#   requests = zips x categories.  With the default STANDARD-only ZIP list
+#   (~29.8k) a 20-category vertical is ~596k requests, about $20 at
+#   $100 / 3M requests.  Run `estimate` before a big run.
+#
+# Add your own block and pass `--vertical <name>`.
+
+funeral:
+  icp: >
+    An independently owned funeral home, mortuary, crematory or cemetery that
+    serves families directly. Exclude casket/urn e-commerce stores, headstone
+    manufacturers, life-insurance and pre-need insurance agencies, hospices,
+    estate lawyers, and pet cremation services.
+  categories:
+    - funeral home
+    - funeral director
+    - mortuary
+    - cremation service
+    - crematorium
+    - memorial park
+    - cemetery
+    - funeral home and cremation service
+    - burial service
+    - casket service
+    - memorial service
+    - chapel of rest
+
+hvac:
+  icp: >
+    A residential or light-commercial HVAC contractor that installs and
+    services heating, cooling or ventilation equipment. Exclude equipment
+    manufacturers, parts wholesalers and distributors, big-box retailers, and
+    pure-play duct-cleaning franchises.
+  categories:
+    - hvac contractor
+    - heating contractor
+    - air conditioning contractor
+    - air conditioning repair service
+    - furnace repair service
+    - heating equipment supplier
+    - air conditioning system supplier
+    - ventilating equipment manufacturer
+    - refrigeration service
+    - boiler supplier
+    - heat pump supplier
+    - duct cleaning service
+    - hvac repair service
+    - air duct cleaning service
+
+gyms:
+  icp: >
+    An independently owned gym, fitness studio or training facility open to
+    the public. Exclude equipment retailers, supplement shops, corporate or
+    hotel gyms that are not open to the public, and physical-therapy clinics.
+  categories:
+    - gym
+    - fitness center
+    - personal trainer
+    - physical fitness program
+    - crossfit box
+    - boxing gym
+    - martial arts school
+    - yoga studio
+    - pilates studio
+    - dance school
+    - health club
+    - sports club
+    - weightlifting area
+    - boot camp
+    - indoor cycling
+
+home_services:
+  icp: >
+    An owner-operated residential trade contractor that sells to homeowners.
+    Exclude suppliers, wholesalers, manufacturers, and national franchise
+    call-centers.
+  categories:
+    - plumber
+    - electrician
+    - roofing contractor
+    - general contractor
+    - landscaper
+    - lawn care service
+    - pest control service
+    - painter
+    - flooring contractor
+    - fence contractor
+    - garage door supplier
+    - window installation service
+    - siding contractor
+    - gutter cleaning service
+    - deck builder
+    - remodeler
+    - handyman
+    - pressure washing service
+    - tree service
+    - septic system service
+
+dental:
+  icp: >
+    A private dental practice treating patients directly. Exclude dental
+    laboratories, dental supply companies, and insurance brokers.
+  categories:
+    - dentist
+    - dental clinic
+    - cosmetic dentist
+    - pediatric dentist
+    - orthodontist
+    - periodontist
+    - endodontist
+    - oral surgeon
+    - dental implants periodontist
+    - denture care center
+    - emergency dental service
+    - teeth whitening service
+
+restaurants:
+  icp: >
+    An independently owned restaurant with its own kitchen. Exclude national
+    chains, food trucks, catering-only operations, ghost kitchens and
+    grocery-store delis.
+  categories:
+    - restaurant
+    - american restaurant
+    - italian restaurant
+    - mexican restaurant
+    - chinese restaurant
+    - japanese restaurant
+    - thai restaurant
+    - indian restaurant
+    - mediterranean restaurant
+    - french restaurant
+    - greek restaurant
+    - korean restaurant
+    - vietnamese restaurant
+    - seafood restaurant
+    - steak house
+    - barbecue restaurant
+    - pizza restaurant
+    - breakfast restaurant
+    - brunch restaurant
+    - sandwich shop
+    - bar and grill
+    - gastropub
+
+auto:
+  icp: >
+    An independent automotive repair or service shop. Exclude new-car
+    dealerships, parts retailers, and national tire chains.
+  categories:
+    - auto repair shop
+    - car repair and maintenance service
+    - auto body shop
+    - transmission shop
+    - brake shop
+    - muffler shop
+    - tire shop
+    - oil change service
+    - auto electrical service
+    - car detailing service
+    - auto glass shop
+    - diesel engine repair service
+    - radiator shop
+    - wheel alignment service
+
+med_spa:
+  icp: >
+    A medical spa, aesthetics clinic or wellness practice offering
+    physician-supervised cosmetic treatments. Exclude nail salons, barber
+    shops, tanning salons and product retailers.
+  categories:
+    - medical spa
+    - skin care clinic
+    - laser hair removal service
+    - cosmetic surgeon
+    - dermatologist
+    - aesthetics clinic
+    - wellness center
+    - weight loss service
+    - iv therapy service
+    - hair removal service
+    - tattoo removal service
+
+legal:
+  icp: >
+    A small or mid-size private law firm serving individual or small-business
+    clients. Exclude legal-document services, court houses, government legal
+    aid offices, and bar associations.
+  categories:
+    - law firm
+    - personal injury attorney
+    - family law attorney
+    - divorce lawyer
+    - estate planning attorney
+    - criminal justice attorney
+    - immigration attorney
+    - bankruptcy attorney
+    - real estate attorney
+    - employment attorney
+    - business attorney
+    - workers compensation attorney
+
+veterinary:
+  icp: >
+    An independently owned veterinary practice or animal hospital treating
+    patients. Exclude pet-supply retailers, groomers with no vet on staff,
+    shelters and rescues.
+  categories:
+    - veterinarian
+    - animal hospital
+    - veterinary care
+    - emergency veterinarian service
+    - veterinary pharmacy
+    - pet boarding service
+    - animal shelter
+    - equine veterinarian
