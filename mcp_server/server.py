@@ -2778,8 +2778,13 @@ def classify_leads(
     plan_id: str = "",
     run_id: str = "",
     client_tag: str = "",
+    exclude_categories: str = "",
+    min_confidence: float = 0.55,
 ) -> str:
     """LLM-classify businesses against an ICP (LLM cost only; not Maps).
+
+    ICP text MUST use INCLUDE + EXCLUDE sections. The model is strict:
+    exclusions win; unsure → not in ICP. Do not pass vague one-liners.
 
     Only businesses with fetched website text are eligible by default. Scope
     with source/city/state/main_category/plan_path/plan_id/run_id/client_tag,
@@ -2789,10 +2794,12 @@ def classify_leads(
     On Railway/HTTP, background=true (default) returns job_id immediately and
     classifies on the worker — use limit=0 to drain all eligible rows.
 
-    Geography is a free deterministic gate applied BEFORE the LLM. Default
-    require_geo=true — pass center + radius_miles (or center_lat/center_lng).
-    Out-of-radius rows are saved as in_icp=false with reason outside_radius.
-    Pass require_geo=false for ICPs with no geographic constraint.
+    Free deterministic gates BEFORE the LLM:
+    - Geography (default require_geo=true): center + radius_miles.
+    - exclude_categories: comma-separated Maps categories to hard-reject
+      (e.g. "auto repair shop, auto parts store, car repair").
+
+    client_tag is ownership, NOT geography — always pass geo/states too.
     When nothing is eligible, result.reason explains why.
     """
     _ensure_repo_cwd()
@@ -2850,6 +2857,8 @@ def classify_leads(
             plan_id=scope["plan_id"],
             run_id=scope["run_id"],
             client_tag=scope["client_tag"],
+            exclude_categories=exclude_categories,
+            min_confidence=float(min_confidence),
             on_progress=_prog,
         )
         out: dict[str, Any] = {
@@ -2880,6 +2889,8 @@ def classify_leads(
                 "center_lat": center_lat,
                 "center_lng": center_lng,
                 "require_geo": require_geo,
+                "exclude_categories": (exclude_categories or "")[:300],
+                "min_confidence": float(min_confidence),
                 "workers": workers,
                 **scope,
             }
@@ -2988,6 +2999,9 @@ def export_csv(
     """Return matching leads as CSV text in the response (free).
 
     Pass client_tag to export one client's rows only (peterson / basco).
+    client_tag alone is NOT geography — also pass states= (e.g. 'NJ,NY,CT')
+    or center+radius_miles, or you will pull every row stamped for that client
+    including out-of-footprint scrapes.
     Caps at 5000 rows. clean=true drops placeholder / agency emails.
     """
     _ensure_repo_cwd()

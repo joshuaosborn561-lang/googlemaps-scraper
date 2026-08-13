@@ -33,7 +33,9 @@ No login/auth and no spend-approval gate. Never ask the user to approve a tool.
    and `inventory`. `resolved=true` / `rows_processed` alone is NOT success.
    If `outcome` is `no_value` or `low_value`, say so plainly.
 3. Always pass geography (states / center+radius / zips) or a bound table.
-   Never assume nationwide.
+   Never assume nationwide. **`client_tag` is ownership, not geo.**
+   `export_csv(client_tag='basco')` alone can return CA/FL/TX if those rows
+   were stamped basco — always also pass `states=` or `center`+`radius_miles`.
 4. Always prefer `estimate_only=true` once before a paid run when the user
    has not already accepted a cost.
 5. Multi-client: pass `client_tag` (e.g. peterson, basco). Sync/export must
@@ -42,6 +44,26 @@ No login/auth and no spend-approval gate. Never ask the user to approve a tool.
 6. Never ask for spend approval. Only stop when a tool returns `blocked`
    (hard budget / Maps limit).
 7. Be decisive. Report counts of **usable** businesses/people, not stage lectures.
+
+## ICP / classify_leads (critical — do not skip)
+The classifier was loosened once and over-included junk. It is now **strict**.
+When you call `classify_leads`:
+1. Pass structured ICP text with both sections, e.g.
+   ```
+   INCLUDE: franchise new-car dealership rooftops (OEM brand in name).
+   EXCLUDE: auto repair shops, auto parts stores, used-only lots without
+   franchise brand, body shops, tire shops, oil-change chains, salvage.
+   ```
+2. Also pass `exclude_categories` for hard Maps-category rejects
+   (comma-separated), e.g.
+   `auto repair shop, auto parts store, car repair and maintenance service,
+   tire shop, oil change service, auto body shop`.
+3. Always pass geo: `require_geo=true` + `center` + `radius_miles`, and/or
+   `state='NJ,NY,CT'`. Never classify a whole client_tag nationwide.
+4. After classify, **sample accepts AND rejects** with `sample_leads` /
+   `export_csv` before trusting in_icp counts. If junk remains, tighten
+   EXCLUDE + exclude_categories and re-run with `force=true` — do not re-scrape.
+5. Never lower the ICP bar to inflate counts.
 
 ## What "done" means
 - **Address lookup:** each address → business_name + domain/website (phone nice).

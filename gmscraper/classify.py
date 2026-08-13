@@ -22,11 +22,13 @@ from .store import Store
 from .zips import haversine_miles, parse_center
 
 SYSTEM = (
-    "You answer simple yes/no ICP checks for local businesses. "
-    "Read the ICP questions, glance at the Maps category and website text, "
-    "and answer quickly. Do not reason at length. Do not invent facts. "
-    "Only reject what is obviously out. When unsure, answer yes with lower "
-    "confidence rather than over-filtering."
+    "You qualify local businesses for a B2B prospect list. You are given an "
+    "ICP with INCLUDE and EXCLUDE rules plus evidence about one business. "
+    "Decide whether the business matches. Judge only from the evidence. "
+    "EXCLUSIONS are hard rules: if Maps category, name, or website text "
+    "matches an exclusion, in_icp must be false. "
+    "When evidence is thin or ambiguous, answer false with low confidence — "
+    "never pad the list. Do not invent facts."
 )
 
 SCHEMA = {
@@ -39,7 +41,7 @@ SCHEMA = {
     "required": ["in_icp", "confidence", "reason"],
 }
 
-PROMPT = """ICP (simple yes/no checks):
+PROMPT = """ICP:
 {icp}
 
 BUSINESS
@@ -54,13 +56,43 @@ WEBSITE TEXT (homepage/about/team/contact, truncated):
 {text}
 ---
 
-Answer with JSON only:
-  in_icp     - true unless the business is obviously not an ICP match
-  confidence - 0.0 to 1.0
-  reason     - one short phrase (not a paragraph)
+Does this business match the ICP? Answer with JSON:
+  in_icp     - true ONLY if it clearly matches INCLUDE and hits NONE of the EXCLUDE rules
+  confidence - 0.0 to 1.0, how sure you are given the evidence
+  reason     - one short sentence citing the evidence (category, name, or site text)
 """
 
 NO_SITE_NOTE = "(no website text available - judge from the Maps data alone)"
+
+
+def _parse_exclude_categories(raw: str | Sequence[str] | None) -> list[str]:
+    """Normalize comma/newline-separated Maps category exclusions (lowercase)."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        parts = [p.strip().lower() for p in raw.replace("\n", ",").split(",")]
+        return [p for p in parts if p]
+    out: list[str] = []
+    for item in raw:
+        s = str(item or "").strip().lower()
+        if s:
+            out.append(s)
+    return out
+
+
+def _category_excluded(
+    row: Any, exclude_categories: Sequence[str]
+) -> str | None:
+    """Return matching exclusion if Maps category/types hit a hard exclude."""
+    if not exclude_categories:
+        return None
+    main = str(row["main_category"] or "").strip().lower()
+    types_raw = str(row["types"] or "").strip().lower()
+    hay = f"{main} | {types_raw}"
+    for ex in exclude_categories:
+        if ex and ex in hay:
+            return ex
+    return None
 
 
 def _eligible_clauses(
@@ -175,7 +207,7 @@ def run(
     workers: int = 1,
     limit: int | None = None,
     include_no_site: bool = False,
-    min_confidence: float = 0.0,
+    min_confidence: float = 0.55,
     max_evidence_chars: int | None = None,
     source: str = "",
     force: bool = False,
@@ -190,6 +222,7 @@ def run(
     plan_id: str = "",
     run_id: str = "",
     client_tag: str = "",
+    exclude_categories: str | Sequence[str] = "",
     on_progress: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     """Classify businesses against an ICP.
@@ -203,6 +236,10 @@ def run(
     When require_geo=True (or center+radius_miles are set), rows outside the
     radius are rejected deterministically before any LLM call and saved as
     in_icp=false with reason 'outside_radius'.
+
+    exclude_categories is a free hard gate on Maps main_category/types
+    (substring match, case-insensitive) — same idea as geo: do not spend
+    tokens on rows the ICP already forbids.
     """
     from .llm import OpenAICompat, llm_max_concurrency
 
@@ -210,6 +247,9 @@ def run(
     if isinstance(ollama, OpenAICompat):
         # Extra threads beyond the shared gate only stampede retries.
         workers = min(workers, llm_max_concurrency())
+    excludes = _parse_exclude_categories(exclude_categories)
+    # Floor: never treat a vague "yes" as in-ICP.
+    min_confidence = max(0.0, float(min_confidence))
 
     where, args = _eligible_clauses(
         source=source,
@@ -317,6 +357,7 @@ def run(
             store.clear_verdict(row["place_id"])
 
     geo_rejected = 0
+    category_rejected = 0
     llm_rows = rows
     if geo is not None:
         inside: list = []
@@ -336,12 +377,30 @@ def run(
                 geo_rejected += 1
         llm_rows = inside
 
+    if excludes:
+        kept: list = []
+        for row in llm_rows:
+            hit = _category_excluded(row, excludes)
+            if hit:
+                store.save_verdict(
+                    row["place_id"],
+                    False,
+                    1.0,
+                    f"excluded_category:{hit}",
+                    "category_gate",
+                )
+                category_rejected += 1
+            else:
+                kept.append(row)
+        llm_rows = kept
+
     scope = f" source={source!r}" if source else ""
     print(
         f"Classifying {len(llm_rows):,} businesses{scope} with {ollama.model} "
         f"({workers} worker{'s' if workers != 1 else ''}, {cap:,} chars evidence"
         f"{', force' if force else ''}"
-        f"{f', geo_rejected={geo_rejected}' if geo_rejected else ''})"
+        f"{f', geo_rejected={geo_rejected}' if geo_rejected else ''}"
+        f"{f', category_rejected={category_rejected}' if category_rejected else ''})"
     )
     # Drop stale rate-limit burns so they become eligible again this run.
     cur = store.conn.execute(
@@ -364,6 +423,9 @@ def run(
         "errors": 0,
         "rate_limited": 0,
         "geo_rejected": geo_rejected,
+        "category_rejected": category_rejected,
+        "exclude_categories": excludes or None,
+        "min_confidence": float(min_confidence),
         "cleared_rate_limit_verdicts": int(cleared_429 or 0),
         "source": source or None,
         "force": force,
@@ -460,13 +522,24 @@ def run(
                         pass
 
     if not llm_rows:
-        counts["done"] = geo_rejected
-        counts["processed"] = geo_rejected
-        counts["reason"] = (
-            f"all {geo_rejected} eligible rows were outside the geo radius"
-            if geo_rejected
-            else "nothing to classify after filters"
-        )
+        gated = geo_rejected + category_rejected
+        counts["done"] = gated
+        counts["processed"] = gated
+        if geo_rejected and not category_rejected:
+            counts["reason"] = (
+                f"all {geo_rejected} eligible rows were outside the geo radius"
+            )
+        elif category_rejected and not geo_rejected:
+            counts["reason"] = (
+                f"all {category_rejected} eligible rows hit exclude_categories"
+            )
+        elif gated:
+            counts["reason"] = (
+                f"all eligible rows gated "
+                f"(geo_rejected={geo_rejected}, category_rejected={category_rejected})"
+            )
+        else:
+            counts["reason"] = "nothing to classify after filters"
         remaining = max(0, int(total_eligible) - int(counts["processed"]))
         counts["total_eligible"] = int(total_eligible)
         counts["remaining"] = remaining
