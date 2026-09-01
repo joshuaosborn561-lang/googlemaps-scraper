@@ -49,6 +49,7 @@ def _seed(store: Store) -> None:
                ('p4', 1, 0.7, 'placeholder only', 'test'),
                ('p5', 1, 0.75, 'no email', 'test')"""
         )
+    store.backfill_legacy_verdicts()
 
 
 def test_placeholder_and_agency_helpers() -> None:
@@ -97,6 +98,7 @@ def test_export_payload_returns_csv_text(tmp_path: Path) -> None:
         icp_only=True,
         with_email=False,
         clean=True,
+        client_tag="basco",
         include_reason=False,
         backfill_cities=True,
     )
@@ -124,7 +126,8 @@ def test_export_include_reason_opt_in(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
     payload = export.export_payload(
-        store, icp_only=True, with_email=True, include_reason=True, clean=True
+        store, icp_only=True, with_email=True, include_reason=True, clean=True,
+        client_tag="basco",
     )
     assert "icp_reason" in payload["columns"]
     assert "commercial GC" in payload["csv"]
@@ -134,7 +137,8 @@ def test_query_leads_pagination(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
     page1 = export.query_leads(
-        store, icp_only=True, page=1, page_size=2, clean=True, with_email=False
+        store, icp_only=True, page=1, page_size=2, clean=True, with_email=False,
+        client_tag="basco",
     )
     assert page1["page"] == 1
     assert page1["page_size"] == 2
@@ -142,7 +146,8 @@ def test_query_leads_pagination(tmp_path: Path) -> None:
     assert len(page1["items"]) == 2
     assert page1["total_pages"] >= 2
     page2 = export.query_leads(
-        store, icp_only=True, page=2, page_size=2, clean=True, with_email=False
+        store, icp_only=True, page=2, page_size=2, clean=True, with_email=False,
+        client_tag="basco",
     )
     ids1 = {r["place_id"] for r in page1["items"]}
     ids2 = {r["place_id"] for r in page2["items"]}
@@ -152,14 +157,16 @@ def test_query_leads_pagination(tmp_path: Path) -> None:
 def test_query_page_size_capped(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
-    out = export.query_leads(store, page_size=999, icp_only=True)
+    out = export.query_leads(store, page_size=999, icp_only=True, client_tag="basco")
     assert out["page_size"] == 50
 
 
 def test_leads_summary_counts(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
-    summary = export.leads_summary(store, clean=True, backfill_cities=True)
+    summary = export.leads_summary(
+        store, clean=True, backfill_cities=True, client_tag="basco"
+    )
     assert summary["total_businesses"] == 5
     assert summary["in_icp"] == 5
     assert summary["classified"] == 5
@@ -177,6 +184,7 @@ def test_clean_false_keeps_placeholders(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
     dirty = export.export_payload(
-        store, icp_only=True, with_email=False, clean=False, backfill_cities=False
+        store, icp_only=True, with_email=False, clean=False, backfill_cities=False,
+        client_tag="basco",
     )
     assert "example@mysite.com" in dirty["csv"] or "Example Mail Co" in dirty["csv"]

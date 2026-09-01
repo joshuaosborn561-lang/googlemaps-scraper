@@ -213,6 +213,7 @@ def cmd_classify(args) -> None:
         include_no_site=args.include_no_site,
         min_confidence=args.min_confidence,
         max_evidence_chars=args.evidence_chars or None,
+        client_tag=args.client_tag,
     )
     print(f"classified={res['done']:,} in-ICP={res['in_icp']:,} errors={res['errors']:,}")
     if llm.spend_line():
@@ -233,6 +234,7 @@ def cmd_owners(args) -> None:
     res = owner.run(
         store, llm, owj,
         workers=_workers(args, llm), limit=args.limit, icp_only=not args.all,
+        client_tag=getattr(args, "client_tag", "") or "",
         max_evidence_chars=args.evidence_chars or None,
     )
     print(f"done={res['done']:,} found={res['found']:,} via_web={res['via_web']:,}")
@@ -253,6 +255,7 @@ def cmd_export(args) -> None:
         min_rating=args.min_rating,
         min_reviews=args.min_reviews,
         states=args.states,
+        client_tag=getattr(args, "client_tag", "") or "",
     )
     print(f"Wrote {n:,} rows -> {args.out}")
 
@@ -315,13 +318,15 @@ def cmd_run(args) -> None:
     print("\n[3/5] qualifying against the ICP")
     classify.run(store, ollama, plan.icp,
                  workers=args.llm_workers or default_workers(ollama),
-                 min_confidence=args.min_confidence)
+                 min_confidence=args.min_confidence,
+                 client_tag=args.client_tag)
 
     if plan.require_owner or args.owners:
         print("\n[4/5] finding owner names")
         owj = make_backend(settings, args.fallback_source) if args.fallback else None
         owner.run(store, ollama, owj,
-                  workers=args.llm_workers or default_workers(ollama))
+                  workers=args.llm_workers or default_workers(ollama),
+                  client_tag=args.client_tag)
     else:
         print("\n[4/5] skipping owner lookup (not requested; --owners to force)")
 
@@ -337,6 +342,7 @@ def cmd_run(args) -> None:
         min_rating=plan.min_rating,
         min_reviews=plan.min_reviews,
         states=plan.states or None,
+        client_tag=args.client_tag,
     )
     print(f"\nDone. {n:,} leads -> {args.out}")
     if ollama.spend_line():
@@ -458,6 +464,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fallback-source", default="",
                     help="apify (default) | openwebninja | none")
     sp.add_argument("--ignore-robots", action="store_true")
+    sp.add_argument("--client-tag", default="",
+                    help="required for classify/export — ICP is per client")
     add_zip_args(sp)
     add_llm_args(sp)
     sp.set_defaults(func=cmd_run)
@@ -519,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-confidence", type=float, default=0.0)
     sp.add_argument("--include-no-site", action="store_true",
                     help="also judge businesses with no website text")
+    sp.add_argument("--client-tag", required=True,
+                    help="client this classify writes for (basco, peterson, …)")
     sp.set_defaults(func=cmd_classify)
 
     sp = sub.add_parser("owners", help="local LLM finds the owner's name")
@@ -532,6 +542,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fallback-source", default="",
                     help="apify (default) | openwebninja | none")
     sp.add_argument("--all", action="store_true", help="not just in-ICP rows")
+    sp.add_argument("--client-tag", default="",
+                    help="required unless --all; ICP is per client")
     sp.set_defaults(func=cmd_owners)
 
     sp = sub.add_parser("export", help="write the CSV")
@@ -545,6 +557,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-rating", type=float, default=0.0)
     sp.add_argument("--min-reviews", type=int, default=0)
     sp.add_argument("--states", nargs="*")
+    sp.add_argument("--client-tag", default="",
+                    help="required unless --all; ICP is per client")
     sp.set_defaults(func=cmd_export)
 
     sp = sub.add_parser(

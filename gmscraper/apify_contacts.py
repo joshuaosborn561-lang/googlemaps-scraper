@@ -20,7 +20,7 @@ import requests
 from . import gc_sync
 from .config import settings
 from .llm import OllamaError, make_llm
-from .store import Store
+from .store import Store, normalize_client_tag
 
 # Pricing model (FREE tier) for vdrmota/contact-info-scraper
 # https://apify.com/vdrmota/contact-info-scraper/pricing
@@ -147,7 +147,9 @@ def _domain_from_url(url: str) -> str:
     return host
 
 
-def domains_from_source(store: Store, source: str, limit: int = 0) -> list[str]:
+def domains_from_source(
+    store: Store, source: str, limit: int = 0, client_tag: str = ""
+) -> list[str]:
     """Select domains from local SQLite by source tag."""
     src = (source or "").strip().lower()
     if src in ("maps_no_owner", "no_owner", "maps_missing_owner"):
@@ -173,9 +175,11 @@ def domains_from_source(store: Store, source: str, limit: int = 0) -> list[str]:
             ORDER BY b.domain
         """
     elif src in ("icp_no_owner", "maps_icp_no_owner"):
+        tag = normalize_client_tag(client_tag, required=True)
         sql = """
             SELECT DISTINCT b.domain FROM businesses b
-            JOIN verdicts v ON v.place_id = b.place_id AND v.in_icp = 1
+            JOIN business_icp v
+              ON v.place_id = b.place_id AND v.client_tag = ? AND v.in_icp = 1
             WHERE b.domain IS NOT NULL AND b.domain != ''
               AND NOT EXISTS (
                 SELECT 1 FROM owners o
@@ -184,6 +188,9 @@ def domains_from_source(store: Store, source: str, limit: int = 0) -> list[str]:
               )
             ORDER BY b.domain
         """
+        if limit and limit > 0:
+            sql += f" LIMIT {int(limit)}"
+        return [r["domain"] for r in store.conn.execute(sql, (tag,))]
     else:
         raise ValueError(
             f"Unknown source={source!r}. Use maps_no_owner / icp_no_owner, "
@@ -200,6 +207,7 @@ def resolve_urls(
     domains: str = "",
     source: str = "",
     limit: int = 0,
+    client_tag: str = "",
 ) -> list[str]:
     urls: list[str] = []
     if domains.strip():
@@ -210,7 +218,9 @@ def resolve_urls(
             raise ValueError("source= requires a local Store")
         urls = [
             _normalize_url(d)
-            for d in domains_from_source(store, source, limit=limit)
+            for d in domains_from_source(
+                store, source, limit=limit, client_tag=client_tag
+            )
         ]
     else:
         raise ValueError("Pass domains= or source=")
@@ -240,8 +250,11 @@ def crawl(
     use_proxy: bool = True,
     estimate_only: bool = False,
     run_label: str = "",
+    client_tag: str = "",
 ) -> dict[str, Any]:
-    urls = resolve_urls(store, domains=domains, source=source, limit=limit)
+    urls = resolve_urls(
+        store, domains=domains, source=source, limit=limit, client_tag=client_tag
+    )
     pages_per = max(1, int(max_pages_per_site or 3))
     estimated = round(
         estimate_cost_usd(

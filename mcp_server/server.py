@@ -830,6 +830,7 @@ def _execute_run_leads(
     out_path: str,
     include_owner_fallback: bool,
     workers: int,
+    client_tag: str = "",
 ) -> dict[str, Any]:
     from gmscraper import brief as brief_mod
     from gmscraper import classify, enrich_site, export, owner, scrape
@@ -943,11 +944,16 @@ def _execute_run_leads(
         llm,
         plan.icp,
         workers=default_workers(llm),
+        client_tag=client_tag,
     )
     if plan.require_owner:
         _job_progress("owners")
         backend = make_backend(settings, "") if include_owner_fallback else None
-        owner.run(store, llm, backend, workers=default_workers(llm))
+        owner.run(
+            store, llm, backend,
+            workers=default_workers(llm),
+            client_tag=client_tag,
+        )
 
     _job_progress("export")
     n = export.run(
@@ -965,6 +971,7 @@ def _execute_run_leads(
         radius_miles=plan.radius_miles or None,
         center_lat=plan.center_lat,
         center_lng=plan.center_lng,
+        client_tag=client_tag,
     )
     return {
         "status": "completed",
@@ -996,8 +1003,12 @@ def run_leads(
     include_owner_fallback: bool = False,
     workers: int = 8,
     background: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Execute the full lead pipeline after plan_leads. This is the main "go" tool.
+
+    client_tag is required — classify writes per-client ICP rows and will
+    refuse an unscoped run.
 
     Pass plan_path from plan_leads, or omit it to use the latest saved plan.
     No approval / auth / spend confirmation required.
@@ -1026,7 +1037,7 @@ def run_leads(
         job = start_job(
             "run_leads",
             lambda: _execute_run_leads(
-                plan_path, out_path, include_owner_fallback, workers
+                plan_path, out_path, include_owner_fallback, workers, client_tag
             ),
             meta=meta,
         )
@@ -1040,7 +1051,9 @@ def run_leads(
         return _json(out)
 
     return _json(
-        _execute_run_leads(plan_path, out_path, include_owner_fallback, workers)
+        _execute_run_leads(
+            plan_path, out_path, include_owner_fallback, workers, client_tag
+        )
     )
 
 
@@ -1452,6 +1465,7 @@ def extract_team_contacts(
     use_llm: bool = True,
     target_titles: str = "",
     background: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Parse person+title pairs from team/about page text into contacts.
 
@@ -1476,6 +1490,7 @@ def extract_team_contacts(
             use_llm=use_llm,
             llm=llm,
             target_titles=titles or None,
+            client_tag=client_tag,
         )
         out: dict[str, Any] = {"result": res, "stats": store.stats()}
         if llm:
@@ -1899,6 +1914,7 @@ def resolve_domains(
     )
 )
 def classify_leads(
+    client_tag: str = "",
     icp: str = "",
     vertical: str = "",
     workers: int = 0,
@@ -1912,7 +1928,10 @@ def classify_leads(
     center_lng: float = 0.0,
     require_geo: bool = True,
 ) -> str:
-    """LLM-classify businesses against an ICP (LLM cost only; not Maps).
+    """LLM-classify businesses against an ICP for one client (LLM cost only).
+
+    client_tag is required (e.g. 'basco', 'peterson'). Writes only that
+    client's rows in business_icp and never touches another client's flags.
 
     Only businesses with fetched website text are eligible by default. Scope
     with source (e.g. 'shovels'), re-run with force=true, and cap with limit.
@@ -1952,6 +1971,7 @@ def classify_leads(
             center_lat=float(center_lat) if center_lat else None,
             center_lng=float(center_lng) if center_lng else None,
             require_geo=bool(require_geo),
+            client_tag=client_tag,
         )
         out: dict[str, Any] = {
             "result": res,
@@ -1975,6 +1995,7 @@ def classify_leads(
     )
 )
 def find_owners(
+    client_tag: str = "",
     use_paid_fallback: bool = False,
     workers: int = 0,
 ) -> str:
@@ -1983,6 +2004,9 @@ def find_owners(
     First pulls person+title pairs from team/about pages into `contacts`
     (source=team_page). Then LLM single-owner extraction. Website-only is free;
     Apify fallback is paid — set use_paid_fallback=true. No approval required.
+
+    Defaults to in-ICP rows for client_tag (required unless you later pass
+    an all-rows path). ICP membership is per client.
     """
     _ensure_repo_cwd()
     from gmscraper import owner
@@ -1996,7 +2020,11 @@ def find_owners(
 
     store = _store()
     llm = _llm()
-    res = owner.run(store, llm, backend, workers=workers or default_workers(llm))
+    res = owner.run(
+        store, llm, backend,
+        workers=workers or default_workers(llm),
+        client_tag=client_tag,
+    )
     return _json({"result": res, "stats": store.stats(), "llm_spend": llm.spend_line()})
 
 
@@ -2014,6 +2042,7 @@ def estimate_apify_contact_crawl(
     source: str = "",
     limit: int = 0,
     verify_emails: bool = False,
+    client_tag: str = "",
 ) -> str:
     """Read-only Apify cost estimate. No crawl starts. No approval required.
 
@@ -2031,6 +2060,7 @@ def estimate_apify_contact_crawl(
             limit=int(limit or 0),
             verify_emails=bool(verify_emails),
             estimate_only=True,
+            client_tag=client_tag,
         )
     )
 
@@ -2054,11 +2084,13 @@ def apify_contact_crawl(
     estimate_only: bool = False,
     run_label: str = "",
     background: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Run vdrmota/contact-info-scraper; persist raw items locally.
 
     Pass domains as comma-separated hosts/URLs, or source='maps_no_owner' /
-    'icp_no_owner' to select from local SQLite. Prefer estimate_apify_contact_crawl
+    'icp_no_owner' to select from local SQLite. source='icp_no_owner' requires
+    client_tag — ICP membership is per client. Prefer estimate_apify_contact_crawl
     for cost checks. Refuses when estimate exceeds APIFY_MAX_COST_USD.
     Default max_pages_per_site=3. Paid leadsEnrichment/social/email-verify
     add-ons are never enabled. Failures return typed ToolError JSON.
@@ -2081,6 +2113,7 @@ def apify_contact_crawl(
                 use_proxy=bool(use_proxy),
                 estimate_only=bool(estimate_only),
                 run_label=run_label or "",
+                client_tag=client_tag,
             )
         except Exception as exc:  # noqa: BLE001
             return tool_error_from_exception(exc)
@@ -2378,8 +2411,11 @@ def export_csv(
     radius_miles: float = 0.0,
     include_reason: bool = False,
     clean: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Return matching leads as CSV text in the response (free).
+
+    icp_only=true (default) requires client_tag — in_icp is per client.
 
     Shape matches Property Owners pmf_shovels_contractors_export_csv:
       { total_matching, capped_at: 5000, csv: "<text>", ... }
@@ -2410,6 +2446,7 @@ def export_csv(
         clean=clean,
         out_path=out_path or None,
         backfill_cities=True,
+        client_tag=client_tag,
     )
     return _json(payload)
 
@@ -2435,8 +2472,11 @@ def query_leads(
     page_size: int = 50,
     clean: bool = True,
     include_reason: bool = False,
+    client_tag: str = "",
 ) -> str:
     """Paginated lead rows for browsing / joins (free).
+
+    icp_only=true requires client_tag — in_icp is per client.
 
     Mirrors Property Owners pmf_shovels_contractors_query.
     Returns { total, page, page_size, total_pages, items }.
@@ -2460,6 +2500,7 @@ def query_leads(
             clean=clean,
             include_reason=include_reason,
             backfill_cities=True,
+            client_tag=client_tag,
         )
     )
 
@@ -2477,11 +2518,13 @@ def leads_summary(
     icp_only: bool = False,
     source: str = "",
     clean: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Aggregate counts only — no row payloads (free).
 
-    Returns total businesses, in_icp, with_email/phone/website, unique domains,
-    classified vs unclassified, and in_icp breakdowns by city and main_category.
+    Pass client_tag ('basco', 'peterson') for that client's classified /
+    in_icp / unclassified and category breakdown. Without client_tag the
+    result is labelled cross-client and does not report a single in_icp.
     """
     _ensure_repo_cwd()
     from gmscraper import export
@@ -2493,6 +2536,7 @@ def leads_summary(
             source=source,
             clean=clean,
             backfill_cities=True,
+            client_tag=client_tag,
         )
     )
 
@@ -2512,6 +2556,7 @@ def sample_leads(
     with_email: bool = False,
     city: str = "",
     order: str = "random",
+    client_tag: str = "",
 ) -> str:
     """Return a small inline sample of lead rows for quality checks.
 
@@ -2531,6 +2576,7 @@ def sample_leads(
         with_email=with_email,
         city=city,
         order=ord_norm,  # type: ignore[arg-type]
+        client_tag=client_tag,
     )
     return _json(
         {
@@ -2565,8 +2611,11 @@ def sync_to_supabase(
     truncate: bool = False,
     run_label: str = "",
     background: bool = True,
+    client_tag: str = "",
 ) -> str:
     """Batch-upsert into Supabase. Counts only — never echoes rows.
+
+    icp_only=true requires client_tag — in_icp is per client.
 
     dataset='' (default): upsert local leads into `table` (maps_leads) on
     (place_id, run_label).
@@ -2616,6 +2665,7 @@ def sync_to_supabase(
         with_email=with_email,
         truncate=truncate,
         run_label=run_label,
+        client_tag=client_tag,
     )
     return _json(result)
 

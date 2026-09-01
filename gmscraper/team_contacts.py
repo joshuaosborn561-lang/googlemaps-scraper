@@ -10,7 +10,7 @@ from typing import Any, Sequence
 
 from .evidence import OWNER_HINTS, condense
 from .llm import Ollama, OllamaError
-from .store import Store
+from .store import Store, normalize_client_tag
 
 # "Jane Doe, President" / "Jane Doe - Owner" (same line only)
 NAME_TITLE_LINE = re.compile(
@@ -341,6 +341,7 @@ def run(
     llm: Ollama | None = None,
     domains: Sequence[str] | None = None,
     target_titles: Sequence[str] | None = None,
+    client_tag: str = "",
 ) -> dict[str, int]:
     """Extract contacts from team/about pages for fetched domains.
 
@@ -349,14 +350,16 @@ def run(
     """
     if domains is None:
         if icp_only:
+            tag = normalize_client_tag(client_tag, required=True)
             sql = """
                 SELECT DISTINCT b.domain FROM businesses b
-                JOIN verdicts v ON v.place_id=b.place_id AND v.in_icp=1
+                JOIN business_icp v
+                  ON v.place_id=b.place_id AND v.client_tag=? AND v.in_icp=1
                 JOIN sites s ON s.domain=b.domain AND s.status='ok'
                 WHERE b.domain IS NOT NULL AND b.domain != ''
                 ORDER BY b.domain
             """
-            domains = [r["domain"] for r in store.conn.execute(sql)]
+            domains = [r["domain"] for r in store.conn.execute(sql, (tag,))]
         else:
             domains = store.domains_with_ok_sites(limit=None)
     domains = list(domains)

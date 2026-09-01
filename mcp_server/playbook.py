@@ -65,7 +65,7 @@ Do NOT use this for:
 | "how much would X cost?" | `plan_leads` or `estimate_cost` (stop before run) |
 | "what verticals exist?" | `list_categories` |
 | "is the API working?" | `probe_maps` (1 paid Maps request) |
-| "re-run classify only" / tighten ICP | `classify_leads` (no re-scrape) |
+| "re-run classify only" / tighten ICP | `classify_leads(client_tag=…)` (no re-scrape) |
 | "pull emails from sites" | `enrich_sites` (homepage + up to 3 about/team pages) |
 | "crawl team pages on already-fetched sites" | `crawl_team_pages` then `extract_team_contacts` |
 | "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
@@ -77,12 +77,12 @@ Do NOT use this for:
 | "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (only if max_tier=fullenrich) |
 | "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |
 | "browse / page through leads" | `query_leads` (page_size max 50) |
-| "how many leads / breakdown" | `leads_summary` (counts only) |
+| "how many leads / breakdown" | `leads_summary(client_tag=…)` (counts only; unscoped is labelled cross-client) |
 | "show me some rows" / QA | `sample_leads` (random sample; never rely on disk path alone) |
 | "put results in Supabase / SQL" | `sync_to_supabase` (counts only; use run_label) |
 | "load Shovels / external CSV rows" | `ingest_external_leads` (set source_tag; counts only) |
 | "these rows have no website" | `estimate_resolve_domains` → `resolve_domains` → `enrich_sites` |
-| "classify only shovels / re-run" | `classify_leads(source=…, force=…, limit=…)` |
+| "classify only shovels / re-run" | `classify_leads(client_tag=…, source=…, force=…, limit=…)` |
 | "job status?" | `get_job_status` (live counters + ETA) / `list_job_queue` |
 | "history on the website?" | `list_remote_jobs` / `download_remote_csv` |
 | config check | `health` |
@@ -94,6 +94,11 @@ Do NOT use this for:
 - Do not re-scrape to fix field mapping; use `renormalize` after alias fixes.
 - Maps scrape costs money; enrich/classify/export (without Apify fallback) do not.
 - Be decisive. User wants the CSV, not a menu of options.
+- `in_icp` is per client. Always pass `client_tag` (`basco`, `peterson`, …)
+  on `classify_leads`, `run_leads`, `export_csv`, `query_leads`,
+  `sample_leads`, `find_owners`, and `sync_to_supabase`. Unscoped classify
+  errors rather than writing a global flag. Unscoped `leads_summary` is
+  labelled cross-client and must not be read as one client's ICP.
 """.strip()
 
 

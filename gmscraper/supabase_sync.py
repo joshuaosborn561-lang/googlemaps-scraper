@@ -121,6 +121,7 @@ def sync_to_supabase(
     with_email: bool = False,
     truncate: bool = False,
     run_label: str = "",
+    client_tag: str = "",
 ) -> dict[str, Any]:
     """Batch-upsert leads. Returns counts only — never row payloads."""
     table = (table or "maps_leads").strip() or "maps_leads"
@@ -139,6 +140,7 @@ def sync_to_supabase(
             icp_only=icp_only,
             with_email=with_email,
             order="name",
+            client_tag=client_tag,
         )
     ]
     n = upsert_rows(table, rows)

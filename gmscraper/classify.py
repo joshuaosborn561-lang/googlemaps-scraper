@@ -18,7 +18,7 @@ from typing import Any, Sequence
 from .config import settings
 from .evidence import ICP_HINTS, condense
 from .llm import Ollama, OllamaError
-from .store import Store
+from .store import Store, normalize_client_tag
 from .zips import haversine_miles, parse_center
 
 SYSTEM = (
@@ -65,6 +65,7 @@ NO_SITE_NOTE = "(no website text available - judge from the Maps data alone)"
 
 def _eligible_clauses(
     *,
+    client_tag: str,
     source: str = "",
     force: bool = False,
     include_no_site: bool = False,
@@ -72,7 +73,10 @@ def _eligible_clauses(
     clauses: list[str] = []
     args: list = []
     if not force:
-        clauses.append("b.place_id NOT IN (SELECT place_id FROM verdicts)")
+        clauses.append(
+            "b.place_id NOT IN (SELECT place_id FROM business_icp WHERE client_tag=?)"
+        )
+        args.append(client_tag)
     if source:
         clauses.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
         args.append(source.strip().lower())
@@ -141,8 +145,12 @@ def run(
     center_lat: float | None = None,
     center_lng: float | None = None,
     require_geo: bool = False,
+    client_tag: str = "",
 ) -> dict[str, Any]:
-    """Classify businesses against an ICP.
+    """Classify businesses against an ICP for one client_tag.
+
+    Writes only that client's rows in business_icp. client_tag is required —
+    an unscoped run would overwrite another client's flags on a shared store.
 
     By default only unclassified rows with fetched site text are eligible.
     Pass source= to scope (e.g. 'shovels'), force=True to re-classify, and
@@ -152,8 +160,9 @@ def run(
     radius are rejected deterministically before any LLM call and saved as
     in_icp=false with reason 'outside_radius'.
     """
+    tag = normalize_client_tag(client_tag, required=True)
     where, args = _eligible_clauses(
-        source=source, force=force, include_no_site=include_no_site
+        client_tag=tag, source=source, force=force, include_no_site=include_no_site
     )
     sql = f"SELECT b.* FROM businesses b{where} ORDER BY b.first_seen DESC, b.place_id"
     if limit:
@@ -172,7 +181,12 @@ def run(
                 "done": 0,
                 "in_icp": 0,
                 "errors": 0,
-                "reason": "require_geo/radius set but radius_miles is missing or <= 0",
+                "client_tag": tag,
+                "reason": (
+                    "require_geo=true needs radius_miles > 0 and a center "
+                    "(center='Dallas, TX' or center_lat/center_lng). "
+                    "Pass require_geo=false if this ICP has no geography."
+                ),
                 "geo_rejected": 0,
             }
         geo = _geo_center(center, center_lat, center_lng)
@@ -181,7 +195,12 @@ def run(
                 "done": 0,
                 "in_icp": 0,
                 "errors": 0,
-                "reason": "require_geo set but center could not be resolved to lat/lng",
+                "client_tag": tag,
+                "reason": (
+                    "require_geo=true needs a resolvable center "
+                    "(center='City, ST' or center_lat/center_lng) plus radius_miles. "
+                    "Pass require_geo=false if this ICP has no geography."
+                ),
                 "geo_rejected": 0,
             }
 
@@ -189,7 +208,7 @@ def run(
         print("Nothing to classify.")
         stats = store.stats()
         pending_where, pending_args = _eligible_clauses(
-            source=source, force=False, include_no_site=include_no_site
+            client_tag=tag, source=source, force=False, include_no_site=include_no_site
         )
         pending_eligible = store.conn.execute(
             f"SELECT COUNT(*) FROM businesses b{pending_where}", pending_args
@@ -204,16 +223,20 @@ def run(
             "SELECT COUNT(*) FROM businesses b WHERE " + " AND ".join(no_site_clauses),
             no_site_args,
         ).fetchone()[0]
-        already_q = "SELECT COUNT(*) FROM verdicts v JOIN businesses b ON b.place_id=v.place_id"
-        already_args: list = []
+        already_q = (
+            "SELECT COUNT(*) FROM business_icp v "
+            "JOIN businesses b ON b.place_id=v.place_id WHERE v.client_tag=?"
+        )
+        already_args: list = [tag]
         if source:
-            already_q += " WHERE COALESCE(NULLIF(b.source,''), 'maps') = ?"
+            already_q += " AND COALESCE(NULLIF(b.source,''), 'maps') = ?"
             already_args.append(source.strip().lower())
         already = store.conn.execute(already_q, already_args).fetchone()[0]
         src_note = f" for source={source!r}" if source else ""
         if already and not pending_eligible and not force:
             reason = (
-                f"nothing eligible{src_note}: all classifiable businesses already have verdicts "
+                f"nothing eligible{src_note}: all classifiable businesses already have "
+                f"verdicts for client_tag={tag!r} "
                 f"({already:,} classified; {no_site:,} businesses have no site text). "
                 f"Pass force=true to re-classify, or resolve_domains / enrich_sites first."
             )
@@ -232,6 +255,7 @@ def run(
             "reason": reason,
             "source": source or None,
             "force": force,
+            "client_tag": tag,
             "unclassifiable_no_site": no_site,
             "classified": already,
             "classifiable_with_site": int(stats.get("classifiable_with_site") or 0),
@@ -239,7 +263,7 @@ def run(
 
     if force:
         for row in rows:
-            store.clear_verdict(row["place_id"])
+            store.clear_verdict(row["place_id"], client_tag=tag)
 
     geo_rejected = 0
     llm_rows = rows
@@ -257,6 +281,8 @@ def run(
                     1.0,
                     f"outside_radius:{radius_miles:g}mi",
                     "geo_gate",
+                    client_tag=tag,
+                    classifier_version="geo_gate",
                 )
                 geo_rejected += 1
         llm_rows = inside
@@ -279,6 +305,7 @@ def run(
         "radius_miles": float(radius_miles) if use_geo else None,
         "center_lat": geo[0] if geo else None,
         "center_lng": geo[1] if geo else None,
+        "client_tag": tag,
     }
     lock = threading.Lock()
 
@@ -302,11 +329,14 @@ def run(
             store.save_verdict(
                 row["place_id"], in_icp, conf,
                 str(out.get("reason") or "")[:500], ollama.model,
+                client_tag=tag,
             )
             ok = True
         except (OllamaError, ValueError, TypeError) as exc:
-            store.save_verdict(row["place_id"], None, 0.0, f"error: {exc}"[:500],
-                               ollama.model)
+            store.save_verdict(
+                row["place_id"], None, 0.0, f"error: {exc}"[:500],
+                ollama.model, client_tag=tag,
+            )
             in_icp, ok = False, False
 
         with lock:

@@ -39,12 +39,16 @@ def _seed(store: Store) -> None:
                VALUES ('p1', 1, 0.9, 'commercial GC mentioned', 'test'),
                       ('p3', 0, 0.8, 'roofing exclusion', 'test')"""
         )
+    store.backfill_legacy_verdicts()
 
 
 def test_sample_leads_icp_with_email(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
-    rows = export.sample_leads(store, limit=20, icp_only=True, with_email=True, order="random")
+    rows = export.sample_leads(
+        store, limit=20, icp_only=True, with_email=True, order="random",
+        client_tag="basco",
+    )
     assert len(rows) == 1
     assert rows[0]["name"] == "Acme GC"
     assert rows[0]["email"]
@@ -73,7 +77,9 @@ def test_classify_empty_reason(tmp_path: Path) -> None:
         def json_chat(self, *a, **k):  # pragma: no cover
             raise AssertionError("should not call LLM when nothing eligible")
 
-    res = classify.run(store, DummyLLM(), "commercial general contractors")
+    res = classify.run(
+        store, DummyLLM(), "commercial general contractors", client_tag="basco"
+    )
     assert res["done"] == 0
     assert "nothing eligible" in res["reason"]
     assert "already" in res["reason"] or "no site text" in res["reason"]
@@ -82,7 +88,7 @@ def test_classify_empty_reason(tmp_path: Path) -> None:
 def test_iter_leads_columns(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     _seed(store)
-    rows = export.fetch_leads(store, icp_only=True, with_email=True)
+    rows = export.fetch_leads(store, icp_only=True, with_email=True, client_tag="basco")
     assert len(rows) == 1
     for col in export.COLUMNS:
         assert col in rows[0]
