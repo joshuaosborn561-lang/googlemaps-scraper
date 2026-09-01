@@ -85,6 +85,23 @@ CREATE TABLE IF NOT EXISTS verdicts (
 );
 CREATE INDEX IF NOT EXISTS idx_verdicts_icp ON verdicts(in_icp);
 
+-- Per-client ICP membership. The legacy verdicts table is global and must
+-- not be the source of truth on a shared store — two clients can disagree
+-- about the same place_id.
+CREATE TABLE IF NOT EXISTS business_icp (
+    place_id            TEXT NOT NULL,
+    client_tag          TEXT NOT NULL,
+    in_icp              INTEGER,
+    confidence          REAL,
+    reason              TEXT,
+    model               TEXT,
+    classifier_version  TEXT,
+    classified_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (place_id, client_tag)
+);
+CREATE INDEX IF NOT EXISTS idx_business_icp_client
+    ON business_icp(client_tag, in_icp);
+
 CREATE TABLE IF NOT EXISTS owners (
     place_id     TEXT PRIMARY KEY,
     owner_name   TEXT,
@@ -163,6 +180,27 @@ _BIZ_EXTRA_COLS = (
     ("external_id", "TEXT"),
     ("permit_count", "INTEGER"),
 )
+
+# Existing global verdicts were Vasco/Carlos (Basco). Backfill writes them
+# here so the next classify cannot wipe that work.
+LEGACY_CLIENT_TAG = "basco"
+_CLIENT_TAG_ALIASES = {"vasco": "basco", "carlos": "basco"}
+
+
+class MissingClientTag(ValueError):
+    """Raised when a write or ICP-scoped read has no client_tag."""
+
+
+def normalize_client_tag(tag: str | None, *, required: bool = False) -> str:
+    raw = " ".join(str(tag or "").strip().lower().split())
+    raw = _CLIENT_TAG_ALIASES.get(raw, raw)
+    if required and not raw:
+        raise MissingClientTag(
+            "client_tag is required — ICP membership is per client. "
+            "Pass client_tag='basco' or client_tag='peterson' "
+            "(unscoped classify would overwrite another client's flags)."
+        )
+    return raw
 
 
 class Store:
@@ -250,8 +288,22 @@ class Store:
                 ON apify_contact_raw(run_id);
             CREATE INDEX IF NOT EXISTS idx_apify_contact_raw_domain
                 ON apify_contact_raw(domain);
+            CREATE TABLE IF NOT EXISTS business_icp (
+                place_id            TEXT NOT NULL,
+                client_tag          TEXT NOT NULL,
+                in_icp              INTEGER,
+                confidence          REAL,
+                reason              TEXT,
+                model               TEXT,
+                classifier_version  TEXT,
+                classified_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (place_id, client_tag)
+            );
+            CREATE INDEX IF NOT EXISTS idx_business_icp_client
+                ON business_icp(client_tag, in_icp);
             """
         )
+        self.backfill_legacy_verdicts(conn)
 
     # ---------------------------------------------------------------- jobs
 
@@ -586,9 +638,39 @@ class Store:
             out.setdefault(r["domain"], []).append(r["email"])
         return out
 
-    def clear_verdict(self, place_id: str) -> None:
+    def backfill_legacy_verdicts(self, conn: sqlite3.Connection | None = None) -> int:
+        """Copy global verdicts into business_icp as client_tag='basco'.
+
+        Idempotent: existing (place_id, basco) rows are left untouched so a
+        later Basco re-classify is not overwritten by stale verdicts.
+        """
+        c = conn or self.conn
+        before = c.execute(
+            "SELECT COUNT(*) FROM business_icp WHERE client_tag=?",
+            (LEGACY_CLIENT_TAG,),
+        ).fetchone()[0]
+        c.execute(
+            """INSERT OR IGNORE INTO business_icp
+                   (place_id, client_tag, in_icp, confidence, reason, model,
+                    classifier_version, classified_at)
+               SELECT place_id, ?, in_icp, confidence, reason, model,
+                      model, COALESCE(updated_at, datetime('now'))
+               FROM verdicts""",
+            (LEGACY_CLIENT_TAG,),
+        )
+        after = c.execute(
+            "SELECT COUNT(*) FROM business_icp WHERE client_tag=?",
+            (LEGACY_CLIENT_TAG,),
+        ).fetchone()[0]
+        return max(0, after - before)
+
+    def clear_verdict(self, place_id: str, client_tag: str | None = None) -> None:
+        tag = normalize_client_tag(client_tag, required=True)
         with self.conn as c:
-            c.execute("DELETE FROM verdicts WHERE place_id = ?", (place_id,))
+            c.execute(
+                "DELETE FROM business_icp WHERE place_id=? AND client_tag=?",
+                (place_id, tag),
+            )
 
     # ------------------------------------------------------ verdicts/owners
 
@@ -599,18 +681,65 @@ class Store:
         confidence: float,
         reason: str,
         model: str,
+        client_tag: str | None = None,
+        classifier_version: str | None = None,
     ) -> None:
+        tag = normalize_client_tag(client_tag, required=True)
+        version = (classifier_version or model or "").strip() or None
         with self.conn as c:
             c.execute(
-                """INSERT INTO verdicts (place_id, in_icp, confidence, reason, model,
-                                         updated_at)
-                   VALUES (?,?,?,?,?,datetime('now'))
-                   ON CONFLICT(place_id) DO UPDATE SET
-                     in_icp=excluded.in_icp, confidence=excluded.confidence,
-                     reason=excluded.reason, model=excluded.model,
-                     updated_at=excluded.updated_at""",
-                (place_id, None if in_icp is None else int(in_icp), confidence, reason, model),
+                """INSERT INTO business_icp
+                       (place_id, client_tag, in_icp, confidence, reason, model,
+                        classifier_version, classified_at)
+                   VALUES (?,?,?,?,?,?,?,datetime('now'))
+                   ON CONFLICT(place_id, client_tag) DO UPDATE SET
+                     in_icp=excluded.in_icp,
+                     confidence=excluded.confidence,
+                     reason=excluded.reason,
+                     model=excluded.model,
+                     classifier_version=excluded.classifier_version,
+                     classified_at=excluded.classified_at""",
+                (
+                    place_id,
+                    tag,
+                    None if in_icp is None else int(in_icp),
+                    confidence,
+                    reason,
+                    model,
+                    version,
+                ),
             )
+
+    def icp_counts(self, client_tag: str) -> dict[str, int]:
+        tag = normalize_client_tag(client_tag, required=True)
+        row = self.conn.execute(
+            """SELECT
+                   COUNT(*) AS classified,
+                   COALESCE(SUM(CASE WHEN in_icp=1 THEN 1 ELSE 0 END), 0) AS in_icp
+               FROM business_icp WHERE client_tag=?""",
+            (tag,),
+        ).fetchone()
+        return {
+            "client_tag": tag,
+            "classified": int(row["classified"] or 0),
+            "in_icp": int(row["in_icp"] or 0),
+        }
+
+    def icp_by_client(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for r in self.conn.execute(
+            """SELECT client_tag,
+                      COUNT(*) AS classified,
+                      COALESCE(SUM(CASE WHEN in_icp=1 THEN 1 ELSE 0 END), 0) AS in_icp
+               FROM business_icp
+               GROUP BY client_tag
+               ORDER BY client_tag"""
+        ):
+            out[r["client_tag"]] = {
+                "classified": int(r["classified"] or 0),
+                "in_icp": int(r["in_icp"] or 0),
+            }
+        return out
 
     def save_owner(
         self,
@@ -908,7 +1037,8 @@ class Store:
                    WHERE s.domain = b.domain AND s.status = 'ok'
                  )"""
         )
-        classified = q("SELECT COUNT(*) FROM verdicts")
+        icp_clients = self.icp_by_client()
+        classified = sum(v["classified"] for v in icp_clients.values())
         unclassifiable = max(0, businesses - eligible)
         pct = round((classified / eligible) * 100.0, 1) if eligible else 0.0
         by_source = {
@@ -941,7 +1071,11 @@ class Store:
             "classifiable_with_site": eligible,
             "unclassifiable_no_site": unclassifiable,
             "classified_pct_of_eligible": pct,
-            "in_icp": q("SELECT COUNT(*) FROM verdicts WHERE in_icp=1"),
+            "in_icp_note": (
+                "in_icp is per client — use icp_by_client or "
+                "leads_summary(client_tag=...)"
+            ),
+            "icp_by_client": icp_clients,
             "owners_found": q(
                 "SELECT COUNT(*) FROM owners WHERE owner_name IS NOT NULL AND owner_name!=''"
             ),

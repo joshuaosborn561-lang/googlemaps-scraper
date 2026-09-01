@@ -11,6 +11,7 @@ from typing import Any, Iterator, Literal
 
 from . import emails as email_lib
 from .mapsdata import parse_address_parts
+from .store import MissingClientTag, normalize_client_tag
 from .zips import haversine_miles, parse_center
 
 COLUMNS = [
@@ -37,17 +38,41 @@ SAMPLE_COLUMNS = [
 EXPORT_CAP = 5000
 QUERY_PAGE_MAX = 50
 
-BASE_SQL = """
+_BASE_SELECT = """
 SELECT b.place_id, b.name, b.phone, b.website, b.domain, b.address, b.city,
        b.state, b.zip, b.source_zip, b.rating, b.reviews, b.main_category, b.types,
        b.latitude, b.longitude, b.maps_url, b.source_category,
        b.permit_count, b.source AS lead_source,
-       v.in_icp, v.confidence AS icp_confidence, v.reason AS icp_reason,
+       {icp_cols},
        o.owner_name, o.owner_title, o.source AS owner_source
 FROM businesses b
-LEFT JOIN verdicts v ON v.place_id = b.place_id
+{icp_join}
 LEFT JOIN owners   o ON o.place_id = b.place_id
 """
+
+
+def _base_sql(client_tag: str) -> tuple[str, list[Any]]:
+    """Join business_icp for one client. No tag → ICP columns are NULL."""
+    if client_tag:
+        sql = _BASE_SELECT.format(
+            icp_cols=(
+                "v.in_icp, v.confidence AS icp_confidence, "
+                "v.reason AS icp_reason, v.client_tag AS icp_client_tag"
+            ),
+            icp_join=(
+                "LEFT JOIN business_icp v "
+                "ON v.place_id = b.place_id AND v.client_tag = ?"
+            ),
+        )
+        return sql, [client_tag]
+    sql = _BASE_SELECT.format(
+        icp_cols=(
+            "NULL AS in_icp, NULL AS icp_confidence, "
+            "NULL AS icp_reason, NULL AS icp_client_tag"
+        ),
+        icp_join="",
+    )
+    return sql, []
 
 
 def _build_where(
@@ -66,10 +91,17 @@ def _build_where(
     state: str | None = None,
     q: str | None = None,
     source: str | None = None,
+    client_tag: str = "",
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     args: list[Any] = []
     if icp_only:
+        if not client_tag:
+            raise MissingClientTag(
+                "icp_only=true requires client_tag — in_icp is per client, "
+                "not a global flag. Pass client_tag='basco' or "
+                "client_tag='peterson'."
+            )
         clauses.append("v.in_icp = 1")
     if min_confidence > 0:
         clauses.append("COALESCE(v.confidence, 0) >= ?")
@@ -267,8 +299,16 @@ def iter_leads(
     limit: int | None = None,
     offset: int = 0,
     clean: bool = False,
+    client_tag: str = "",
 ) -> Iterator[dict[str, Any]]:
     """Yield export-shaped lead dicts from the local SQLite store."""
+    tag = normalize_client_tag(client_tag)
+    if icp_only and not tag:
+        raise MissingClientTag(
+            "icp_only=true requires client_tag — in_icp is per client, "
+            "not a global flag. Pass client_tag='basco' or "
+            "client_tag='peterson'."
+        )
     where, args = _build_where(
         icp_only=icp_only,
         with_owner=with_owner,
@@ -284,8 +324,11 @@ def iter_leads(
         state=state,
         q=q,
         source=source,
+        client_tag=tag,
     )
-    sql = BASE_SQL + where
+    base_sql, join_args = _base_sql(tag)
+    sql = base_sql + where
+    args = join_args + args
     if order == "recent":
         sql += " ORDER BY COALESCE(b.first_seen, '') DESC, b.place_id DESC"
     elif order == "random":
@@ -355,6 +398,7 @@ def sample_leads(
     with_email: bool = False,
     city: str = "",
     order: Literal["random", "recent"] = "random",
+    client_tag: str = "",
 ) -> list[dict[str, Any]]:
     """Compact row subset for QA. Random by default to avoid ZIP-prefix bias."""
     lim = max(1, min(int(limit or 20), 100))
@@ -365,6 +409,7 @@ def sample_leads(
         city=city or None,
         order=order if order in ("random", "recent") else "random",
         limit=lim,
+        client_tag=client_tag,
     )
     return [{k: r.get(k, "") for k in SAMPLE_COLUMNS} for r in rows]
 
@@ -410,6 +455,7 @@ def export_payload(
     cap: int = EXPORT_CAP,
     out_path: str | Path | None = None,
     backfill_cities: bool = True,
+    client_tag: str = "",
 ) -> dict[str, Any]:
     """Build the MCP export response: CSV text + totals (capped)."""
     cities_backfilled = backfill_blank_cities(store) if backfill_cities else 0
@@ -431,6 +477,7 @@ def export_payload(
         radius_miles=radius_miles,
         order="name",
         clean=clean,
+        client_tag=client_tag,
     )
     # Collect up to cap+1 to know if truncated, and count total cheaply for ICP-sized sets.
     rows: list[dict[str, Any]] = []
@@ -465,6 +512,7 @@ def export_payload(
         "clean": clean,
         "cities_backfilled": cities_backfilled,
         "out_path": written,
+        "client_tag": normalize_client_tag(client_tag) or None,
     }
 
 
@@ -483,6 +531,7 @@ def query_leads(
     clean: bool = True,
     include_reason: bool = False,
     backfill_cities: bool = True,
+    client_tag: str = "",
 ) -> dict[str, Any]:
     cities_backfilled = backfill_blank_cities(store) if backfill_cities else 0
     page = max(1, int(page or 1))
@@ -497,6 +546,7 @@ def query_leads(
         q=q or None,
         order="name",
         clean=clean,
+        client_tag=client_tag,
     )
     total = 0
     items_raw: list[dict[str, Any]] = []
@@ -517,6 +567,7 @@ def query_leads(
         "items": items,
         "clean": clean,
         "cities_backfilled": cities_backfilled,
+        "client_tag": normalize_client_tag(client_tag) or None,
     }
 
 
@@ -527,10 +578,36 @@ def leads_summary(
     source: str = "",
     clean: bool = True,
     backfill_cities: bool = True,
+    client_tag: str = "",
 ) -> dict[str, Any]:
-    """Aggregate counts only — never rows."""
+    """Aggregate counts only — never rows.
+
+    With client_tag, classified / in_icp / breakdowns are that client's
+    business_icp rows. Without one, the payload is labelled cross-client
+    and does not pretend a single in_icp flag is universal.
+    """
     cities_backfilled = backfill_blank_cities(store) if backfill_cities else 0
     stats = store.stats()
+    tag = normalize_client_tag(client_tag)
+
+    if not tag:
+        total = store.conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
+        by_client = store.icp_by_client()
+        for name, counts in by_client.items():
+            counts["unclassified"] = max(0, total - counts["classified"])
+        return {
+            "scope": "cross-client",
+            "warning": (
+                "No client_tag — in_icp is per client and is not reported as "
+                "a single flag. Pass client_tag='basco' or "
+                "client_tag='peterson' for that client's counts."
+            ),
+            "total_businesses": total,
+            "by_client": by_client,
+            "businesses_by_source": stats.get("businesses_by_source") or {},
+            "clean": clean,
+            "cities_backfilled": cities_backfilled,
+        }
 
     # Base population optionally scoped.
     where = []
@@ -539,21 +616,29 @@ def leads_summary(
         where.append("COALESCE(NULLIF(b.source,''), 'maps') = ?")
         args.append(source.strip().lower())
     if icp_only:
-        where.append("EXISTS (SELECT 1 FROM verdicts v WHERE v.place_id=b.place_id AND v.in_icp=1)")
+        where.append(
+            "EXISTS (SELECT 1 FROM business_icp v "
+            "WHERE v.place_id=b.place_id AND v.client_tag=? AND v.in_icp=1)"
+        )
+        args.append(tag)
     wh = (" WHERE " + " AND ".join(where)) if where else ""
 
     total = store.conn.execute(
         f"SELECT COUNT(*) FROM businesses b{wh}", args
     ).fetchone()[0]
+    icp_wh = wh + (" AND " if wh else " WHERE ") + "v.client_tag=?"
+    icp_args = args + [tag]
     in_icp = store.conn.execute(
         f"""SELECT COUNT(*) FROM businesses b
-            JOIN verdicts v ON v.place_id=b.place_id AND v.in_icp=1{wh}""",
-        args,
+            JOIN business_icp v ON v.place_id=b.place_id AND v.in_icp=1
+            {icp_wh}""",
+        icp_args,
     ).fetchone()[0]
     classified = store.conn.execute(
         f"""SELECT COUNT(*) FROM businesses b
-            JOIN verdicts v ON v.place_id=b.place_id{wh}""",
-        args,
+            JOIN business_icp v ON v.place_id=b.place_id
+            {icp_wh}""",
+        icp_args,
     ).fetchone()[0]
     with_phone = store.conn.execute(
         f"SELECT COUNT(*) FROM businesses b{wh}"
@@ -582,8 +667,8 @@ def leads_summary(
     icp_sql = f"""
         SELECT b.place_id, b.domain, b.city, b.main_category
         FROM businesses b
-        JOIN verdicts v ON v.place_id=b.place_id AND v.in_icp=1
-        {wh}
+        JOIN business_icp v ON v.place_id=b.place_id AND v.in_icp=1
+        {icp_wh}
     """
     # For with_email across all (not just ICP), scan matching businesses.
     email_scan_sql = f"SELECT b.place_id, b.domain FROM businesses b{wh}"
@@ -599,7 +684,7 @@ def leads_summary(
             continue
         with_email += 1
 
-    for row in store.conn.execute(icp_sql, args):
+    for row in store.conn.execute(icp_sql, icp_args):
         city = (row["city"] or "").strip() or "(blank)"
         cat = (row["main_category"] or "").strip() or "(blank)"
         by_city[city] = by_city.get(city, 0) + 1
@@ -611,6 +696,8 @@ def leads_summary(
     )
 
     return {
+        "scope": "client",
+        "client_tag": tag,
         "total_businesses": total,
         "in_icp": in_icp,
         "with_email": with_email,
@@ -643,6 +730,7 @@ def run(
     radius_miles: float | None = None,
     center_lat: float | None = None,
     center_lng: float | None = None,
+    client_tag: str = "",
 ) -> int:
     """Legacy file-only export used by CLI / run_leads."""
     out = Path(out_path)
@@ -668,6 +756,7 @@ def run(
             center_lng=center_lng,
             order="name",
             clean=False,
+            client_tag=client_tag,
         ):
             w.writerow(rec)
             n += 1

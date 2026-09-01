@@ -133,7 +133,7 @@ def test_classify_source_and_force(tmp_path: Path) -> None:
             "('gcone.example','ok','commercial general contractor','[]',30),"
             "('maps.example','ok','commercial general contractor','[]',30)"
         )
-    store.save_verdict("shovels:1", True, 0.9, "already", "test")
+    store.save_verdict("shovels:1", True, 0.9, "already", "test", client_tag="basco")
 
     class Dummy:
         model = "dummy"
@@ -142,20 +142,23 @@ def test_classify_source_and_force(tmp_path: Path) -> None:
             return {"in_icp": True, "confidence": 0.8, "reason": "gc"}
 
     # Without force, source=shovels has nothing pending.
-    res = classify.run(store, Dummy(), "commercial GC", source="shovels")
+    res = classify.run(
+        store, Dummy(), "commercial GC", source="shovels", client_tag="basco"
+    )
     assert res["done"] == 0
     assert "already" in res["reason"] or "verdicts" in res["reason"]
 
     # force re-classifies only shovels.
     res2 = classify.run(
-        store, Dummy(), "commercial GC", source="shovels", force=True, limit=10
+        store, Dummy(), "commercial GC", source="shovels", force=True, limit=10,
+        client_tag="basco",
     )
     assert res2["done"] == 1
 
     # maps row still unclassified until scoped to maps/all.
     pending_maps = store.conn.execute(
         "SELECT COUNT(*) FROM businesses b WHERE b.source='maps' "
-        "AND b.place_id NOT IN (SELECT place_id FROM verdicts)"
+        "AND b.place_id NOT IN (SELECT place_id FROM business_icp WHERE client_tag='basco')"
     ).fetchone()[0]
     assert pending_maps == 1
 

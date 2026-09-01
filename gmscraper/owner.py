@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .config import settings
 from .evidence import OWNER_HINTS, condense
 from .llm import Ollama, OllamaError
-from .store import Store
+from .store import Store, normalize_client_tag
 
 SYSTEM = (
     "You extract the name of a local business's owner from evidence. Return "
@@ -94,6 +94,7 @@ def run(
     icp_only: bool = True,
     max_evidence_chars: int | None = None,
     extract_team: bool = True,
+    client_tag: str = "",
 ) -> dict[str, int]:
     # Free signal: pull person+title pairs from team/about pages into contacts
     # (and fill empty owners) before the single-owner LLM pass.
@@ -107,18 +108,22 @@ def run(
             workers=max(1, workers),
             icp_only=icp_only,
             use_llm=False,
+            client_tag=client_tag,
         )
 
     where = "b.place_id NOT IN (SELECT place_id FROM owners)"
+    args: list = []
     if icp_only:
+        tag = normalize_client_tag(client_tag, required=True)
         where += (
-            " AND EXISTS (SELECT 1 FROM verdicts v "
-            "WHERE v.place_id=b.place_id AND v.in_icp=1)"
+            " AND EXISTS (SELECT 1 FROM business_icp v "
+            "WHERE v.place_id=b.place_id AND v.client_tag=? AND v.in_icp=1)"
         )
+        args.append(tag)
     sql = f"SELECT b.* FROM businesses b WHERE {where}"
     if limit:
         sql += f" LIMIT {int(limit)}"
-    rows = list(store.conn.execute(sql))
+    rows = list(store.conn.execute(sql, args))
     cap = max_evidence_chars or settings.max_evidence_chars
 
     if not rows:
