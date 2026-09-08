@@ -73,13 +73,14 @@ Do NOT use this for:
 | "address → business + domain" | `estimate_resolve_places` then `resolve_places` |
 | "raw list → people end-to-end" | `pipeline_run` (resolve,enrich,extract,contacts; max_tier default getleads) |
 | "sync parcels with county + cursor" | `sync_to_supabase(dataset='parcels', county=…, cursor=…)` |
+| "sync team contacts / owners to Supabase" | `sync_to_supabase(client_tag=…, dataset='contacts')` then `sync_to_supabase(client_tag=…)` for lead owner backfill |
 | "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (apify→AI Ark→getleads→LeadMagic; max_tier default leadmagic) |
 | "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (only if max_tier=fullenrich) |
 | "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |
 | "browse / page through leads" | `query_leads` (page_size max 50) |
 | "how many leads / breakdown" | `leads_summary` (counts only) |
 | "show me some rows" / QA | `sample_leads` (random sample; never rely on disk path alone) |
-| "put results in Supabase / SQL" | `sync_to_supabase` (counts only; use run_label) |
+| "put results in Supabase / SQL" | `sync_to_supabase(client_tag=…)` (counts only; dataset='contacts' for people) |
 | "load Shovels / external CSV rows" | `ingest_external_leads` (set source_tag; counts only) |
 | "these rows have no website" | `estimate_resolve_domains` → `resolve_domains` → `enrich_sites` |
 | "classify only shovels / re-run" | `classify_leads(source=…, force=…, limit=…)` |
