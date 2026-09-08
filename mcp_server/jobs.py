@@ -148,6 +148,11 @@ def make_queue_key(kind: str, meta: dict[str, Any] | None = None) -> str:
         details = "details" if meta.get("details_only") else "full"
         pid = meta.get("project_id") or ""
         return f"resolve_places:{pid}:{schema}.{table}:{details}"
+    if kind == "resolve_via_serp":
+        schema = meta.get("schema") or ""
+        table = meta.get("table") or ""
+        pid = meta.get("project_id") or ""
+        return f"resolve_via_serp:{pid}:{schema}.{table}"
     if kind == "pipeline_run":
         schema = meta.get("schema") or ""
         table = meta.get("table") or ""
