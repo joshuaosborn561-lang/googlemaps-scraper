@@ -2988,11 +2988,17 @@ def sync_to_supabase(
     center_lng: float = 0.0,
     background: bool = True,
 ) -> str:
-    """Batch-upsert into the client's Supabase table. Counts only.
+    """Batch-upsert into the client's Supabase table. Counts only — never rows.
 
-    dataset='' (default): requires client_tag ('peterson' or 'basco').
-    Writes to {slug}_leads (never a shared maps_leads dump). Destination
-    rows are stamped with that client_tag.
+    dataset='' (default, leads): requires client_tag ('peterson' or 'basco').
+    Writes to client_{tag}.leads (never a shared maps_leads dump). Also
+    backfills owner_name / owner_title for every local owner, not only the
+    current plan scope. Destination rows are stamped with that client_tag.
+
+    dataset='contacts': upsert local SQLite contacts into
+    client_{tag}.contacts on natural_key. Honours client_tag, plan_id,
+    run_id, run_label, cursor, page_size, max_pages. Returns has_more +
+    resume_token. Counts only.
 
     Scope historical (untagged) SQLite rows with the same filters as
     classify_leads / enrich_sites: city, state (comma-separated OK),
@@ -3051,6 +3057,7 @@ def sync_to_supabase(
             client_tag=client_tag,
             table=table,
             schema=schema,
+            dataset=ds,
             icp_only=icp_only,
             with_email=with_email,
             truncate=truncate,
@@ -3065,6 +3072,9 @@ def sync_to_supabase(
             radius_miles=float(radius_miles or 0),
             center_lat=float(center_lat or 0),
             center_lng=float(center_lng or 0),
+            cursor=int(cursor or 0),
+            page_size=int(page_size or 1000),
+            max_pages=int(max_pages or 0),
         )
         return _json(result)
     except Exception as exc:  # noqa: BLE001

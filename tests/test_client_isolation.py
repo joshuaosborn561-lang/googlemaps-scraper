@@ -15,9 +15,10 @@ def test_resolve_aliases() -> None:
     client_reg.load_clients(reload=True)
     assert client_reg.resolve_client("kyle").slug == "peterson"
     assert client_reg.resolve_client("carlos").slug == "basco"
-    assert client_reg.resolve_client("peterson").supabase_schema == "public"
-    assert client_reg.resolve_client("peterson").leads_table == "peterson_leads"
-    assert client_reg.resolve_client("basco").leads_fqn == "public.basco_leads"
+    assert client_reg.resolve_client("peterson").supabase_schema == "client_peterson"
+    assert client_reg.resolve_client("peterson").leads_table == "leads"
+    assert client_reg.resolve_client("basco").leads_fqn == "client_basco.leads"
+    assert client_reg.resolve_client("peterson").contacts_fqn == "client_peterson.contacts"
 
 
 def test_unknown_client_raises() -> None:
@@ -35,9 +36,11 @@ def test_sync_target_routes_to_client_schema() -> None:
     client_reg.load_clients(reload=True)
     t = supabase_sync.resolve_sync_target(client_tag="kyle")
     assert t["client_tag"] == "peterson"
-    assert t["schema"] == "public"
-    assert t["table"] == "peterson_leads"
-    assert t["fqn"] == "public.peterson_leads"
+    assert t["schema"] == "client_peterson"
+    assert t["table"] == "leads"
+    assert t["fqn"] == "client_peterson.leads"
+    c = supabase_sync.resolve_sync_target(client_tag="peterson", dataset="contacts")
+    assert c["fqn"] == "client_peterson.contacts"
 
 
 def test_export_filters_by_client_tag(tmp_path: Path) -> None:
@@ -162,7 +165,9 @@ def test_sync_uses_state_scope_not_source_client_tag(tmp_path: Path, monkeypatch
         store, client_tag="peterson", state="TX", icp_only=True
     )
     assert out["rows_synced"] == 1
-    assert out["table"] == "peterson_leads"
+    assert out["table"] == "leads"
+    assert out["schema"] == "client_peterson"
+    assert out["fqn"] == "client_peterson.leads"
     assert out["scope"]["state"] == "TX"
     assert out["scope"]["source_filtered_by_client_tag"] is False
     assert len(captured) == 1
@@ -202,9 +207,11 @@ def test_row_for_supabase_coerces_empty_permit_count() -> None:
 def test_ensure_sql_contains_both_client_tables() -> None:
     client_reg.load_clients(reload=True)
     sql = client_reg.ensure_sql_all()
-    assert "CREATE TABLE IF NOT EXISTS public.peterson_leads" in sql
-    assert "CREATE TABLE IF NOT EXISTS public.basco_contacts" in sql
-    assert "peterson_companies" in sql
+    assert "CREATE TABLE IF NOT EXISTS client_peterson.leads" in sql
+    assert "CREATE TABLE IF NOT EXISTS client_basco.contacts" in sql
+    assert "client_peterson.companies" in sql
+    assert "raw_name" in sql
+    assert "natural_key" in sql
 
 
 def test_list_clients_public() -> None:

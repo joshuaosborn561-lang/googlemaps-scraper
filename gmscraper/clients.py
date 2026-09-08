@@ -220,6 +220,7 @@ CREATE TABLE IF NOT EXISTS {schema}.{contacts} (
     domain text NOT NULL,
     first_name text,
     last_name text,
+    raw_name text,
     job_title text,
     job_level text,
     email text,
@@ -234,9 +235,20 @@ CREATE TABLE IF NOT EXISTS {schema}.{contacts} (
     confidence double precision,
     place_id text,
     client_tag text NOT NULL,
+    natural_key text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS {contacts}_natural_key
+    ON {schema}.{contacts} (natural_key);
+CREATE UNIQUE INDEX IF NOT EXISTS {contacts}_client_domain_name
+    ON {schema}.{contacts} (client_tag, domain, lower(first_name), lower(last_name))
+    WHERE first_name IS NOT NULL AND first_name <> ''
+      AND last_name IS NOT NULL AND last_name <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS {contacts}_client_domain_email
+    ON {schema}.{contacts} (client_tag, domain, lower(email))
+    WHERE (first_name IS NULL OR first_name = '' OR last_name IS NULL OR last_name = '')
+      AND email IS NOT NULL AND email <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS {contacts}_domain_email
     ON {schema}.{contacts} (domain, email) WHERE email IS NOT NULL AND email <> '';
 CREATE INDEX IF NOT EXISTS {contacts}_client ON {schema}.{contacts} (client_tag);
