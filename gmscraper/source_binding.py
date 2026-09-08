@@ -346,11 +346,18 @@ def pending_where(binding: SourceBinding) -> str:
 
 
 def details_only_where(binding: SourceBinding) -> str:
-    """Rows with a place_id but no website — backfill Place Details only."""
+    """Rows with a place_id but no website — backfill Place Details only.
+
+    Skips rows that already recorded a Details attempt in resolve_raw (including
+    empty provider shells). Re-running those would re-spend 1 request/row for
+    the same empty website/phone. Force a re-fetch by clearing resolve_raw.details.
+    """
     parts = [
         "place_id IS NOT NULL",
         "place_id != ''",
         "(website IS NULL OR website = '')",
+        # jsonb: missing key OR null. Already-attempted empties are skipped.
+        "(resolve_raw IS NULL OR resolve_raw->'details' IS NULL)",
     ]
     if binding.where:
         parts.append(f"({binding.where})")

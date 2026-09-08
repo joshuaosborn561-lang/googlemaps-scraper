@@ -61,6 +61,9 @@ def test_details_only_where_ignores_resolved() -> None:
     assert "place_id IS NOT NULL" in where
     assert "website" in where
     assert "resolved" not in where  # must ignore resolved flag
+    # Do not re-spend on rows that already recorded a Details attempt.
+    assert "resolve_raw" in where
+    assert "details" in where
 
 
 def test_tool_error_never_approval_kind() -> None:

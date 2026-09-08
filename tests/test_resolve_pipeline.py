@@ -110,7 +110,7 @@ def test_resolve_one_row_calls_details_only_on_pass(monkeypatch) -> None:
     out = resolve_places.resolve_one_row(
         client, binding, row, strategy="address", min_confidence=0.6
     )
-    assert out["status"] == "resolved"
+    assert out["status"] == "details_ok"
     assert out["domain"] == "acme.com"
     assert out["website"] == "https://www.acme.com/store/1"
     assert out["phone"] == "+12145551212"
@@ -118,6 +118,60 @@ def test_resolve_one_row_calls_details_only_on_pass(monkeypatch) -> None:
     assert patches[-1]["website"] == "https://www.acme.com/store/1"
     assert patches[-1]["domain"] == "acme.com"
     assert patches[-1]["phone"] == "+12145551212"
+    assert patches[-1]["resolve_raw"]["details"]["attempted"] is True
+
+
+def test_resolve_one_row_details_empty_still_calls_place_details(monkeypatch) -> None:
+    """Batch/main path must call Place Details even when the hit has no site."""
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(
+        project_id="x",
+        schema="s",
+        table="t",
+        key_column="id",
+        address_column="addr",
+        domain_column="domain",
+        resolved_column="resolved",
+        confidence_column="confidence",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    patches: list[dict] = []
+    monkeypatch.setattr(
+        resolve_places.sb, "patch_row", lambda b, key, patch: patches.append(patch)
+    )
+    client = MagicMock()
+    client.request_count = 0
+    client.search.return_value = [
+        {
+            "place_id": "ChIJbldg",
+            "name": "3102 Maple Ave",
+            "address": "3102 Maple Ave, Dallas, TX 75201",
+            "zip": "75201",
+            "website": "",
+            "phone": "",
+            "latitude": 1.0,
+            "longitude": 2.0,
+        }
+    ]
+    client.place_details.return_value = {
+        "place_id": "ChIJbldg",
+        "website": "",
+        "phone": "",
+        "name": "3102 Maple Ave",
+    }
+    out = resolve_places.resolve_one_row(
+        client,
+        binding,
+        {"id": 1, "addr": "3102 Maple Ave, Dallas, TX 75201"},
+        strategy="address",
+        min_confidence=0.6,
+    )
+    assert out["status"] == "details_empty"
+    client.place_details.assert_called_once_with("ChIJbldg")
+    assert patches[-1]["resolve_raw"]["details"]["attempted"] is True
+    assert patches[-1]["place_id"] == "ChIJbldg"
 
 
 def test_resolve_one_row_skips_details_on_low_confidence(monkeypatch) -> None:
