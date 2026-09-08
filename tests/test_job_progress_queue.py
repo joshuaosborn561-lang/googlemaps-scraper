@@ -40,6 +40,34 @@ def test_live_progress_from_progress_dict(tmp_path: Path, monkeypatch) -> None:
     assert live["eta_seconds"] > 0
 
 
+def test_live_progress_includes_row_errors() -> None:
+    job = jobs.Job(
+        id="errjob00000001",
+        kind="resolve_places",
+        status="running",
+        created_at=time.time(),
+        started_at=time.time(),
+        heartbeat_at=time.time(),
+        progress={
+            "stage": "resolve_places",
+            "done": 10,
+            "total": 1400,
+            "errors": 10,
+            "resolved": 0,
+            "last_error": "BindingError: rpc/pp_patch_row failed (404)",
+            "error_samples": [
+                {"key": "Acme LLC", "error": "BindingError: rpc/pp_patch_row failed (404)"}
+            ],
+            "updated_at": time.time(),
+        },
+    )
+    live = jobs.live_progress(job)
+    assert live["errors"] == 10
+    assert live["resolved"] == 0
+    assert "pp_patch_row" in str(live["last_error"])
+    assert live["error_samples"][0]["key"] == "Acme LLC"
+
+
 def _reset_queue_state() -> None:
     with jobs._lock:
         jobs._wait_queue.clear()

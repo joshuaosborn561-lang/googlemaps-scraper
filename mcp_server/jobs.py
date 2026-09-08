@@ -918,4 +918,9 @@ def live_progress(job: Job, store: Any | None = None) -> dict[str, Any]:
         "via": prog.get("via"),
         "deferred": prog.get("deferred"),
         "attached": bool(prog.get("attached") or prog.get("deduped")),
+        "errors": prog.get("errors"),
+        "last_error": prog.get("last_error"),
+        "error_samples": prog.get("error_samples"),
+        "resolved": prog.get("resolved"),
+        "no_match": prog.get("no_match"),
     }

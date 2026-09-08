@@ -1339,6 +1339,9 @@ def get_job_status(job_id: str) -> str:
         "stage",
     ):
         public[key] = live.get(key)
+    for key in ("errors", "last_error", "error_samples", "resolved", "no_match"):
+        if live.get(key) is not None:
+            public[key] = live.get(key)
     public["queue_position"] = queue_position(job.id)
     if job.status in ("stalled", "interrupted"):
         public["next_step"] = (

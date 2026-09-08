@@ -178,6 +178,110 @@ def test_estimate_counts_two_requests_per_row(monkeypatch) -> None:
     assert est_d["requests_per_row"] == 1
 
 
+def test_patch_row_calls_pp_patch_row(monkeypatch) -> None:
+    from gmscraper import source_binding as sb
+
+    seen: dict = {}
+
+    def fake_rpc(_binding, fn, args):
+        seen["fn"] = fn
+        seen["args"] = args
+        return True
+
+    monkeypatch.setattr(sb, "rpc", fake_rpc)
+    binding = sb.SourceBinding(
+        project_id="azpapwtnrbzywlnxxecz",
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        name_column="clean_name",
+        address_column="address",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    assert sb.patch_row(binding, "Acme LLC", {"resolved": True, "confidence": 0.8})
+    assert seen["fn"] == "pp_patch_row"
+    assert seen["args"]["p_schema"] == "client_peterson"
+    assert seen["args"]["p_table"] == "gc_targets"
+    assert seen["args"]["p_key_column"] == "contractor_name"
+    assert seen["args"]["p_key_value"] == "Acme LLC"
+    assert seen["args"]["p_patch"]["resolved"] is True
+
+
+def test_run_surfaces_per_row_errors_in_progress(monkeypatch) -> None:
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(
+        project_id="azpapwtnrbzywlnxxecz",
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        name_column="clean_name",
+        address_column="address",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    monkeypatch.setattr(resolve_places.sb, "resolve_binding", lambda **kw: binding)
+    monkeypatch.setattr(resolve_places.sb, "validate_binding", lambda b: b)
+    monkeypatch.setattr(
+        resolve_places.sb, "ensure_writeback_columns", lambda b: {"columns_ensured": 0}
+    )
+    monkeypatch.setattr(
+        resolve_places,
+        "estimate",
+        lambda b, limit=0, details_only=False: {
+            "pending_rows": 2,
+            "blocked": False,
+            "estimated_overage_usd": 0,
+        },
+    )
+    monkeypatch.setattr(resolve_places.settings, "require_rapidapi", lambda: None)
+    monkeypatch.setattr(
+        resolve_places, "MapsDataClient", lambda *a, **k: MagicMock(request_count=1)
+    )
+    batches = [
+        [
+            {"contractor_name": "Acme LLC", "clean_name": "Acme", "address": "1 Main"},
+            {"contractor_name": "Beta Co", "clean_name": "Beta", "address": "2 Main"},
+        ],
+        [],
+    ]
+
+    def _fetch(_b, limit=0, offset=0, details_only=False):
+        return batches.pop(0) if batches else []
+
+    monkeypatch.setattr(resolve_places.sb, "fetch_pending", _fetch)
+
+    def _boom(*_a, **_k):
+        raise sb.BindingError(
+            "Supabase POST rpc/pp_patch_row failed (404): Could not find the function"
+        )
+
+    monkeypatch.setattr(resolve_places, "resolve_one_row", _boom)
+    ticks: list[dict] = []
+
+    out = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        name_column="clean_name",
+        address_column="address",
+        project_id="azpapwtnrbzywlnxxecz",
+        workers=1,
+        on_progress=lambda **p: ticks.append(p),
+    )
+    assert out["errors"] == 2
+    assert out["resolved"] == 0
+    assert out["last_error"]
+    assert "pp_patch_row" in str(out["last_error"])
+    assert len(out["error_samples"]) == 2
+    assert out["error_samples"][0]["key"] in ("Acme LLC", "Beta Co")
+    errored_ticks = [t for t in ticks if t.get("errors")]
+    assert errored_ticks
+    assert errored_ticks[0].get("last_error")
+    assert errored_ticks[0].get("error_samples")
+
+
 def test_estimate_only_skips_schema_writes(monkeypatch) -> None:
     from gmscraper import source_binding as sb
 

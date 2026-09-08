@@ -483,6 +483,8 @@ def run(
         "kept_existing": 0,
         "errors": 0,
         "requests": 0,
+        "last_error": None,
+        "error_samples": [],
         "details_only": bool(details_only),
         "estimated_overage_usd": est.get("estimated_overage_usd"),
         "batch_size": batch_size,
@@ -491,6 +493,16 @@ def run(
     done = 0
     total = pending_total or 0
     max_rows = int(limit) if limit and limit > 0 else 0
+
+    def _record_error(key: Any, exc: BaseException) -> None:
+        msg = f"{type(exc).__name__}: {exc}"
+        if len(msg) > 400:
+            msg = msg[:397] + "..."
+        sample = {"key": key, "error": msg}
+        samples = counts["error_samples"]
+        if isinstance(samples, list) and len(samples) < 25:
+            samples.append(sample)
+        counts["last_error"] = msg
 
     def _tick(**extra: Any) -> None:
         if not on_progress:
@@ -504,6 +516,8 @@ def run(
                 details_ok=counts["details_ok"],
                 no_match=counts["no_match"],
                 errors=counts["errors"],
+                last_error=counts.get("last_error"),
+                error_samples=list(counts.get("error_samples") or []),
                 requests=counts["requests"],
                 project_id=binding.project_id,
                 table=binding.table,
@@ -517,6 +531,7 @@ def run(
     def work(row: dict[str, Any]) -> None:
         nonlocal done
         local = MapsDataClient(settings, limit=8)
+        err_exc: BaseException | None = None
         try:
             if details_only:
                 result = details_only_one_row(local, binding, row)
@@ -529,9 +544,12 @@ def run(
                     min_confidence=float(min_confidence),
                 )
             status = result.get("status") or "errors"
-        except Exception:  # noqa: BLE001
+            if status == "errors" and not result.get("error"):
+                err_exc = RuntimeError("row returned status=errors")
+        except Exception as exc:  # noqa: BLE001
             status = "errors"
             result = {}
+            err_exc = exc
         with lock:
             counts["requests"] += local.request_count
             if status == "resolved":
@@ -549,8 +567,15 @@ def run(
                 counts["no_match"] += 1
             else:
                 counts["errors"] += 1
+                _record_error(
+                    row.get(binding.key_column),
+                    err_exc or RuntimeError(f"unknown status {status!r}"),
+                )
             done += 1
-            if done <= 20 or done % 10 == 0 or (total and done >= total):
+            # First failures must land in progress immediately, not every 10th row.
+            if err_exc is not None or done <= 20 or done % 10 == 0 or (
+                total and done >= total
+            ):
                 _tick()
 
     batch_n = 0

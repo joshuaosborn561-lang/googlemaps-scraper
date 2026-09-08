@@ -3,6 +3,16 @@
 Callers pass schema/table/column names; this module validates them, ensures
 writeback columns exist, and reads/patches rows via PostgREST (+ RPCs when
 the target project exposes public.pp_* helpers).
+
+Required public RPCs (see sql/pp_source_binding_helpers.sql):
+
+    pp_count_rows(p_schema, p_table, p_where) -> bigint
+    pp_ensure_columns(p_schema, p_table, p_columns jsonb object) -> int
+    pp_select_rows(p_schema, p_table, p_columns jsonb array, p_where,
+                   p_order_by, p_limit, p_offset) -> list[object]
+    pp_patch_row(p_schema, p_table, p_key_column, p_key_value, p_patch) -> bool
+
+Writeback is pp_patch_row (one row). pp_update_rows is not used.
 """
 
 from __future__ import annotations
