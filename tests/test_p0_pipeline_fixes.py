@@ -61,6 +61,20 @@ def test_details_only_where_ignores_resolved() -> None:
     assert "place_id IS NOT NULL" in where
     assert "website" in where
     assert "resolved" not in where  # must ignore resolved flag
+    scoped = sb.details_only_where(
+        binding, attempted_since="2026-09-09T00:00:00+00:00"
+    )
+    assert "attempted_at" in scoped
+    pending = sb.pending_where(
+        binding, attempted_since="2026-09-09T00:00:00+00:00"
+    )
+    assert "attempted_at IS NULL OR attempted_at <" in pending
+    try:
+        sb.pending_where(binding, attempted_since="not-a-timestamp")
+    except sb.BindingError as exc:
+        assert "attempted_since" in str(exc)
+    else:
+        raise AssertionError("expected BindingError for bad attempted_since")
 
 
 def test_tool_error_never_approval_kind() -> None:

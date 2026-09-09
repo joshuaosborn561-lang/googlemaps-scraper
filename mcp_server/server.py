@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.7.0",
+    version="1.8.1",
 )
 
 
@@ -1339,7 +1339,19 @@ def get_job_status(job_id: str) -> str:
         "stage",
     ):
         public[key] = live.get(key)
-    for key in ("errors", "last_error", "error_samples", "resolved", "no_match"):
+    for key in (
+        "errors",
+        "last_error",
+        "error_samples",
+        "resolved",
+        "no_match",
+        "done",
+        "total",
+        "requests",
+        "request_cap",
+        "stop_reason",
+        "done_exceeds_total",
+    ):
         if live.get(key) is not None:
             public[key] = live.get(key)
     public["queue_position"] = queue_position(job.id)
@@ -1843,6 +1855,7 @@ def estimate_resolve_places(
     """Read-only Maps cost estimate for resolve_places. No spend, no schema writes.
 
     details_only=True estimates 1 request/row for place_id-without-website backfill.
+    Also reports the 20% remaining-quota cap (blocked unless override_quota_guard).
     Prefer this over resolve_places(estimate_only=true). No approval required.
     """
     _ensure_repo_cwd()
@@ -1891,6 +1904,7 @@ def resolve_places(
     project_id: str = "",
     estimate_only: bool = False,
     details_only: bool = False,
+    override_quota_guard: bool = False,
     background: bool = True,
 ) -> str:
     """Turn source-table rows into business identities via Maps.
@@ -1904,6 +1918,8 @@ def resolve_places(
     details_only=True backfills Place Details for rows that already have
     place_id but an empty website (ignores resolved=true). Use this after a
     run that wrote place_id before details were wired.
+    Refuses to start when estimated requests exceed 20% of remaining monthly
+    Maps quota unless override_quota_guard=true.
     For a cost check prefer estimate_resolve_places (read-only).
     Response is counts only.
     """
@@ -1931,6 +1947,7 @@ def resolve_places(
                 workers=int(workers or 8),
                 estimate_only=bool(estimate_only),
                 details_only=bool(details_only),
+                override_quota_guard=bool(override_quota_guard),
                 project_id=resolved_project,
                 on_progress=lambda **p: _job_progress(**p),
             )
@@ -1955,6 +1972,7 @@ def resolve_places(
             "workers": workers,
             "project_id": resolved_project,
             "details_only": bool(details_only),
+            "override_quota_guard": bool(override_quota_guard),
         }
         before = find_active_by_queue_key(make_queue_key("resolve_places", meta))
         job = start_job("resolve_places", _run, meta=meta, priority=10)
@@ -1992,6 +2010,7 @@ def pipeline_run(
     project_id: str = "",
     workers: int = 8,
     estimate_only: bool = False,
+    override_quota_guard: bool = False,
     background: bool = True,
 ) -> str:
     """Chain optional stages from a raw list to contactable people.
@@ -1999,6 +2018,7 @@ def pipeline_run(
     stages = comma list of resolve,enrich,extract,contacts.
     max_tier caps the contacts waterfall (default getleads).
     target_titles steers LLM extraction (comma-separated).
+    override_quota_guard passes through to resolve_places.
     Returns per-stage counts + cumulative cost. Never returns rows.
     """
     _ensure_repo_cwd()
@@ -2027,6 +2047,7 @@ def pipeline_run(
             min_confidence=float(min_confidence or 0.6),
             target_titles=target_titles or "",
             workers=int(workers or 8),
+            override_quota_guard=bool(override_quota_guard),
             on_progress=lambda **p: _job_progress(**p),
         )
 
