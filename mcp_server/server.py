@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.8.1",
+    version="1.8.2",
 )
 
 
@@ -1351,6 +1351,11 @@ def get_job_status(job_id: str) -> str:
         "request_cap",
         "stop_reason",
         "done_exceeds_total",
+        "place_id_found",
+        "details_attempted",
+        "details_ok",
+        "website_written",
+        "domain_written",
     ):
         if live.get(key) is not None:
             public[key] = live.get(key)
@@ -1980,6 +1985,56 @@ def resolve_places(
             _started_response(job, attached=before is not None and before.id == job.id)
         )
     return _json(_run())
+
+
+@mcp.tool(
+    annotations=_ann(
+        'Backfill Place Details for existing place_ids',
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+        open_world=True,
+    )
+)
+def backfill_place_details(
+    schema: str,
+    table: str,
+    key_column: str,
+    address_column: str = "",
+    name_column: str = "",
+    city_column: str = "",
+    where: str = "",
+    order_by: str = "",
+    limit: int = 0,
+    workers: int = 8,
+    project_id: str = "",
+    estimate_only: bool = False,
+    override_quota_guard: bool = False,
+    background: bool = True,
+) -> str:
+    """One-off Place Details write-back for rows that already have place_id.
+
+    Calls resolve_places(details_only=true). Stamps details_attempted_at on
+    every attempt so the same rows cannot refill the job. Skips rows that
+    already have a website. Does not re-run search.
+    """
+    return resolve_places(
+        schema=schema,
+        table=table,
+        key_column=key_column,
+        address_column=address_column,
+        name_column=name_column,
+        city_column=city_column,
+        where=where,
+        order_by=order_by,
+        limit=limit,
+        workers=workers,
+        project_id=project_id,
+        estimate_only=estimate_only,
+        details_only=True,
+        override_quota_guard=override_quota_guard,
+        background=background,
+    )
 
 
 @mcp.tool(

@@ -936,4 +936,9 @@ def live_progress(job: Job, store: Any | None = None) -> dict[str, Any]:
             and stage_total is not None
             and int(stage_done) > int(stage_total)
         ),
+        "place_id_found": prog.get("place_id_found"),
+        "details_attempted": prog.get("details_attempted"),
+        "details_ok": prog.get("details_ok"),
+        "website_written": prog.get("website_written"),
+        "domain_written": prog.get("domain_written"),
     }

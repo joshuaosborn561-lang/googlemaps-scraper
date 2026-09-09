@@ -63,6 +63,23 @@ def test_domain_of_strips_www_and_path() -> None:
     assert domain_of("https://www.Acme.com/about/team") == "acme.com"
     assert domain_of("http://www.acme.com") == "acme.com"
     assert domain_of("acme.com/foo") == "acme.com"
+    assert domain_of("https://facebook.com/acme") == ""
+    assert domain_of("https://www.yelp.com/biz/acme") == ""
+
+
+def test_pick_business_website_nested_and_ignores_maps() -> None:
+    from gmscraper.mapsdata import pick_business_website
+
+    item = {
+        "url": "https://maps.google.com/?cid=1",
+        "about": {"official_website": "https://www.Acme.com/store?utm=1"},
+    }
+    assert pick_business_website(item) == "https://www.Acme.com/store?utm=1"
+    from gmscraper.mapsdata import normalize
+
+    rec = normalize(item, flatten_depth=4)
+    assert rec["website"] == "https://www.Acme.com/store?utm=1"
+    assert rec["domain"] == "acme.com"
 
 
 def test_resolve_one_row_calls_details_only_on_pass(monkeypatch) -> None:
@@ -118,6 +135,9 @@ def test_resolve_one_row_calls_details_only_on_pass(monkeypatch) -> None:
     assert patches[-1]["website"] == "https://www.acme.com/store/1"
     assert patches[-1]["domain"] == "acme.com"
     assert patches[-1]["phone"] == "+12145551212"
+    assert patches[-1]["details_attempted_at"]
+    assert out["website_written"] is True
+    assert out["details_attempted"] is True
 
 
 def test_resolve_one_row_skips_details_on_low_confidence(monkeypatch) -> None:
@@ -342,6 +362,38 @@ def test_run_stops_when_requests_exceed_3x_pending(monkeypatch) -> None:
     assert out["stop_reason"] == "requests_exceed_3x_pending"
     assert out["rows"] == 1
     assert out["request_cap"] == 3
+
+
+def test_run_counts_website_and_details_gap(monkeypatch) -> None:
+    binding = _binding()
+    _stub_run(monkeypatch, binding, pending=2)
+    monkeypatch.setattr(
+        resolve_places,
+        "resolve_one_row",
+        lambda *a, **k: {
+            "status": "resolved",
+            "place_id": "ChIJ1",
+            "website": "https://acme.test",
+            "domain": "acme.test",
+            "details_attempted": True,
+            "details_http_ok": True,
+            "website_written": True,
+            "domain_written": True,
+            "place_id_found": True,
+        },
+    )
+    out = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        address_column="address",
+        workers=1,
+    )
+    assert out["place_id_found"] == 2
+    assert out["details_attempted"] == 2
+    assert out["details_ok"] == 2
+    assert out["website_written"] == 2
+    assert out["domain_written"] == 2
 
 
 def test_run_excludes_rows_attempted_this_run(monkeypatch) -> None:

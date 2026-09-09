@@ -71,6 +71,7 @@ Do NOT use this for:
 | "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
 | "Apify website contact crawl" | `estimate_apify_contact_crawl` → `apify_contact_crawl` → `parse_contacts_openai` |
 | "address → business + domain" | `estimate_resolve_places` then `resolve_places` |
+| "place_id exists, website empty" | `backfill_place_details` (details_only; stamps `details_attempted_at`) |
 | "raw list → people end-to-end" | `pipeline_run` (resolve,enrich,extract,contacts; max_tier default getleads) |
 | "sync parcels with county + cursor" | `sync_to_supabase(dataset='parcels', county=…, cursor=…)` |
 | "sync team contacts / owners to Supabase" | `sync_to_supabase(client_tag=…, dataset='contacts')` then `sync_to_supabase(client_tag=…)` for lead owner backfill |

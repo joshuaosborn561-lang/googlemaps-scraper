@@ -48,6 +48,53 @@ def test_details_only_one_row_backfill(monkeypatch) -> None:
     client.place_details.assert_called_once_with("ChIJabc")
     assert patches[-1]["website"] == "https://www.acme.com/about"
     assert patches[-1]["resolved"] is True
+    assert patches[-1]["details_attempted_at"]
+    assert patches[-1]["domain"] == "acme.com"
+
+
+def test_details_only_writes_partial_fields_when_website_missing(monkeypatch) -> None:
+    binding = sb.SourceBinding(
+        project_id="x",
+        schema="s",
+        table="t",
+        key_column="id",
+        address_column="addr",
+        domain_column="domain",
+        resolved_column="resolved",
+        confidence_column="confidence",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    patches: list[dict] = []
+    monkeypatch.setattr(
+        resolve_places.sb, "patch_row", lambda b, key, patch: patches.append(patch)
+    )
+    client = MagicMock()
+    client.place_details.return_value = {
+        "place_id": "ChIJempty",
+        "website": "",
+        "phone": "+12145550100",
+        "rating": 4.6,
+        "reviews": 12,
+        "_details_http_ok": True,
+        "_raw_keys": ["name", "phone", "place_id"],
+        "name": "2317 Merrell Rd",
+    }
+    out = resolve_places.details_only_one_row(
+        client,
+        binding,
+        {"id": 1, "place_id": "ChIJempty", "website": ""},
+    )
+    assert out["status"] == "details_ok"
+    assert out["website_written"] is False
+    assert out["details_attempted"] is True
+    assert out["details_http_ok"] is True
+    assert patches[-1]["website"] is None
+    assert patches[-1]["phone"] == "+12145550100"
+    assert patches[-1]["rating"] == 4.6
+    assert patches[-1]["user_ratings_total"] == 12
+    assert patches[-1]["details_attempted_at"]
+    assert patches[-1]["resolve_raw"]["details"]["empty_website"] is True
 
 
 def test_details_only_where_ignores_resolved() -> None:
@@ -64,6 +111,7 @@ def test_details_only_where_ignores_resolved() -> None:
     scoped = sb.details_only_where(
         binding, attempted_since="2026-09-09T00:00:00+00:00"
     )
+    assert "details_attempted_at" in scoped
     assert "attempted_at" in scoped
     pending = sb.pending_where(
         binding, attempted_since="2026-09-09T00:00:00+00:00"

@@ -42,6 +42,11 @@ WRITEBACK_COLUMNS: dict[str, str] = {
     "resolved_at": "timestamptz",
     "resolve_raw": "jsonb",
     "attempted_at": "timestamptz",
+    "details_attempted_at": "timestamptz",
+    "rating": "double precision",
+    "user_ratings_total": "integer",
+    "formatted_phone_number": "text",
+    "international_phone_number": "text",
 }
 
 
@@ -332,6 +337,11 @@ def ensure_writeback_columns(binding: SourceBinding) -> dict[str, Any]:
         "resolved_at": "timestamptz",
         "resolve_raw": "jsonb",
         "attempted_at": "timestamptz",
+        "details_attempted_at": "timestamptz",
+        "rating": "double precision",
+        "user_ratings_total": "integer",
+        "formatted_phone_number": "text",
+        "international_phone_number": "text",
     }
     # Merge known defaults
     for k, v in WRITEBACK_COLUMNS.items():
@@ -348,15 +358,18 @@ def ensure_writeback_columns(binding: SourceBinding) -> dict[str, Any]:
     return {"columns_ensured": n, "columns": sorted(cols)}
 
 
-def _attempted_since_clause(attempted_since: str = "") -> str:
+def _attempted_since_clause(
+    attempted_since: str = "", *, column: str = "attempted_at"
+) -> str:
     """Exclude rows already stamped in this run. `attempted_since` is our ISO ts."""
     ts = (attempted_since or "").strip().replace(" ", "T")
     if not ts:
         return ""
     if not _ATTEMPTED_TS.match(ts):
         raise BindingError(f"invalid attempted_since: {attempted_since!r}")
+    col = _require_ident(column, "attempted column")
     safe = ts.replace("'", "")
-    return f"(attempted_at IS NULL OR attempted_at < '{safe}'::timestamptz)"
+    return f"({col} IS NULL OR {col} < '{safe}'::timestamptz)"
 
 
 def pending_where(binding: SourceBinding, *, attempted_since: str = "") -> str:
@@ -379,9 +392,12 @@ def details_only_where(binding: SourceBinding, *, attempted_since: str = "") -> 
         "place_id != ''",
         "(website IS NULL OR website = '')",
     ]
-    extra = _attempted_since_clause(attempted_since)
+    extra = _attempted_since_clause(attempted_since, column="details_attempted_at")
+    extra_legacy = _attempted_since_clause(attempted_since, column="attempted_at")
     if extra:
         parts.append(extra)
+    if extra_legacy:
+        parts.append(extra_legacy)
     if binding.where:
         parts.append(f"({binding.where})")
     return " AND ".join(parts)
@@ -437,6 +453,7 @@ def fetch_pending(
         "business_name",
         "resolve_raw",
         "attempted_at",
+        "details_attempted_at",
     ):
         if c and c not in cols:
             cols.append(c)
@@ -463,25 +480,51 @@ def fetch_pending(
     return [r for r in rows if isinstance(r, dict)]
 
 
+_OPTIONAL_PATCH = {
+    "formatted_phone_number",
+    "international_phone_number",
+    "rating",
+    "user_ratings_total",
+    "details_attempted_at",
+    "attempted_at",
+}
+
+
 def patch_row(
     binding: SourceBinding,
     key_value: Any,
     patch: dict[str, Any],
 ) -> bool:
-    """Write back fields for one row. Marks progress immediately."""
+    """Write back fields for one row. Marks progress immediately.
+
+    Never drop website/domain/place_id because an optional column is missing.
+    """
     clean = {k: v for k, v in patch.items() if _IDENT.match(k)}
-    ok = rpc(
-        binding,
-        "pp_patch_row",
-        {
-            "p_schema": binding.schema,
-            "p_table": binding.table,
-            "p_key_column": binding.key_column,
-            "p_key_value": str(key_value),
-            "p_patch": clean,
-        },
-    )
-    return bool(ok)
+
+    def _call(body: dict[str, Any]) -> bool:
+        return bool(
+            rpc(
+                binding,
+                "pp_patch_row",
+                {
+                    "p_schema": binding.schema,
+                    "p_table": binding.table,
+                    "p_key_column": binding.key_column,
+                    "p_key_value": str(key_value),
+                    "p_patch": body,
+                },
+            )
+        )
+
+    try:
+        return _call(clean)
+    except BindingError as exc:
+        extra = set(clean) & _OPTIONAL_PATCH
+        msg = str(exc).lower()
+        if extra and ("does not exist" in msg or "undefined_column" in msg or "column" in msg):
+            slim = {k: v for k, v in clean.items() if k not in extra}
+            return _call(slim)
+        raise
 
 
 def with_filters(
