@@ -120,6 +120,8 @@ def run(
                 "pending_rows", "requests", "estimated_overage_usd", "blocked",
                 "started", "resolved", "low_confidence", "no_match", "errors", "rows",
                 "stop_reason", "request_cap", "quota_guard_overridden",
+                "place_id_found", "details_attempted", "details_ok",
+                "website_written", "domain_written",
             )
             if k in res
         }

@@ -94,6 +94,35 @@ def test_live_progress_flags_done_exceeding_total() -> None:
     assert live["request_cap"] == 504
 
 
+def test_live_progress_includes_details_gap_counters() -> None:
+    job = jobs.Job(
+        id="gapjob00000001",
+        kind="resolve_places",
+        status="running",
+        created_at=time.time(),
+        started_at=time.time(),
+        heartbeat_at=time.time(),
+        progress={
+            "stage": "resolve_places",
+            "done": 100,
+            "total": 100,
+            "resolved": 100,
+            "place_id_found": 100,
+            "details_attempted": 100,
+            "details_ok": 100,
+            "website_written": 4,
+            "domain_written": 4,
+            "updated_at": time.time(),
+        },
+    )
+    live = jobs.live_progress(job)
+    assert live["place_id_found"] == 100
+    assert live["details_attempted"] == 100
+    assert live["details_ok"] == 100
+    assert live["website_written"] == 4
+    assert live["domain_written"] == 4
+
+
 def test_is_cancel_requested_sees_running_id_without_tls() -> None:
     _reset_queue_state()
     jobs._tls.job_id = ""

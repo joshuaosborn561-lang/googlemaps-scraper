@@ -52,11 +52,21 @@ ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "website": (
         "website_full",
+        "website_url",
+        "website_uri",
+        "websiteuri",
+        "official_website",
+        "business_website",
+        "homepage_url",
+        "homepage",
+        "site_url",
+        "web_url",
         "website",
         "site",
+        "domain_url",
+        # Generic "url" / "web" last — those often hold a Maps link.
         "url",
         "web",
-        "domain_url",
     ),
     "rating": ("rating", "average_rating", "stars", "score"),
     "reviews": ("review_count", "reviews", "user_ratings_total", "reviews_count",
@@ -158,6 +168,46 @@ def domain_of(url: str | None) -> str:
     return host
 
 
+_WEBSITE_KEY_HINTS = {
+    "website", "websitefull", "websiteurl", "websiteuri", "officialwebsite",
+    "businesswebsite", "homepage", "homepageurl", "siteurl", "weburl",
+    "site", "web", "domainurl",
+}
+
+
+def pick_business_website(item: Any, fallback: str = "") -> str:
+    """Hunt a business website in a raw Place Details payload.
+
+    Prefers values under website-like keys. Maps / social hosts are kept as
+    the URL (caller nulls domain) but never preferred over a real site.
+    """
+    found: list[str] = []
+
+    def walk(node: Any, keyhint: str = "", depth: int = 4) -> None:
+        if depth < 0 or node in (None, "", [], {}):
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, _key(str(k)), depth - 1)
+            return
+        if isinstance(node, (list, tuple)):
+            for v in list(node)[:8]:
+                walk(v, keyhint, depth - 1)
+            return
+        if isinstance(node, str) and keyhint in _WEBSITE_KEY_HINTS:
+            url = node.strip()
+            if url:
+                found.append(url)
+
+    walk(item)
+    own = [u for u in found if domain_of(u)]
+    if own:
+        return own[0]
+    if found:
+        return found[0]
+    return (fallback or "").strip()
+
+
 # "12 River Rd, Agawam, MA 01001, USA" -> ("Agawam", "MA", "01001")
 US_ADDR = re.compile(
     r",\s*([^,]+?),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?\s*(?:,\s*(?:USA|US|United States)\s*)?$",
@@ -209,9 +259,13 @@ def extract_list(payload: Any) -> list[dict[str, Any]]:
 
 
 def normalize(
-    item: dict[str, Any], source_zip: str = "", source_category: str = ""
+    item: dict[str, Any],
+    source_zip: str = "",
+    source_category: str = "",
+    *,
+    flatten_depth: int = 2,
 ) -> dict[str, Any]:
-    flat = _flatten(item)
+    flat = _flatten(item, flatten_depth)
     rec: dict[str, Any] = {}
     for field, names in ALIASES.items():
         rec[field] = _pick(flat, names)
@@ -248,6 +302,10 @@ def normalize(
         rec["zip"] = source_zip
 
     rec["state"] = rec["state"].upper() if len(rec["state"]) == 2 else rec["state"]
+    if not rec["website"] or not domain_of(rec["website"]):
+        hunted = pick_business_website(item, rec["website"])
+        if hunted and (not rec["website"] or domain_of(hunted)):
+            rec["website"] = hunted
     rec["domain"] = domain_of(rec["website"])
 
     # No stable id from the provider? Fall back to something deterministic so
@@ -378,7 +436,17 @@ class MapsDataClient:
             items = [payload["data"]]
         if not items:
             return None
-        return normalize(items[0])
+        rec = normalize(items[0], flatten_depth=4)
+        if not rec.get("website"):
+            rec["website"] = pick_business_website(items[0])
+            rec["domain"] = domain_of(rec["website"])
+        rec["_details_http_ok"] = True
+        rec["_raw_keys"] = (
+            sorted(str(k) for k in items[0].keys())[:40]
+            if isinstance(items[0], dict)
+            else []
+        )
+        return rec
 
 
 def renormalize(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

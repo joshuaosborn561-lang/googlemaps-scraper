@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from . import source_binding as sb
 from .config import settings
-from .mapsdata import MapsDataClient, domain_of, parse_address_parts
+from .mapsdata import MapsDataClient, domain_of, parse_address_parts, pick_business_website
 
 # A job that spends more than 3× pending_rows on Maps requests is looping.
 REQUESTS_LOOP_MULTIPLIER = 3
@@ -30,13 +30,58 @@ def _cancel_requested(job_id: str = "") -> bool:
 
 
 def _stamp_attempted(binding: sb.SourceBinding, key: Any, at: str) -> None:
-    """Best-effort attempted_at write so a failed result patch still excludes the row."""
+    """Best-effort stamp so a failed result patch still excludes the row."""
     if key is None or not at:
         return
     try:
-        sb.patch_row(binding, key, {"attempted_at": at})
+        sb.patch_row(
+            binding,
+            key,
+            {"attempted_at": at, "details_attempted_at": at},
+        )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _details_writeback(details: dict[str, Any] | None) -> dict[str, Any]:
+    """Fields to persist from Place Details. Nulls stay in the patch."""
+    details = details or {}
+    website = (details.get("website") or "").strip()
+    if not website:
+        website = pick_business_website(details.get("raw") or details)
+    phone = (details.get("phone") or "").strip()
+    formatted = str(details.get("formatted_phone_number") or "").strip()
+    international = str(details.get("international_phone_number") or "").strip()
+    if not phone:
+        phone = international or formatted
+    domain = domain_of(website)
+    rating = details.get("rating")
+    reviews = details.get("reviews")
+    if reviews is None:
+        reviews = details.get("user_ratings_total")
+    raw_keys = details.get("_raw_keys") or []
+    if not raw_keys and isinstance(details.get("raw"), dict):
+        raw_keys = sorted(str(k) for k in details["raw"].keys())[:40]
+    return {
+        "website": website,
+        "phone": phone,
+        "formatted_phone_number": formatted or None,
+        "international_phone_number": international or None,
+        "domain": domain,
+        "rating": rating,
+        "user_ratings_total": reviews,
+        "empty_website": not bool(website),
+        "http_ok": bool(details.get("_details_http_ok") or details),
+        "raw_keys": raw_keys,
+    }
+
+
+def _log_empty_website(key: Any, place_id: str, raw_keys: list[Any]) -> None:
+    print(
+        f"place_details 200 with no website key={key!r} "
+        f"place_id={place_id} raw_keys={raw_keys}",
+        flush=True,
+    )
 
 STREET_NUM = re.compile(r"^\s*(\d+[A-Za-z]?)\b")
 SUITE = re.compile(
@@ -255,23 +300,31 @@ def resolve_one_row(
         }
 
     # Confidence cleared and we will write — Place Details for website / phone.
-    details = client.place_details(str(best.get("place_id") or ""))
-    website = ""
-    phone = ""
-    if details:
-        website = (details.get("website") or "").strip()
-        phone = (details.get("phone") or "").strip()
-        raw_store["details"] = {
-            "place_id": details.get("place_id"),
-            "website": website,
-            "phone": phone,
-        }
+    place_id = str(best.get("place_id") or "")
+    details = client.place_details(place_id)
+    extracted = _details_writeback(details)
+    website = extracted["website"]
+    phone = extracted["phone"]
     # Fall back to search-hit fields only when details omitted them.
     if not website:
         website = (best.get("website") or "").strip()
+        extracted["website"] = website
+        extracted["domain"] = domain_of(website)
     if not phone:
         phone = (best.get("phone") or "").strip()
-    domain = domain_of(website)
+        extracted["phone"] = phone
+    domain = extracted["domain"]
+    if details and extracted["empty_website"] and not website:
+        _log_empty_website(key, place_id, extracted["raw_keys"])
+    raw_store["details"] = {
+        "place_id": (details or {}).get("place_id") or place_id,
+        "website": website,
+        "phone": phone,
+        "rating": extracted["rating"],
+        "user_ratings_total": extracted["user_ratings_total"],
+        "empty_website": extracted["empty_website"] and not website,
+        "raw_keys": extracted["raw_keys"],
+    }
     raw_store["picked"]["website"] = website
     raw_store["picked"]["phone"] = phone
     raw_store["picked"]["domain"] = domain
@@ -282,13 +335,18 @@ def resolve_one_row(
         binding.resolved_column: True,
         "website": website or None,
         "phone": phone or None,
-        "place_id": best.get("place_id") or None,
+        "formatted_phone_number": extracted["formatted_phone_number"],
+        "international_phone_number": extracted["international_phone_number"],
+        "rating": extracted["rating"],
+        "user_ratings_total": extracted["user_ratings_total"],
+        "place_id": place_id or None,
         "latitude": best.get("latitude"),
         "longitude": best.get("longitude"),
         "business_name": best.get("name") or None,
         "candidates": n_cand,
         "resolved_at": now,
         "attempted_at": now,
+        "details_attempted_at": now,
         "resolve_raw": raw_store,
     }
     sb.patch_row(binding, key, patch)
@@ -299,7 +357,13 @@ def resolve_one_row(
         "domain": domain,
         "website": website,
         "phone": phone,
+        "place_id": place_id,
         "candidates": n_cand,
+        "place_id_found": True,
+        "details_attempted": True,
+        "details_http_ok": extracted["http_ok"],
+        "website_written": bool(website),
+        "domain_written": bool(domain),
     }
 
 
@@ -316,12 +380,12 @@ def details_only_one_row(
         return {"key": key, "status": "no_place_id"}
 
     details = client.place_details(place_id)
-    website = ""
-    phone = ""
-    if details:
-        website = (details.get("website") or "").strip()
-        phone = (details.get("phone") or "").strip()
-    domain = domain_of(website)
+    extracted = _details_writeback(details)
+    website = extracted["website"]
+    phone = extracted["phone"]
+    domain = extracted["domain"]
+    if details and extracted["empty_website"]:
+        _log_empty_website(key, place_id, extracted["raw_keys"])
 
     raw_store: dict[str, Any] = {}
     existing_raw = row.get("resolve_raw")
@@ -348,6 +412,10 @@ def details_only_one_row(
         "place_id": place_id,
         "website": website,
         "phone": phone,
+        "rating": extracted["rating"],
+        "user_ratings_total": extracted["user_ratings_total"],
+        "empty_website": extracted["empty_website"],
+        "raw_keys": extracted["raw_keys"],
         "backfill": True,
     }
 
@@ -356,9 +424,14 @@ def details_only_one_row(
         binding.resolved_column: True,
         "website": website or None,
         "phone": phone or None,
+        "formatted_phone_number": extracted["formatted_phone_number"],
+        "international_phone_number": extracted["international_phone_number"],
+        "rating": extracted["rating"],
+        "user_ratings_total": extracted["user_ratings_total"],
         "place_id": place_id,
         "resolved_at": now,
         "attempted_at": now,
+        "details_attempted_at": now,
         "resolve_raw": raw_store,
     }
     # Keep prior confidence / business_name if present.
@@ -377,6 +450,11 @@ def details_only_one_row(
         "website": website,
         "phone": phone,
         "place_id": place_id,
+        "place_id_found": True,
+        "details_attempted": True,
+        "details_http_ok": extracted["http_ok"],
+        "website_written": bool(website),
+        "domain_written": bool(domain),
     }
 
 
@@ -526,7 +604,11 @@ def run(
         "started": True,
         "rows": 0,
         "resolved": 0,
+        "place_id_found": 0,
+        "details_attempted": 0,
         "details_ok": 0,
+        "website_written": 0,
+        "domain_written": 0,
         "details_empty": 0,
         "low_confidence": 0,
         "no_match": 0,
@@ -586,7 +668,11 @@ def run(
                 done=done,
                 total=total,
                 resolved=counts["resolved"],
+                place_id_found=counts["place_id_found"],
+                details_attempted=counts["details_attempted"],
                 details_ok=counts["details_ok"],
+                website_written=counts["website_written"],
+                domain_written=counts["domain_written"],
                 no_match=counts["no_match"],
                 errors=counts["errors"],
                 last_error=counts.get("last_error"),
@@ -641,10 +727,19 @@ def run(
             err_exc = exc
         with lock:
             counts["requests"] += local.request_count
+            if result.get("place_id") or result.get("place_id_found"):
+                counts["place_id_found"] += 1
+            if result.get("details_attempted"):
+                counts["details_attempted"] += 1
+            if result.get("website_written") or result.get("website"):
+                counts["website_written"] += 1
+            if result.get("domain_written") or result.get("domain"):
+                counts["domain_written"] += 1
+            if result.get("details_http_ok") or status == "details_ok":
+                counts["details_ok"] += 1
             if status == "resolved":
                 counts["resolved"] += 1
             elif status == "details_ok":
-                counts["details_ok"] += 1
                 counts["resolved"] += 1
             elif status == "details_empty":
                 counts["details_empty"] += 1

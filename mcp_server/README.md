@@ -47,6 +47,7 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `find_owners` | optional Apify | Team contacts + owner; paid fallback needs no approval |
 | `estimate_resolve_places` | no | Read-only cost estimate for resolve_places |
 | `resolve_places` | **yes** | Address/name → business writeback (no approval) |
+| `backfill_place_details` | **yes** | Place Details write-back for existing place_ids (`details_attempted_at`) |
 | `estimate_apify_contact_crawl` | no | Read-only Apify cost estimate |
 | `apify_contact_crawl` | Apify | Website contact crawl (no approval) |
 | `parse_contacts_openai` | LLM | Parse Apify raw → people in `gc.*` (no approval) |
