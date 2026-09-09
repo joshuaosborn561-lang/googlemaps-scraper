@@ -14,6 +14,30 @@ from . import source_binding as sb
 from .config import settings
 from .mapsdata import MapsDataClient, domain_of, parse_address_parts
 
+# A job that spends more than 3× pending_rows on Maps requests is looping.
+REQUESTS_LOOP_MULTIPLIER = 3
+# Refuse to start if estimated requests exceed this share of remaining quota.
+QUOTA_SHARE_CAP = 0.20
+
+
+def _cancel_requested(job_id: str = "") -> bool:
+    try:
+        from mcp_server.jobs import is_cancel_requested
+
+        return bool(is_cancel_requested(job_id))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _stamp_attempted(binding: sb.SourceBinding, key: Any, at: str) -> None:
+    """Best-effort attempted_at write so a failed result patch still excludes the row."""
+    if key is None or not at:
+        return
+    try:
+        sb.patch_row(binding, key, {"attempted_at": at})
+    except Exception:  # noqa: BLE001
+        pass
+
 STREET_NUM = re.compile(r"^\s*(\d+[A-Za-z]?)\b")
 SUITE = re.compile(
     r"\b(?:ste|suite|unit|apt|apartment|#)\s*([A-Za-z0-9\-]+)\b", re.I
@@ -187,6 +211,7 @@ def resolve_one_row(
             binding.confidence_column: round(conf, 4),
             "candidates": n_cand or len(results),
             "resolved_at": now,
+            "attempted_at": now,
             "resolve_raw": raw_store,
         }
         sb.patch_row(binding, key, patch)
@@ -218,6 +243,7 @@ def resolve_one_row(
                 binding.resolved_column: True,
                 "candidates": n_cand,
                 "resolved_at": now,
+                "attempted_at": now,
                 "resolve_raw": raw_store,
             },
         )
@@ -262,6 +288,7 @@ def resolve_one_row(
         "business_name": best.get("name") or None,
         "candidates": n_cand,
         "resolved_at": now,
+        "attempted_at": now,
         "resolve_raw": raw_store,
     }
     sb.patch_row(binding, key, patch)
@@ -331,6 +358,7 @@ def details_only_one_row(
         "phone": phone or None,
         "place_id": place_id,
         "resolved_at": now,
+        "attempted_at": now,
         "resolve_raw": raw_store,
     }
     # Keep prior confidence / business_name if present.
@@ -377,6 +405,16 @@ def estimate(
     max_cost = float(getattr(settings, "maps_max_cost_usd", 25.0) or 25.0)
     est = None if blocked else round(float(overage), 4)
     cost_blocked = (not blocked) and est is not None and est > max_cost
+    remaining = max(0, int(settings.plan.included) - int(used))
+    share_cap = int(remaining * QUOTA_SHARE_CAP)
+    quota_share_blocked = requests > share_cap
+    reason = None
+    if blocked:
+        reason = "maps_hard_limit"
+    elif cost_blocked:
+        reason = "exceeds_MAPS_MAX_COST_USD"
+    elif quota_share_blocked:
+        reason = "exceeds_20pct_remaining_quota"
     return {
         "project_id": binding.project_id,
         "schema": binding.schema,
@@ -387,14 +425,14 @@ def estimate(
         "details_only": bool(details_only),
         "maps_plan": settings.plan.name,
         "already_used_this_cycle": used,
+        "remaining_quota": remaining,
+        "quota_share_cap": QUOTA_SHARE_CAP,
+        "max_requests_without_override": share_cap,
+        "quota_share_blocked": quota_share_blocked,
         "estimated_overage_usd": est,
         "max_cost_usd": max_cost,
-        "blocked": blocked or cost_blocked,
-        "block_reason": (
-            "maps_hard_limit"
-            if blocked
-            else ("exceeds_MAPS_MAX_COST_USD" if cost_blocked else None)
-        ),
+        "blocked": blocked or cost_blocked or quota_share_blocked,
+        "block_reason": reason,
         "billable_requests": billable,
         "note": (
             "1 Maps request/row (Place Details backfill for place_id without website)."
@@ -427,6 +465,7 @@ def run(
     domain_column: str = "domain",
     resolved_column: str = "resolved",
     confidence_column: str = "confidence",
+    override_quota_guard: bool = False,
     on_progress: Any | None = None,
 ) -> dict[str, Any]:
     binding = sb.resolve_binding(
@@ -457,21 +496,32 @@ def run(
     ensured = sb.ensure_writeback_columns(binding)
     est = estimate(binding, limit=limit, details_only=details_only)
     if est.get("blocked"):
-        return {
-            **est,
-            "started": False,
-            "blocked": True,
-            "ensured": ensured,
-        }
+        if not (
+            est.get("block_reason") == "exceeds_20pct_remaining_quota"
+            and override_quota_guard
+        ):
+            return {
+                **est,
+                "started": False,
+                "blocked": True,
+                "ensured": ensured,
+            }
+        est = {**est, "blocked": False, "quota_guard_overridden": True}
 
     settings.require_rapidapi()
-    # Process in batches so we never materialize 16k futures at once (that
-    # starved progress heartbeats on the operators run) and so cancel can
-    # land between batches. Pending rows shrink as resolved=true is written.
+    job_id = ""
+    try:
+        from mcp_server.jobs import current_job_id
+
+        job_id = current_job_id() or ""
+    except Exception:  # noqa: BLE001
+        job_id = ""
     batch_size = max(25, min(200, int(workers or 8) * 25))
     pending_total = int(est.get("pending_rows") or 0)
     if limit and limit > 0:
         pending_total = min(pending_total, int(limit)) if pending_total else int(limit)
+    run_started = datetime.now(timezone.utc).isoformat()
+    request_cap = REQUESTS_LOOP_MULTIPLIER * pending_total if pending_total else 0
     counts = {
         "started": True,
         "rows": 0,
@@ -488,9 +538,16 @@ def run(
         "details_only": bool(details_only),
         "estimated_overage_usd": est.get("estimated_overage_usd"),
         "batch_size": batch_size,
+        "run_started_at": run_started,
+        "request_cap": request_cap,
+        "stop_reason": None,
+        "quota_guard_overridden": bool(est.get("quota_guard_overridden")),
     }
     lock = threading.Lock()
+    stop_event = threading.Event()
+    seen_keys: set[Any] = set()
     done = 0
+    # Freeze total at pending_rows. Never raise it to match done — that hid the loop.
     total = pending_total or 0
     max_rows = int(limit) if limit and limit > 0 else 0
 
@@ -504,6 +561,22 @@ def run(
             samples.append(sample)
         counts["last_error"] = msg
 
+    def _should_stop() -> bool:
+        if stop_event.is_set() or _cancel_requested(job_id):
+            return True
+        if request_cap and counts["requests"] > request_cap:
+            return True
+        if total and done >= total:
+            return True
+        return False
+
+    def _mark_stop(reason: str) -> None:
+        if not counts.get("stop_reason"):
+            counts["stop_reason"] = reason
+        if reason == "cancelled":
+            counts["cancelled"] = True
+        stop_event.set()
+
     def _tick(**extra: Any) -> None:
         if not on_progress:
             return
@@ -511,7 +584,7 @@ def run(
             on_progress(
                 stage="resolve_places",
                 done=done,
-                total=total or done,
+                total=total,
                 resolved=counts["resolved"],
                 details_ok=counts["details_ok"],
                 no_match=counts["no_match"],
@@ -519,6 +592,8 @@ def run(
                 last_error=counts.get("last_error"),
                 error_samples=list(counts.get("error_samples") or []),
                 requests=counts["requests"],
+                request_cap=request_cap,
+                stop_reason=counts.get("stop_reason"),
                 project_id=binding.project_id,
                 table=binding.table,
                 **extra,
@@ -530,9 +605,23 @@ def run(
 
     def work(row: dict[str, Any]) -> None:
         nonlocal done
+        key = row.get(binding.key_column)
+        if stop_event.is_set() or _cancel_requested(job_id):
+            _mark_stop(
+                "cancelled"
+                if _cancel_requested(job_id)
+                else (counts.get("stop_reason") or "stopped")
+            )
+            return
+        stamp = datetime.now(timezone.utc).isoformat()
+        _stamp_attempted(binding, key, stamp)
         local = MapsDataClient(settings, limit=8)
         err_exc: BaseException | None = None
+        status = "errors"
         try:
+            if stop_event.is_set() or _cancel_requested(job_id):
+                _mark_stop("cancelled")
+                return
             if details_only:
                 result = details_only_one_row(local, binding, row)
             else:
@@ -568,64 +657,79 @@ def run(
             else:
                 counts["errors"] += 1
                 _record_error(
-                    row.get(binding.key_column),
+                    key,
                     err_exc or RuntimeError(f"unknown status {status!r}"),
                 )
             done += 1
-            # First failures must land in progress immediately, not every 10th row.
+            if request_cap and counts["requests"] > request_cap:
+                _mark_stop("requests_exceed_3x_pending")
+            if total and done > total:
+                _mark_stop("done_exceeds_total")
             if err_exc is not None or done <= 20 or done % 10 == 0 or (
                 total and done >= total
-            ):
+            ) or stop_event.is_set():
                 _tick()
 
     batch_n = 0
     while True:
-        try:
-            from mcp_server.jobs import is_cancel_requested
-
-            if is_cancel_requested():
-                counts["cancelled"] = True
-                break
-        except Exception:  # noqa: BLE001
-            pass
+        if _cancel_requested(job_id):
+            _mark_stop("cancelled")
+            break
+        if stop_event.is_set():
+            break
+        if request_cap and counts["requests"] > request_cap:
+            _mark_stop("requests_exceed_3x_pending")
+            break
+        if total and done >= total:
+            break
 
         remaining_cap = 0
         if max_rows:
-            remaining_cap = max_rows - counts["rows"]
+            remaining_cap = max_rows - done
             if remaining_cap <= 0:
                 break
         fetch_lim = batch_size if not remaining_cap else min(batch_size, remaining_cap)
         rows = sb.fetch_pending(
-            binding, limit=fetch_lim, details_only=bool(details_only)
+            binding,
+            limit=fetch_lim,
+            details_only=bool(details_only),
+            attempted_since=run_started,
         )
         if not rows:
             break
+        fresh = []
+        for r in rows:
+            key = r.get(binding.key_column)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            fresh.append(r)
+        if not fresh:
+            _mark_stop("repeat_keys")
+            break
         if not total:
-            total = len(rows) if max_rows else (pending_total or len(rows))
+            total = pending_total or (len(fresh) if max_rows else len(fresh))
         batch_n += 1
-        counts["rows"] += len(rows)
-        _tick(batch=batch_n, batch_rows=len(rows))
+        _tick(batch=batch_n, batch_rows=len(fresh))
         with ThreadPoolExecutor(max_workers=max(1, int(workers or 8))) as pool:
-            futs = [pool.submit(work, r) for r in rows]
+            futs = []
+            for r in fresh:
+                if _should_stop():
+                    if _cancel_requested(job_id):
+                        _mark_stop("cancelled")
+                    break
+                futs.append(pool.submit(work, r))
             for f in as_completed(futs):
                 f.exception()
-                try:
-                    from mcp_server.jobs import is_cancel_requested
-
-                    if is_cancel_requested():
-                        counts["cancelled"] = True
-                        break
-                except Exception:  # noqa: BLE001
-                    pass
-        if counts.get("cancelled"):
+                if _cancel_requested(job_id):
+                    _mark_stop("cancelled")
+                if stop_event.is_set():
+                    break
+        if counts.get("cancelled") or stop_event.is_set():
             break
-        # If the RPC ignored limit and returned a huge page, don't loop forever
-        # on the same pending set — resolved rows drop out of pending_where.
-        if len(rows) < fetch_lim:
+        if len(fresh) < fetch_lim:
             break
 
-    if total and done > total:
-        total = done
     counts["rows"] = done
     _tick(batch=batch_n, finished=True)
 
@@ -637,4 +741,5 @@ def run(
         "strategy": strategy,
         "min_confidence": min_confidence,
         "ensured": ensured,
+        "pending_rows": pending_total,
     }

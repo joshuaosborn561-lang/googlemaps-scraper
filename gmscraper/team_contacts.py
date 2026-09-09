@@ -372,8 +372,22 @@ def run(
     )
     counts = {"domains": 0, "contacts": 0, "owners_updated": 0}
     lock = threading.Lock()
+    job_id = ""
+    try:
+        from mcp_server.jobs import current_job_id
+
+        job_id = current_job_id() or ""
+    except Exception:  # noqa: BLE001
+        job_id = ""
 
     def work(domain: str) -> None:
+        try:
+            from mcp_server.jobs import is_cancel_requested
+
+            if is_cancel_requested(job_id):
+                return
+        except Exception:  # noqa: BLE001
+            pass
         biz_row = store.conn.execute(
             "SELECT * FROM businesses WHERE domain=? LIMIT 1", (domain,)
         ).fetchone()
@@ -441,9 +455,29 @@ def run(
                 )
                 sys.stderr.flush()
 
+    cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(work, d) for d in domains]
+        futures = []
+        for d in domains:
+            try:
+                from mcp_server.jobs import is_cancel_requested
+
+                if is_cancel_requested(job_id):
+                    cancelled = True
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            futures.append(pool.submit(work, d))
         for f in as_completed(futures):
             f.exception()
+            try:
+                from mcp_server.jobs import is_cancel_requested
+
+                if is_cancel_requested(job_id):
+                    cancelled = True
+            except Exception:  # noqa: BLE001
+                pass
+    if cancelled:
+        counts["cancelled"] = 1
     sys.stderr.write("\n")
     return counts

@@ -160,6 +160,236 @@ def test_resolve_one_row_skips_details_on_low_confidence(monkeypatch) -> None:
     client.place_details.assert_not_called()
 
 
+def _binding(**extra):
+    from gmscraper import source_binding as sb
+
+    kw = dict(
+        project_id="azpapwtnrbzywlnxxecz",
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        name_column="clean_name",
+        address_column="address",
+        supabase_url="http://x",
+        supabase_key="k",
+    )
+    kw.update(extra)
+    return sb.SourceBinding(**kw)
+
+
+def _stub_run(monkeypatch, binding, *, pending=2, fetch_rows=None, resolve=None):
+    monkeypatch.setattr(resolve_places.sb, "resolve_binding", lambda **kw: binding)
+    monkeypatch.setattr(resolve_places.sb, "validate_binding", lambda b: b)
+    monkeypatch.setattr(
+        resolve_places.sb, "ensure_writeback_columns", lambda b: {"columns_ensured": 0}
+    )
+    monkeypatch.setattr(
+        resolve_places,
+        "estimate",
+        lambda b, limit=0, details_only=False: {
+            "pending_rows": pending,
+            "blocked": False,
+            "estimated_overage_usd": 0,
+            "block_reason": None,
+        },
+    )
+    monkeypatch.setattr(resolve_places.settings, "require_rapidapi", lambda: None)
+    monkeypatch.setattr(
+        resolve_places, "MapsDataClient", lambda *a, **k: MagicMock(request_count=1)
+    )
+    monkeypatch.setattr(resolve_places.sb, "patch_row", lambda *a, **k: True)
+    rows = fetch_rows if fetch_rows is not None else [
+        {"contractor_name": "Acme LLC", "clean_name": "Acme", "address": "1 Main"},
+        {"contractor_name": "Beta Co", "clean_name": "Beta", "address": "2 Main"},
+    ]
+    state = {"n": 0}
+
+    def _fetch(_b, limit=0, offset=0, details_only=False, attempted_since=""):
+        state["n"] += 1
+        return list(rows) if state["n"] == 1 else []
+
+    monkeypatch.setattr(resolve_places.sb, "fetch_pending", _fetch)
+    if resolve is not None:
+        monkeypatch.setattr(resolve_places, "resolve_one_row", resolve)
+    return state
+
+
+def test_estimate_blocks_over_20pct_remaining_quota(monkeypatch) -> None:
+    from gmscraper import source_binding as sb
+
+    binding = sb.SourceBinding(project_id="x", schema="s", table="t", key_column="id")
+    monkeypatch.setattr(
+        resolve_places.sb, "count_pending", lambda b, details_only=False: 200
+    )
+
+    class _Store:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def requests_this_cycle(self, _day=1) -> int:
+            return 299_000  # remaining 1,000 on ultra; 20% = 200; 200 rows × 2 = 400
+
+    monkeypatch.setattr("gmscraper.store.Store", _Store)
+    est = resolve_places.estimate(binding, limit=0)
+    assert est["requests"] == 400
+    assert est["remaining_quota"] == 1_000
+    assert est["max_requests_without_override"] == 200
+    assert est["quota_share_blocked"] is True
+    assert est["blocked"] is True
+    assert est["block_reason"] == "exceeds_20pct_remaining_quota"
+
+
+def test_override_quota_guard_starts(monkeypatch) -> None:
+    binding = _binding()
+    monkeypatch.setattr(resolve_places.sb, "resolve_binding", lambda **kw: binding)
+    monkeypatch.setattr(resolve_places.sb, "validate_binding", lambda b: b)
+    monkeypatch.setattr(
+        resolve_places.sb, "ensure_writeback_columns", lambda b: {"columns_ensured": 0}
+    )
+    monkeypatch.setattr(
+        resolve_places,
+        "estimate",
+        lambda b, limit=0, details_only=False: {
+            "pending_rows": 0,
+            "blocked": True,
+            "block_reason": "exceeds_20pct_remaining_quota",
+            "estimated_overage_usd": 0,
+        },
+    )
+    monkeypatch.setattr(resolve_places.settings, "require_rapidapi", lambda: None)
+    monkeypatch.setattr(resolve_places.sb, "fetch_pending", lambda *a, **k: [])
+    blocked = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        address_column="address",
+    )
+    assert blocked["started"] is False
+    assert blocked["blocked"] is True
+    started = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        address_column="address",
+        override_quota_guard=True,
+    )
+    assert started["started"] is True
+    assert started.get("quota_guard_overridden") is True
+
+
+def test_run_stops_on_repeat_keys(monkeypatch) -> None:
+    binding = _binding()
+    same = [
+        {"contractor_name": f"Co{i}", "clean_name": f"C{i}", "address": f"{i} Main"}
+        for i in range(25)
+    ]
+    monkeypatch.setattr(resolve_places.sb, "resolve_binding", lambda **kw: binding)
+    monkeypatch.setattr(resolve_places.sb, "validate_binding", lambda b: b)
+    monkeypatch.setattr(
+        resolve_places.sb, "ensure_writeback_columns", lambda b: {"columns_ensured": 0}
+    )
+    monkeypatch.setattr(
+        resolve_places,
+        "estimate",
+        lambda b, limit=0, details_only=False: {
+            "pending_rows": 100,
+            "blocked": False,
+            "estimated_overage_usd": 0,
+        },
+    )
+    monkeypatch.setattr(resolve_places.settings, "require_rapidapi", lambda: None)
+    monkeypatch.setattr(
+        resolve_places, "MapsDataClient", lambda *a, **k: MagicMock(request_count=1)
+    )
+    monkeypatch.setattr(resolve_places.sb, "patch_row", lambda *a, **k: True)
+    monkeypatch.setattr(
+        resolve_places,
+        "resolve_one_row",
+        lambda *a, **k: {"status": "no_match"},
+    )
+    monkeypatch.setattr(resolve_places.sb, "fetch_pending", lambda *a, **k: list(same))
+    out = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        address_column="address",
+        workers=1,
+    )
+    assert out["stop_reason"] == "repeat_keys"
+    assert out["rows"] == 25
+    assert out["rows"] <= 100
+
+
+def test_run_stops_when_requests_exceed_3x_pending(monkeypatch) -> None:
+    binding = _binding()
+    _stub_run(monkeypatch, binding, pending=1, fetch_rows=[
+        {"contractor_name": "Acme LLC", "clean_name": "Acme", "address": "1 Main"},
+    ])
+    monkeypatch.setattr(
+        resolve_places, "MapsDataClient", lambda *a, **k: MagicMock(request_count=5)
+    )
+    monkeypatch.setattr(
+        resolve_places, "resolve_one_row", lambda *a, **k: {"status": "no_match"}
+    )
+    out = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        address_column="address",
+        workers=1,
+    )
+    assert out["requests"] > 3 * 1
+    assert out["stop_reason"] == "requests_exceed_3x_pending"
+    assert out["rows"] == 1
+    assert out["request_cap"] == 3
+
+
+def test_run_excludes_rows_attempted_this_run(monkeypatch) -> None:
+    binding = _binding()
+    seen: dict = {}
+
+    def _fetch(_b, limit=0, offset=0, details_only=False, attempted_since=""):
+        seen["attempted_since"] = attempted_since
+        return []
+
+    _stub_run(monkeypatch, binding, pending=3, fetch_rows=[])
+    monkeypatch.setattr(resolve_places.sb, "fetch_pending", _fetch)
+    out = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        address_column="address",
+        workers=1,
+    )
+    assert seen["attempted_since"]
+    assert "T" in seen["attempted_since"]
+    assert out["run_started_at"] == seen["attempted_since"]
+
+
+def test_run_checks_cancel_between_rows(monkeypatch) -> None:
+    binding = _binding()
+    _stub_run(monkeypatch, binding, pending=2)
+    n = {"calls": 0}
+
+    def _resolve(*_a, **_k):
+        n["calls"] += 1
+        return {"status": "no_match"}
+
+    monkeypatch.setattr(resolve_places, "resolve_one_row", _resolve)
+    monkeypatch.setattr(
+        resolve_places, "_cancel_requested", lambda *_a, **_k: n["calls"] >= 1
+    )
+    out = resolve_places.run(
+        schema="client_peterson",
+        table="gc_targets",
+        key_column="contractor_name",
+        address_column="address",
+        workers=1,
+    )
+    assert n["calls"] == 1
+    assert out.get("cancelled") or out.get("stop_reason") == "cancelled"
+
+
 def test_estimate_counts_two_requests_per_row(monkeypatch) -> None:
     from gmscraper import source_binding as sb
 
@@ -247,7 +477,7 @@ def test_run_surfaces_per_row_errors_in_progress(monkeypatch) -> None:
         [],
     ]
 
-    def _fetch(_b, limit=0, offset=0, details_only=False):
+    def _fetch(_b, limit=0, offset=0, details_only=False, attempted_since=""):
         return batches.pop(0) if batches else []
 
     monkeypatch.setattr(resolve_places.sb, "fetch_pending", _fetch)
