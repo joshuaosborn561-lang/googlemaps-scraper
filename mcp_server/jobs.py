@@ -309,9 +309,12 @@ def find_active_by_queue_key(queue_key: str) -> Job | None:
 
 def is_cancel_requested(job_id: str = "") -> bool:
     jid = (job_id or current_job_id()).strip()
-    if not jid:
-        return False
     with _lock:
+        # Pool workers do not inherit TLS job_id — fall back to the in-process run.
+        if not jid:
+            jid = str(_running_id or "").strip()
+        if not jid:
+            return False
         if jid in _cancel_requested:
             return True
         job = _jobs.get(jid)
@@ -918,4 +921,19 @@ def live_progress(job: Job, store: Any | None = None) -> dict[str, Any]:
         "via": prog.get("via"),
         "deferred": prog.get("deferred"),
         "attached": bool(prog.get("attached") or prog.get("deduped")),
+        "errors": prog.get("errors"),
+        "last_error": prog.get("last_error"),
+        "error_samples": prog.get("error_samples"),
+        "resolved": prog.get("resolved"),
+        "no_match": prog.get("no_match"),
+        "done": stage_done,
+        "total": stage_total,
+        "requests": prog.get("requests"),
+        "request_cap": prog.get("request_cap"),
+        "stop_reason": prog.get("stop_reason"),
+        "done_exceeds_total": bool(
+            stage_done is not None
+            and stage_total is not None
+            and int(stage_done) > int(stage_total)
+        ),
     }

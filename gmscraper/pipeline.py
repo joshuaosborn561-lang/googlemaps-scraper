@@ -46,6 +46,7 @@ def run(
     min_confidence: float = 0.6,
     target_titles: str = "",
     workers: int = 8,
+    override_quota_guard: bool = False,
     on_progress: Any | None = None,
 ) -> dict[str, Any]:
     stage_list = _parse_stages(stages)
@@ -111,12 +112,14 @@ def run(
             workers=workers,
             estimate_only=estimate_only,
             project_id=project_id,
+            override_quota_guard=override_quota_guard,
         )
         out["per_stage"]["resolve"] = {
             k: res.get(k)
             for k in (
                 "pending_rows", "requests", "estimated_overage_usd", "blocked",
                 "started", "resolved", "low_confidence", "no_match", "errors", "rows",
+                "stop_reason", "request_cap", "quota_guard_overridden",
             )
             if k in res
         }

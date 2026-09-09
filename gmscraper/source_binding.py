@@ -3,6 +3,16 @@
 Callers pass schema/table/column names; this module validates them, ensures
 writeback columns exist, and reads/patches rows via PostgREST (+ RPCs when
 the target project exposes public.pp_* helpers).
+
+Required public RPCs (see sql/pp_source_binding_helpers.sql):
+
+    pp_count_rows(p_schema, p_table, p_where) -> bigint
+    pp_ensure_columns(p_schema, p_table, p_columns jsonb object) -> int
+    pp_select_rows(p_schema, p_table, p_columns jsonb array, p_where,
+                   p_order_by, p_limit, p_offset) -> list[object]
+    pp_patch_row(p_schema, p_table, p_key_column, p_key_value, p_patch) -> bool
+
+Writeback is pp_patch_row (one row). pp_update_rows is not used.
 """
 
 from __future__ import annotations
@@ -15,6 +25,7 @@ from typing import Any
 from urllib import error, parse, request
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ATTEMPTED_TS = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z?$")
 
 # Columns resolve_places / pipeline may write back. Added automatically if absent.
 WRITEBACK_COLUMNS: dict[str, str] = {
@@ -30,6 +41,7 @@ WRITEBACK_COLUMNS: dict[str, str] = {
     "resolved": "boolean",
     "resolved_at": "timestamptz",
     "resolve_raw": "jsonb",
+    "attempted_at": "timestamptz",
 }
 
 
@@ -319,6 +331,7 @@ def ensure_writeback_columns(binding: SourceBinding) -> dict[str, Any]:
         "business_name": "text",
         "resolved_at": "timestamptz",
         "resolve_raw": "jsonb",
+        "attempted_at": "timestamptz",
     }
     # Merge known defaults
     for k, v in WRITEBACK_COLUMNS.items():
@@ -335,30 +348,56 @@ def ensure_writeback_columns(binding: SourceBinding) -> dict[str, Any]:
     return {"columns_ensured": n, "columns": sorted(cols)}
 
 
-def pending_where(binding: SourceBinding) -> str:
+def _attempted_since_clause(attempted_since: str = "") -> str:
+    """Exclude rows already stamped in this run. `attempted_since` is our ISO ts."""
+    ts = (attempted_since or "").strip().replace(" ", "T")
+    if not ts:
+        return ""
+    if not _ATTEMPTED_TS.match(ts):
+        raise BindingError(f"invalid attempted_since: {attempted_since!r}")
+    safe = ts.replace("'", "")
+    return f"(attempted_at IS NULL OR attempted_at < '{safe}'::timestamptz)"
+
+
+def pending_where(binding: SourceBinding, *, attempted_since: str = "") -> str:
     """WHERE clause for unresolved rows + optional caller predicate."""
     parts = [
         f"({binding.resolved_column} IS NULL OR {binding.resolved_column} = false)"
     ]
+    extra = _attempted_since_clause(attempted_since)
+    if extra:
+        parts.append(extra)
     if binding.where:
         parts.append(f"({binding.where})")
     return " AND ".join(parts)
 
 
-def details_only_where(binding: SourceBinding) -> str:
+def details_only_where(binding: SourceBinding, *, attempted_since: str = "") -> str:
     """Rows with a place_id but no website — backfill Place Details only."""
     parts = [
         "place_id IS NOT NULL",
         "place_id != ''",
         "(website IS NULL OR website = '')",
     ]
+    extra = _attempted_since_clause(attempted_since)
+    if extra:
+        parts.append(extra)
     if binding.where:
         parts.append(f"({binding.where})")
     return " AND ".join(parts)
 
 
-def count_pending(binding: SourceBinding, *, details_only: bool = False) -> int:
-    where = details_only_where(binding) if details_only else pending_where(binding)
+def count_pending(
+    binding: SourceBinding,
+    *,
+    details_only: bool = False,
+    attempted_since: str = "",
+) -> int:
+    where = (
+        details_only_where(binding, attempted_since=attempted_since)
+        if details_only
+        else pending_where(binding, attempted_since=attempted_since)
+    )
     n = rpc(
         binding,
         "pp_count_rows",
@@ -377,6 +416,7 @@ def fetch_pending(
     limit: int = 0,
     offset: int = 0,
     details_only: bool = False,
+    attempted_since: str = "",
 ) -> list[dict[str, Any]]:
     cols = [
         binding.key_column,
@@ -396,10 +436,15 @@ def fetch_pending(
         "candidates",
         "business_name",
         "resolve_raw",
+        "attempted_at",
     ):
         if c and c not in cols:
             cols.append(c)
-    where = details_only_where(binding) if details_only else pending_where(binding)
+    where = (
+        details_only_where(binding, attempted_since=attempted_since)
+        if details_only
+        else pending_where(binding, attempted_since=attempted_since)
+    )
     rows = rpc(
         binding,
         "pp_select_rows",

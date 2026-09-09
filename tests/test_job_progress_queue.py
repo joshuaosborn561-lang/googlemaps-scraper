@@ -40,6 +40,72 @@ def test_live_progress_from_progress_dict(tmp_path: Path, monkeypatch) -> None:
     assert live["eta_seconds"] > 0
 
 
+def test_live_progress_includes_row_errors() -> None:
+    job = jobs.Job(
+        id="errjob00000001",
+        kind="resolve_places",
+        status="running",
+        created_at=time.time(),
+        started_at=time.time(),
+        heartbeat_at=time.time(),
+        progress={
+            "stage": "resolve_places",
+            "done": 10,
+            "total": 1400,
+            "errors": 10,
+            "resolved": 0,
+            "last_error": "BindingError: rpc/pp_patch_row failed (404)",
+            "error_samples": [
+                {"key": "Acme LLC", "error": "BindingError: rpc/pp_patch_row failed (404)"}
+            ],
+            "updated_at": time.time(),
+        },
+    )
+    live = jobs.live_progress(job)
+    assert live["errors"] == 10
+    assert live["resolved"] == 0
+    assert "pp_patch_row" in str(live["last_error"])
+    assert live["error_samples"][0]["key"] == "Acme LLC"
+
+
+def test_live_progress_flags_done_exceeding_total() -> None:
+    job = jobs.Job(
+        id="loopjob0000001",
+        kind="resolve_places",
+        status="running",
+        created_at=time.time(),
+        started_at=time.time(),
+        heartbeat_at=time.time(),
+        progress={
+            "stage": "resolve_places",
+            "done": 65550,
+            "total": 168,
+            "requests": 65550,
+            "request_cap": 504,
+            "stop_reason": "requests_exceed_3x_pending",
+            "updated_at": time.time(),
+        },
+    )
+    live = jobs.live_progress(job)
+    assert live["done"] == 65550
+    assert live["total"] == 168
+    assert live["done_exceeds_total"] is True
+    assert live["stop_reason"] == "requests_exceed_3x_pending"
+    assert live["request_cap"] == 504
+
+
+def test_is_cancel_requested_sees_running_id_without_tls() -> None:
+    _reset_queue_state()
+    jobs._tls.job_id = ""
+    jobs._running_id = "runningjob0001"
+    jobs._cancel_requested.add("runningjob0001")
+    try:
+        assert jobs.is_cancel_requested() is True
+        assert jobs.is_cancel_requested("runningjob0001") is True
+    finally:
+        _reset_queue_state()
+
+
 def _reset_queue_state() -> None:
     with jobs._lock:
         jobs._wait_queue.clear()
