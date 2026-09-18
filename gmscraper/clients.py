@@ -1,6 +1,6 @@
 """Multi-client registry: slug → Supabase schema/tables.
 
-Keeps Kyle (peterson) and Carlos (basco) data in separate Postgres schemas
+Keeps each client (peterson, basco, emcor, …) in a separate Postgres schema
 so sync/export/enrichment never land in a shared ambiguous table.
 """
 
@@ -21,6 +21,21 @@ DEFAULT_CONFIG = ROOT / "config" / "clients.yml"
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 _ALIAS_CACHE: dict[str, str] | None = None
 _CLIENTS: dict[str, "Client"] | None = None
+
+
+class UnknownClientTag(ValueError):
+    """Raised when client_tag is not in config/clients.yml."""
+
+    def __init__(self, client_tag: str, *, known: list[str], aliases: list[str]):
+        self.client_tag = client_tag
+        self.known = list(known)
+        self.aliases = list(aliases)
+        known_txt = ", ".join(self.known) or "(none)"
+        alias_txt = f" Aliases: {', '.join(self.aliases)}." if self.aliases else ""
+        super().__init__(
+            f"Unknown client_tag {client_tag!r}. Valid tags: {known_txt}.{alias_txt} "
+            "Call list_clients() to inspect the registry."
+        )
 
 
 @dataclass(frozen=True)
@@ -137,27 +152,45 @@ def load_clients(path: Path | None = None, *, reload: bool = False) -> dict[str,
     return out
 
 
+def known_client_tags() -> list[str]:
+    return sorted(load_clients())
+
+
+def _alias_pairs() -> list[str]:
+    load_clients()
+    assert _CLIENTS is not None
+    pairs = [
+        f"{a}→{c.slug}"
+        for c in _CLIENTS.values()
+        for a in c.aliases
+        if a and a != c.slug
+    ]
+    return sorted(pairs)
+
+
 def resolve_client(client_tag: str, *, required: bool = True) -> Client | None:
-    """Resolve a tag/alias to a registered Client."""
+    """Resolve a tag/alias to a registered Client.
+
+    Unknown tags always raise UnknownClientTag (names the tag + valid list).
+    required=False only allows a *blank* tag to return None — it does not
+    invent an unregistered client.
+    """
     load_clients()
     assert _ALIAS_CACHE is not None and _CLIENTS is not None
     key = normalize_slug(client_tag)
     if not key:
         if required:
             raise ValueError(
-                "client_tag is required. Use list_clients() — e.g. "
-                "'peterson' (Kyle) or 'basco' (Carlos)."
+                "client_tag is required. Use list_clients() — valid tags: "
+                f"{', '.join(known_client_tags()) or '(none)'}."
             )
         return None
     slug = _ALIAS_CACHE.get(key)
     if slug is None:
-        # Allow ad-hoc slugs that look valid (auto-register shape) when not required.
-        if not required and _SLUG_RE.match(key):
-            return Client(slug=key, display_name=key)
-        known = ", ".join(sorted(_CLIENTS)) or "(none)"
-        raise ValueError(
-            f"Unknown client_tag {client_tag!r}. Known: {known}. "
-            "Aliases: kyle→peterson, carlos→basco."
+        raise UnknownClientTag(
+            client_tag,
+            known=known_client_tags(),
+            aliases=_alias_pairs(),
         )
     return _CLIENTS[slug]
 
