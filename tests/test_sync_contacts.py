@@ -213,3 +213,45 @@ def test_truncate_refused(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-key")
     with pytest.raises(ValueError, match="truncate is disabled"):
         supabase_sync.sync_to_supabase(store, client_tag="peterson", truncate=True)
+
+
+def test_coerce_empty_string_to_null_for_typed_columns() -> None:
+    types = {
+        "permit_count": "integer",
+        "in_icp": "boolean",
+        "synced_at": "timestamptz",
+        "name": "text",
+    }
+    row = supabase_sync.coerce_row(
+        {
+            "permit_count": "",
+            "in_icp": "yes",
+            "synced_at": "",
+            "name": "Acme",
+            "reviews": "12",
+        },
+        types,
+    )
+    assert row["permit_count"] is None
+    assert row["in_icp"] is True
+    assert row["synced_at"] is None
+    assert row["name"] == "Acme"
+    # reviews not in types → known-export fallback
+    assert row["reviews"] == 12
+
+
+def test_coerce_bad_value_names_column_and_type() -> None:
+    with pytest.raises(ValueError, match="permit_count"):
+        supabase_sync.coerce_value("permit_count", "twelve", "integer")
+
+
+def test_typed_column_error_names_suspect_columns() -> None:
+    msg = supabase_sync._typed_column_error(
+        "client_emcor",
+        "leads",
+        '{"code":"22P02","message":"invalid input syntax for type integer: \\"\\""}',
+        [{"name": "Acme", "permit_count": "", "reviews": ""}],
+    )
+    assert "permit_count" in msg
+    assert "integer" in msg
+    assert "client_emcor.leads" in msg

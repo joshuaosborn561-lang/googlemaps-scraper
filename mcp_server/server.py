@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.8.1",
+    version="1.8.3",
 )
 
 
@@ -188,6 +188,18 @@ def when_to_use_prompt() -> str:
 
 def _json(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
+
+
+def _require_known_client(client_tag: str) -> str:
+    """Blank is allowed (caller may infer). A non-empty unknown tag fails loudly."""
+    raw = (client_tag or "").strip()
+    if not raw:
+        return ""
+    from gmscraper import clients as client_reg
+
+    client = client_reg.resolve_client(raw)
+    assert client is not None
+    return client.slug
 
 
 def _ensure_repo_cwd() -> None:
@@ -962,6 +974,9 @@ def _execute_run_leads(
     from gmscraper.mapsdata import MapsDataClient
     from gmscraper.websearch import make_backend
 
+    if (client_tag or "").strip():
+        client_tag = _require_known_client(client_tag)
+
     record = resolve_plan(plan_path=plan_path)
     settings.require_rapidapi()
     plan = brief_mod.load(record.plan_path)
@@ -1145,8 +1160,9 @@ def run_leads(
     """Execute the full lead pipeline after plan_leads. This is the main "go" tool.
 
     Pass plan_path from plan_leads, or omit it to use the latest saved plan.
-    Pass client_tag ('peterson' / 'basco') so scraped rows are stamped for
-    that client's Supabase tables (peterson_* / basco_*).
+    Pass client_tag (peterson / basco / emcor) so scraped rows are stamped
+    for that client's Supabase tables. Unknown tags fail immediately with
+    the valid list — they never start a silent failed job.
 
     On Railway/HTTP this starts a background job — poll get_job_status with the
     returned job_id until completed/failed/stalled/interrupted. Maps scrape
@@ -1154,6 +1170,12 @@ def run_leads(
     re-call run_leads with the same plan_path to continue.
     """
     _ensure_repo_cwd()
+    from mcp_server.errors import tool_error_from_exception
+
+    try:
+        client_tag = _require_known_client(client_tag)
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
     resolve_plan(plan_path=plan_path)
 
     run_bg = background if background is not None else _http_mode()
@@ -1205,6 +1227,9 @@ def _execute_scrape_maps(
     from gmscraper.config import settings
     from gmscraper.mapsdata import MapsDataClient
     from mcp_server.jobs import current_job_id
+
+    if (client_tag or "").strip():
+        client_tag = _require_known_client(client_tag)
 
     record = resolve_plan(plan_path=plan_path)
     settings.require_rapidapi()
@@ -1266,9 +1291,15 @@ def scrape_maps(
 ) -> str:
     """Paid Maps scrape stage only. Pass plan_path or omit for latest plan.
 
-    Pass client_tag ('peterson' / 'basco') to stamp rows for that client.
+    Pass client_tag ('peterson' / 'basco' / 'emcor') to stamp rows for that client.
     """
     _ensure_repo_cwd()
+    from mcp_server.errors import tool_error_from_exception
+
+    try:
+        client_tag = _require_known_client(client_tag)
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
     resolve_plan(plan_path=plan_path)
 
     if background and _http_mode():
@@ -1376,6 +1407,13 @@ def get_job_status(job_id: str) -> str:
         )
     elif job.status == "cancelled":
         public["next_step"] = "Job cancelled. It will not auto-resume on restart."
+    elif job.status == "failed":
+        public["message"] = job.error or "Job failed with no error message."
+        if job.error:
+            public["error"] = job.error
+        public["next_step"] = (
+            "Read error/message, fix the argument, and re-call the same tool."
+        )
     return _json(public)
 
 
@@ -2663,7 +2701,7 @@ def enrich_waterfall(
 ) -> str:
     """Walk apify → AI Ark → getleads → LeadMagic → FullEnrich.
 
-    Pass client_tag ('peterson' / 'basco') so contacts write to
+    Pass client_tag (peterson / basco / emcor) so contacts write to
     {slug}_contacts / {slug}_companies. Omitting client_tag falls back to
     the legacy shared gc.* schema (discouraged for new runs).
 
@@ -2750,7 +2788,7 @@ def export_csv(
 ) -> str:
     """Return matching leads as CSV text in the response (free).
 
-    Pass client_tag to export one client's rows only (peterson / basco).
+    Pass client_tag to export one client's rows only (peterson / basco / emcor).
     Caps at 5000 rows. clean=true drops placeholder / agency emails.
     """
     _ensure_repo_cwd()
@@ -2929,23 +2967,25 @@ def sample_leads(
 def list_clients() -> str:
     """Show registered clients and their dedicated Supabase tables.
 
-    peterson → public.peterson_{leads,contacts,companies} (Kyle / Roofs by Peterson)
-    basco    → public.basco_{leads,contacts,companies} (Carlos / Basco Warranty)
     Always pass client_tag on scrape/sync/enrich so rows never mix.
+    Unknown tags raise with the valid list — they never invent a client.
     """
     from gmscraper import clients as client_reg
 
+    tags = client_reg.known_client_tags()
+    tag_choice = "|".join(tags) or "(none)"
     return _json(
         {
             "clients": client_reg.list_clients_public(),
+            "valid_tags": tags,
             "usage": {
-                "scrape": "run_leads(..., client_tag='peterson'|'basco')",
+                "scrape": f"run_leads(..., client_tag='{tag_choice}')",
                 "sync": (
-                    "sync_to_supabase(client_tag='peterson'|'basco', "
+                    f"sync_to_supabase(client_tag='{tag_choice}', "
                     "state=..., main_category=..., center=..., radius_miles=...)"
                 ),
-                "enrich": "enrich_waterfall(..., client_tag='peterson'|'basco')",
-                "aliases": "kyle→peterson, carlos→basco",
+                "enrich": f"enrich_waterfall(..., client_tag='{tag_choice}')",
+                "aliases": client_reg._alias_pairs(),
             },
         }
     )
@@ -3014,7 +3054,8 @@ def sync_to_supabase(
 ) -> str:
     """Batch-upsert into the client's Supabase table. Counts only — never rows.
 
-    dataset='' (default, leads): requires client_tag ('peterson' or 'basco').
+    dataset='' (default, leads): requires a registered client_tag
+    (peterson / basco / emcor — call list_clients()).
     Writes to client_{tag}.leads (never a shared maps_leads dump). Also
     backfills owner_name / owner_title for every local owner, not only the
     current plan scope. Destination rows are stamped with that client_tag.
@@ -3074,6 +3115,11 @@ def sync_to_supabase(
 
     from gmscraper import supabase_sync
     from mcp_server.errors import tool_error_from_exception
+
+    try:
+        client_tag = _require_known_client(client_tag)
+    except Exception as exc:  # noqa: BLE001
+        return _json(tool_error_from_exception(exc))
 
     try:
         result = supabase_sync.sync_to_supabase(

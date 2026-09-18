@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 from urllib import error, parse, request
@@ -82,8 +83,210 @@ def _request(
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"Supabase {method} {url} [schema={schema}] failed ({exc.code}): {detail[:500]}"
+            _typed_column_error(schema, table_from_url(url), detail, body if isinstance(body, list) else None)
+            or f"Supabase {method} {url} [schema={schema}] failed ({exc.code}): {detail[:500]}"
         ) from exc
+
+
+def table_from_url(url: str) -> str:
+    path = parse.urlparse(url).path
+    parts = [p for p in path.split("/") if p and p != "rest" and p != "v1"]
+    return parts[0] if parts else ""
+
+
+_INT_TYPES = frozenset(
+    {"integer", "int", "int2", "int4", "int8", "smallint", "bigint", "serial", "bigserial"}
+)
+_FLOAT_TYPES = frozenset(
+    {
+        "number",
+        "numeric",
+        "double precision",
+        "float",
+        "float4",
+        "float8",
+        "real",
+        "decimal",
+    }
+)
+_BOOL_TYPES = frozenset({"boolean", "bool"})
+_TIME_TYPES = frozenset(
+    {
+        "timestamptz",
+        "timestamp with time zone",
+        "timestamp",
+        "timestamp without time zone",
+        "date",
+        "timetz",
+        "time",
+    }
+)
+_TEXT_TYPES = frozenset(
+    {
+        "string",
+        "text",
+        "varchar",
+        "character varying",
+        "character",
+        "char",
+        "citext",
+        "uuid",
+        "json",
+        "jsonb",
+    }
+)
+
+
+def _norm_pg_type(raw: str) -> str:
+    return re.sub(r"\s+", " ", (raw or "").strip().lower())
+
+
+def fetch_column_types(schema: str, table: str) -> dict[str, str]:
+    """Best-effort {column: pg_type} from PostgREST OpenAPI. Empty if unavailable."""
+    try:
+        cfg = supabase_config()
+    except Exception:
+        return {}
+    url = f"{cfg['url']}/rest/v1/"
+    req = request.Request(
+        url,
+        headers={
+            "apikey": cfg["key"],
+            "Authorization": f"Bearer {cfg['key']}",
+            "Accept": "application/openapi+json",
+            "Accept-Profile": schema or "public",
+        },
+        method="GET",
+    )
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            spec = json.loads(resp.read().decode())
+    except Exception:
+        return {}
+    defs = spec.get("definitions") or spec.get("components", {}).get("schemas") or {}
+    props = (defs.get(table) or {}).get("properties") or {}
+    out: dict[str, str] = {}
+    for name, body in props.items():
+        if not isinstance(body, dict):
+            continue
+        fmt = (body.get("format") or "").strip()
+        typ = (body.get("type") or "").strip()
+        out[str(name)] = _norm_pg_type(fmt or typ)
+    return out
+
+
+def coerce_value(column: str, value: Any, pg_type: str) -> Any:
+    """Cast a payload value to the target column type. Empty → None for non-text."""
+    t = _norm_pg_type(pg_type)
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        if t in _TEXT_TYPES or t.startswith("character"):
+            return ""
+        return None
+    try:
+        if t in _INT_TYPES:
+            return int(float(str(value).replace(",", "")))
+        if t in _FLOAT_TYPES:
+            return float(str(value).replace(",", ""))
+        if t in _BOOL_TYPES:
+            if value in (True, False):
+                return value
+            s = str(value).strip().lower()
+            if s in ("yes", "true", "1", "t", "y"):
+                return True
+            if s in ("no", "false", "0", "f", "n"):
+                return False
+            raise ValueError(f"{value!r} is not a boolean")
+        if t in _TIME_TYPES:
+            return str(value).strip()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot write column {column!r} value {value!r} as {pg_type or t or 'unknown type'}: {exc}"
+        ) from exc
+    return value
+
+
+def coerce_row(row: dict[str, Any], types: dict[str, str]) -> dict[str, Any]:
+    if not types:
+        return _coerce_known_export_types(row)
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        pg = types.get(key, "")
+        out[key] = coerce_value(key, val, pg) if pg else _coerce_known_export_types({key: val})[key]
+    return out
+
+
+def _coerce_known_export_types(row: dict[str, Any]) -> dict[str, Any]:
+    """Fallback when the target schema cannot be read."""
+    known = {
+        "rating": "double precision",
+        "icp_confidence": "double precision",
+        "latitude": "double precision",
+        "longitude": "double precision",
+        "confidence": "double precision",
+        "reviews": "integer",
+        "permit_count": "integer",
+        "in_icp": "boolean",
+        "in_shovels": "boolean",
+        "in_maps_icp": "boolean",
+        "synced_at": "timestamptz",
+        "created_at": "timestamptz",
+        "updated_at": "timestamptz",
+        "resolved_at": "timestamptz",
+    }
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        if key in known:
+            out[key] = coerce_value(key, val, known[key])
+        else:
+            out[key] = None if val == "" and key.endswith(("_at", "_count", "_id")) else val
+            if val == "" and key in ("reviews", "permit_count", "rating"):
+                out[key] = None
+    return out
+
+
+def _typed_column_error(
+    schema: str,
+    table: str,
+    detail: str,
+    batch: list[dict[str, Any]] | None,
+) -> str:
+    """Turn a PostgREST/Postgres type error into 'column X is type Y'."""
+    raw = detail or ""
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = json.loads(raw) if raw.lstrip().startswith("{") else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    msg = str(parsed.get("message") or raw)
+    code = str(parsed.get("code") or "")
+    m = re.search(
+        r"column \"([^\"]+)\".*?(?:type|is of type)\s+([a-zA-Z0-9_ ]+)",
+        msg,
+        re.I,
+    )
+    if m:
+        return (
+            f"Supabase rejected {schema}.{table} column {m.group(1)!r} "
+            f"(type {m.group(2).strip()}): {msg[:300]}"
+        )
+    m = re.search(r"invalid input syntax for type ([a-zA-Z0-9_ ]+):\s*\"(.*)\"", msg)
+    if m:
+        pgtype, bad = m.group(1).strip(), m.group(2)
+        suspects: list[str] = []
+        for row in (batch or [])[:5]:
+            for k, v in row.items():
+                if v == "" or str(v) == bad:
+                    suspects.append(k)
+        named = ", ".join(dict.fromkeys(suspects) or ["(unknown)"])
+        return (
+            f"Supabase rejected {schema}.{table} column(s) {named} "
+            f"(Postgres type {pgtype}; value {bad!r}). {msg[:200]}"
+        )
+    if code in ("22P02", "42804", "PGRST204"):
+        return f"Supabase rejected {schema}.{table}: {msg[:400]}"
+    return ""
 
 
 def truncate_table(table: str = "leads", *, schema: str = "public") -> None:
@@ -138,10 +341,11 @@ def upsert_rows(
     if not rows:
         return 0
     cfg = supabase_config()
+    types = fetch_column_types(schema, table)
     url = f"{cfg['url']}/rest/v1/{table}?on_conflict={on_conflict}"
     synced = 0
     for i in range(0, len(rows), BATCH_SIZE):
-        batch = rows[i : i + BATCH_SIZE]
+        batch = [coerce_row(r, types) for r in rows[i : i + BATCH_SIZE]]
         _request(
             "POST",
             url,
@@ -196,7 +400,8 @@ def resolve_sync_target(
     raise ValueError(
         "client_tag is required for sync_to_supabase so each client lands in "
         "its own schema (e.g. client_tag='peterson' → client_peterson.leads, "
-        "client_tag='basco' → client_basco.leads). "
+        "client_tag='basco' → client_basco.leads, "
+        "client_tag='emcor' → client_emcor.leads). "
         "Call list_clients() for the registry. "
         "Scope historical (untagged) SQLite rows with state/main_category/"
         "plan_id/center+radius_miles — same filters as classify_leads."

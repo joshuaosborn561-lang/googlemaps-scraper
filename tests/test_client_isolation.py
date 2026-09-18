@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,50 @@ def test_unknown_client_raises() -> None:
     client_reg.load_clients(reload=True)
     with pytest.raises(ValueError, match="Unknown client_tag"):
         client_reg.resolve_client("acme_roofing_xyz")
+
+
+def test_emcor_is_registered() -> None:
+    client_reg.load_clients(reload=True)
+    c = client_reg.resolve_client("emcor")
+    assert c.slug == "emcor"
+    assert c.supabase_schema == "client_emcor"
+    assert client_reg.resolve_client("emcor_group").slug == "emcor"
+
+
+def test_unknown_client_lists_valid_tags() -> None:
+    client_reg.load_clients(reload=True)
+    with pytest.raises(client_reg.UnknownClientTag, match="not_a_client") as ei:
+        client_reg.resolve_client("not_a_client")
+    msg = str(ei.value)
+    assert "basco" in msg
+    assert "peterson" in msg
+    assert "emcor" in msg
+    assert ei.value.known == client_reg.known_client_tags()
+
+
+def test_blank_tag_optional_does_not_invent_client() -> None:
+    client_reg.load_clients(reload=True)
+    assert client_reg.resolve_client("", required=False) is None
+    with pytest.raises(client_reg.UnknownClientTag, match="ghost"):
+        client_reg.resolve_client("ghost", required=False)
+
+
+def test_unknown_tag_error_is_bad_arguments_kind() -> None:
+    from mcp_server.errors import classify_exception, tool_error_from_exception
+
+    client_reg.load_clients(reload=True)
+    try:
+        client_reg.resolve_client("nope")
+    except client_reg.UnknownClientTag as exc:
+        assert classify_exception(exc) == "bad_arguments"
+        payload = tool_error_from_exception(exc)
+        msg = payload["error"]["message"]
+        assert "nope" in msg
+        assert "emcor" in msg
+        assert "basco" in msg
+        assert "peterson" in msg
+    else:
+        raise AssertionError("expected UnknownClientTag")
 
 
 def test_sync_target_requires_client_tag() -> None:
@@ -209,6 +254,7 @@ def test_ensure_sql_contains_both_client_tables() -> None:
     sql = client_reg.ensure_sql_all()
     assert "CREATE TABLE IF NOT EXISTS client_peterson.leads" in sql
     assert "CREATE TABLE IF NOT EXISTS client_basco.contacts" in sql
+    assert "CREATE TABLE IF NOT EXISTS client_emcor.leads" in sql
     assert "client_peterson.companies" in sql
     assert "raw_name" in sql
     assert "natural_key" in sql
@@ -218,4 +264,4 @@ def test_list_clients_public() -> None:
     client_reg.load_clients(reload=True)
     pubs = client_reg.list_clients_public()
     slugs = {p["client_tag"] for p in pubs}
-    assert slugs == {"peterson", "basco"}
+    assert slugs == {"peterson", "basco", "emcor"}

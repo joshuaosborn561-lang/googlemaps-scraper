@@ -25,3 +25,14 @@ clients:
     companies_table: companies
     default_geo: "Clifton, NJ"
     notes: "Franchise new-car dealerships — service / fixed ops directors"
+
+  emcor:
+    display_name: EMCOR
+    contact_name: ""
+    aliases: [emcor_group]
+    supabase_schema: client_emcor
+    leads_table: leads
+    contacts_table: contacts
+    companies_table: companies
+    default_geo: ""
+    notes: "EMCOR — mechanical / electrical / facilities contractors"
