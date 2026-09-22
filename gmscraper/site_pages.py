@@ -53,9 +53,10 @@ PARKED_RE = re.compile(
     re.I,
 )
 COMING_SOON_RE = re.compile(r"coming soon", re.I)
-SKIP_TAGS = frozenset(
-    {"script", "style", "noscript", "svg", "template", "nav", "footer"}
-)
+HARD_SKIP = frozenset({"script", "style", "noscript", "svg", "template"})
+CHROME_SKIP = frozenset({"nav", "footer"})
+SKIP_TAGS = HARD_SKIP | CHROME_SKIP
+MIN_BODY = 400
 
 SITE_PAGES_DDL = """
 CREATE TABLE IF NOT EXISTS public.site_pages (
@@ -224,16 +225,17 @@ def harvest_phones(text: str) -> list[str]:
 
 
 class _PageParser(HTMLParser):
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, skip_tags: frozenset[str] | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.base = base_url
         self.host = host_of(base_url)
+        self.skip_tags = skip_tags if skip_tags is not None else SKIP_TAGS
         self.title_parts: list[str] = []
         self.meta_description = ""
         self.h1: list[str] = []
         self.body_parts: list[str] = []
         self.links: list[dict[str, str]] = []
-        self._skip = 0
+        self._skip_stack: list[str] = []
         self._in_title = False
         self._in_h1 = False
         self._h1_buf: list[str] = []
@@ -242,10 +244,10 @@ class _PageParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         ad = {k.lower(): (v or "") for k, v in attrs}
-        if tag in SKIP_TAGS:
-            self._skip += 1
+        if tag in self.skip_tags:
+            self._skip_stack.append(tag)
             return
-        if self._skip:
+        if self._skip_stack:
             return
         if tag == "title":
             self._in_title = True
@@ -263,10 +265,9 @@ class _PageParser(HTMLParser):
                 self._link_buf = []
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in SKIP_TAGS and self._skip:
-            self._skip -= 1
-            return
-        if self._skip:
+        if self._skip_stack:
+            if tag == self._skip_stack[-1]:
+                self._skip_stack.pop()
             return
         if tag == "title":
             self._in_title = False
@@ -287,7 +288,7 @@ class _PageParser(HTMLParser):
             self._link_href = ""
 
     def handle_data(self, data: str) -> None:
-        if self._skip or not data:
+        if self._skip_stack or not data:
             return
         if self._in_title:
             self.title_parts.append(data)
@@ -306,21 +307,36 @@ def _canon_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc.lower(), path, parts.query, ""))
 
 
-def parse_page(html: str, url: str) -> dict[str, Any]:
-    parser = _PageParser(url)
+def parse_page(html: str, url: str, *, skip_chrome: bool = True) -> dict[str, Any]:
+    skip = HARD_SKIP | CHROME_SKIP if skip_chrome else HARD_SKIP
+    parser = _PageParser(url, skip_tags=skip)
     try:
         parser.feed(html or "")
     except Exception:  # noqa: BLE001
         pass
     body = WS.sub(" ", " ".join(parser.body_parts)).strip()[:MAX_BODY]
     title = WS.sub(" ", "".join(parser.title_parts)).strip()[:500]
-    return {
+    meta = (parser.meta_description or "").strip() or None
+    # Never substitute the meta description for the page body.
+    if meta and body == meta:
+        body = ""
+    out = {
         "title": title or None,
-        "meta_description": (parser.meta_description or None),
+        "meta_description": meta,
         "h1": parser.h1[:20],
         "body_text": body or None,
         "links": parser.links[:MAX_LINKS],
     }
+    # Unclosed <nav>/<footer> can swallow <main>. Retry without chrome skip
+    # when the first pass looks like a head-only stub.
+    if skip_chrome and len(body) < MIN_BODY and html:
+        retry = parse_page(html, url, skip_chrome=False)
+        retry_body = retry.get("body_text") or ""
+        if len(retry_body) > max(len(body) * 2, MIN_BODY):
+            if not retry.get("meta_description"):
+                retry["meta_description"] = meta
+            return retry
+    return out
 
 
 def looks_parked(html: str, body_text: str) -> bool:
@@ -407,6 +423,29 @@ def _classify_transport_error(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _http_get(session: requests.Session, url: str) -> tuple[str, int, str]:
+    """GET a page without stream=True so the full HTML is read."""
+    r = session.get(
+        url,
+        timeout=TIMEOUT,
+        allow_redirects=True,
+        headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
+    )
+    try:
+        status = int(r.status_code)
+        final = _canon_url(str(r.url or url))
+        raw = r.content or b""
+        if len(raw) > MAX_BYTES:
+            raw = raw[:MAX_BYTES]
+        html = raw.decode(r.encoding or "utf-8", errors="replace")
+        return html, status, final
+    finally:
+        try:
+            r.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def fetch_one(
     session: requests.Session,
     url: str,
@@ -430,27 +469,18 @@ def fetch_one(
         return row
     html = ""
     try:
-        r = session.get(
-            url,
-            timeout=TIMEOUT,
-            allow_redirects=True,
-            stream=True,
-            headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
-        )
-        row["http_status"] = int(r.status_code)
-        row["url"] = _canon_url(str(r.url or url))
-        if r.status_code == 403:
+        html, row["http_status"], row["url"] = _http_get(session, url)
+        if row["http_status"] == 403:
             row["error"] = "403"
-        raw = r.raw.read(MAX_BYTES, decode_content=True) or b""
-        html = raw.decode(r.encoding or "utf-8", errors="replace")
+        # Some hosts answer the first GET (often after robots.txt) with
+        # 202 / empty HTML, then serve the real page on retry.
+        if (row["http_status"] or 0) < 400 and not (html or "").strip():
+            html, row["http_status"], row["url"] = _http_get(session, url)
+            if row["http_status"] == 403:
+                row["error"] = "403"
     except Exception as exc:  # noqa: BLE001
         row["error"] = row["error"] or _classify_transport_error(exc)
         return row
-    finally:
-        try:
-            r.close()  # type: ignore[possibly-undefined]
-        except Exception:  # noqa: BLE001
-            pass
 
     parsed = parse_page(html, row["url"])
     row.update(parsed)
@@ -509,6 +539,9 @@ def crawl_domain(domain: str, robots: RobotsCache | None = None) -> list[dict[st
                     continue
                 if rec.get("body_text") or rec.get("error") in ("403", "parked", "robots"):
                     break
+                # Empty 2xx (WAF / 202 handshake) — try the other scheme.
+                if scheme == "https" and not rec.get("body_text"):
+                    continue
                 if rec.get("http_status"):
                     break
         if home is None:

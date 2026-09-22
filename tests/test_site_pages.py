@@ -41,6 +41,86 @@ def test_classify_is_noop() -> None:
     assert REMOVED_MESSAGE in out["message"]
 
 
+class _FakeResp:
+    def __init__(self, status: int, html: str, url: str = "https://acme-mech.example/") -> None:
+        self.status_code = status
+        self.url = url
+        self.encoding = "utf-8"
+        self.content = html.encode("utf-8")
+
+    def close(self) -> None:
+        return None
+
+
+def test_fetch_one_reads_full_content_and_retries_empty_202(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    class Session:
+        def get(self, url, **kwargs):
+            assert kwargs.get("stream") in (None, False)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeResp(202, "")
+            return _FakeResp(200, HOME_HTML)
+
+    monkeypatch.setattr(site_pages.RobotsCache, "allows", lambda self, url: True)
+    rec = site_pages.fetch_one(Session(), "https://acme-mech.example/", site_pages.RobotsCache())
+    assert rec["http_status"] == 200
+    body = rec["body_text"] or ""
+    assert len(body) > 120
+    assert "multifamily" in body
+    assert rec["meta_description"] != body
+    assert calls["n"] == 2
+
+
+def test_never_stores_meta_as_body() -> None:
+    meta = "Trusted local HVAC for homes and businesses in Dallas."
+    html = f"""
+    <html><head>
+      <title>{meta}</title>
+      <meta name="description" content="{meta}">
+    </head><body><nav><span>menu</span></body></html>
+    """
+    rec = site_pages.parse_page(html, "https://acme-mech.example/")
+    assert rec["meta_description"] == meta
+    assert rec["body_text"] != meta
+
+
+def test_long_body_not_truncated_near_120() -> None:
+    paragraph = "Commercial HVAC for multifamily property owners. " * 80
+    html = f"<html><body><main><p>{paragraph}</p></main></body></html>"
+    rec = site_pages.parse_page(html, "https://acme-mech.example/")
+    body = rec["body_text"] or ""
+    assert len(body) > 1000
+    assert len(body) == len(body[: site_pages.MAX_BODY])
+    assert site_pages.MAX_BODY == 60_000
+
+
+def test_body_is_not_meta_and_survives_unclosed_nav() -> None:
+    meta = "Short meta about the firm for search engines."
+    paragraph = "Commercial HVAC for multifamily property owners. " * 40
+    html = f"""
+    <html><head>
+      <title>Acme Mechanical</title>
+      <meta name="description" content="{meta}">
+    </head>
+    <body>
+      <nav><a href="/">Home</a>
+      <main>
+        <h1>Commercial HVAC</h1>
+        <p>{paragraph}</p>
+      </main>
+    </body></html>
+    """
+    rec = site_pages.parse_page(html, "https://acme-mech.example/")
+    body = rec["body_text"] or ""
+    assert rec["meta_description"] == meta
+    assert body != meta
+    assert len(body) > 400
+    assert "Commercial HVAC" in body
+    assert "multifamily" in body
+
+
 def test_parse_page_strips_chrome_and_html() -> None:
     rec = site_pages.parse_page(HOME_HTML, "https://acme-mech.example/")
     assert rec["title"] == "Acme Mechanical"
