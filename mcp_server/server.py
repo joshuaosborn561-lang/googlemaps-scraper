@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.9.0",
+    version="1.10.0",
 )
 
 
@@ -1582,50 +1582,71 @@ def enrich_sites(
     run_id: str = "",
     client_tag: str = "",
     source: str = "",
+    source_project: str = "",
     source_table: str = "",
     schema: str = "public",
     where: str = "",
     domains: str = "",
     domain_column: str = "domain",
+    key_column: str = "id",
     website_column: str = "website",
     force: bool = False,
     project_id: str = "",
 ) -> str:
-    """Fetch websites (free). Writes public.site_pages on SUPABASE_URL.
+    """Fetch websites (free). Writes public.site_pages. Counts only.
 
-    Preferred: pass source_table + where (reads domain/website) or a comma/
-    newline list of domains. Homepage + up to 4 matching internal pages,
-    max 5 per domain. Counts only — never returns page text.
+    Supabase-sourced mode (domains that never hit local SQLite):
+      source_project  project ref to READ and WRITE (default: SUPABASE_URL ref)
+      source_table    table or view, e.g. public.sg_sub_domains
+      where           optional simple SQL predicate
+      domain_column   default "domain"
+      key_column      default "id", stored on site_pages as source_id
+      force           recrawl even if the domain is already in site_pages
 
-    Legacy (no table/domains): shallow SQLite crawl of pending local sites.
+    Reads only key_column + domain_column, 1,000 rows per page. Requires
+    SUPABASE_SERVICE_KEY_<PROJECTREF> (uppercase). A rerun with the same
+    source_table skips domains already in site_pages unless force=true.
+
+    When source_table is set, SQLite city/state/client_tag scoping is ignored.
+
+    Also accepts a comma/newline domain list. Legacy (no table/domains):
+    shallow SQLite crawl of pending local sites.
     """
     _ensure_repo_cwd()
-    scope = _normalize_scope(
-        city=city,
-        state=state,
-        main_category=main_category,
-        plan_path=plan_path,
-        plan_id=plan_id,
-        run_id=run_id,
-        client_tag=client_tag,
-        source=source,
-    )
-    scoped = _scope_is_set(scope)
-    capture = bool((source_table or "").strip() or (domains or "").strip())
     table = (source_table or "").strip()
+    capture = bool(table or (domains or "").strip())
+    # SQLite scope is ignored entirely in source_table mode.
+    scope = (
+        {}
+        if table
+        else _normalize_scope(
+            city=city,
+            state=state,
+            main_category=main_category,
+            plan_path=plan_path,
+            plan_id=plan_id,
+            run_id=run_id,
+            client_tag=client_tag,
+            source=source,
+        )
+    )
+    scoped = bool(scope) and _scope_is_set(scope)
     n_workers = max(1, min(int(workers or 20), 20 if capture else 3))
+    src_project = (source_project or project_id or "").strip()
 
     def _run_capture() -> dict[str, Any]:
         from gmscraper import site_pages
 
         return site_pages.crawl_and_store(
-            domains=domains,
+            domains="" if table else domains,
             schema=schema or "public",
             table=table,
             where=where,
             domain_column=domain_column or "domain",
             website_column=website_column or "website",
-            project_id=project_id,
+            key_column=key_column or "id",
+            source_project=src_project,
+            project_id=src_project,
             limit=int(limit or 0),
             force=bool(force),
             workers=n_workers,
@@ -1674,11 +1695,13 @@ def enrich_sites(
             "limit": limit,
             "workers": n_workers,
             "source_table": table or None,
+            "source_project": src_project or None,
             "schema": schema or None,
             "where": where or None,
-            "domains_chars": len(domains or ""),
+            "key_column": key_column or "id",
+            "domains_chars": 0 if table else len(domains or ""),
             "force": bool(force),
-            "project_id": project_id or None,
+            "project_id": src_project or None,
             "capture": capture,
             **scope,
         }
@@ -3315,9 +3338,41 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 )
                 resumed.append(job.id)
             elif kind == "enrich_sites":
+                m = dict(meta)
+                src_table = str(m.get("source_table") or "").strip()
+                lim = int(m.get("limit") or 0)
+                workers = int(m.get("workers") or 3)
+                if src_table:
+                    from gmscraper import site_pages
+
+                    def _enrich_src(mm=m, lim=lim, workers=workers) -> dict[str, Any]:
+                        return site_pages.crawl_and_store(
+                            schema=str(mm.get("schema") or "public"),
+                            table=str(mm.get("source_table") or ""),
+                            where=str(mm.get("where") or ""),
+                            domain_column=str(mm.get("domain_column") or "domain"),
+                            key_column=str(mm.get("key_column") or "id"),
+                            source_project=str(
+                                mm.get("source_project") or mm.get("project_id") or ""
+                            ),
+                            limit=lim,
+                            force=bool(mm.get("force")),
+                            workers=max(1, min(workers, 20)),
+                            on_progress=lambda **p: _job_progress("site_pages", **p),
+                        )
+
+                    job = start_job(
+                        "enrich_sites",
+                        _enrich_src,
+                        meta={**meta, "auto_resumed_from": rec.get("id")},
+                        queue_key=make_queue_key("enrich_sites", meta),
+                        priority=int(meta.get("priority") or 10),
+                    )
+                    resumed.append(job.id)
+                    continue
+
                 from gmscraper import enrich_site
 
-                m = dict(meta)
                 scope = _normalize_scope(
                     city=str(m.get("city") or ""),
                     state=str(m.get("state") or ""),
@@ -3328,8 +3383,6 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                     client_tag=str(m.get("client_tag") or ""),
                     source=str(m.get("source") or ""),
                 )
-                lim = int(m.get("limit") or 0)
-                workers = int(m.get("workers") or 3)
 
                 def _enrich(
                     sc=scope, lim=lim, workers=workers

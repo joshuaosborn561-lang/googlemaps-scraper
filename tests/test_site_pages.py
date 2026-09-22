@@ -121,3 +121,90 @@ def test_project_ref_from_url() -> None:
         == "kemvxzhcxvynmoutwdrh"
     )
     assert site_pages.project_ref_from_url("") is None
+
+
+def test_service_key_env_and_split_table() -> None:
+    assert (
+        site_pages.service_key_env("kemvxzhcxvynmoutwdrh")
+        == "SUPABASE_SERVICE_KEY_KEMVXZHCXVYNMOUTWDRH"
+    )
+    assert site_pages.split_table_ref("public.sg_sub_domains") == (
+        "public",
+        "sg_sub_domains",
+    )
+    assert site_pages.split_table_ref("sg_sub_domains") == ("public", "sg_sub_domains")
+
+
+def test_missing_source_key_names_env(monkeypatch) -> None:
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY_KEMVXZHCXVYNMOUTWDRH", raising=False)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    try:
+        site_pages.source_project_credentials("kemvxzhcxvynmoutwdrh")
+    except site_pages.SourceKeyError as exc:
+        assert "SUPABASE_SERVICE_KEY_KEMVXZHCXVYNMOUTWDRH" in str(exc)
+    else:
+        raise AssertionError("expected SourceKeyError")
+    out = site_pages.crawl_and_store(
+        table="public.sg_sub_domains",
+        source_project="kemvxzhcxvynmoutwdrh",
+        limit=20,
+    )
+    assert out["ok"] is False
+    assert "SUPABASE_SERVICE_KEY_KEMVXZHCXVYNMOUTWDRH" in out["error"]
+    assert "body_text" not in out
+
+
+def test_fetch_source_rows_pages_and_skips(monkeypatch) -> None:
+    pages = [
+        [
+            {"id": "a1", "domain": "alpha.example"},
+            {"id": "a2", "domain": "beta.example"},
+        ],
+        [
+            {"id": "a3", "domain": "gamma.example"},
+        ],
+    ]
+    calls = {"n": 0}
+
+    def fake_rpc(cfg, fn, args):
+        assert fn == "pp_select_rows"
+        assert args["p_columns"] == ["id", "domain"]
+        assert args["p_limit"] == site_pages.PAGE_SIZE
+        i = args["p_offset"] // site_pages.PAGE_SIZE
+        calls["n"] += 1
+        return pages[i] if i < len(pages) else []
+
+    monkeypatch.setattr(site_pages, "_rpc", fake_rpc)
+    monkeypatch.setattr(site_pages, "PAGE_SIZE", 2)
+    rows = site_pages.fetch_source_rows(
+        {"url": "http://x", "key": "k", "project_id": "p"},
+        table="public.sg_sub_domains",
+        key_column="id",
+        domain_column="domain",
+        already_fn=lambda ds: {"beta.example"} if "beta.example" in ds else set(),
+        limit=2,
+    )
+    assert [r["domain"] for r in rows] == ["alpha.example", "gamma.example"]
+    assert rows[0]["source_id"] == "a1"
+    assert rows[1]["source_id"] == "a3"
+
+
+def test_row_payload_includes_source() -> None:
+    rec = site_pages.parse_page(HOME_HTML, "https://acme-mech.example/")
+    rec.update(
+        {
+            "domain": "acme-mech.example",
+            "url": "https://acme-mech.example/",
+            "page_type": "home",
+            "http_status": 200,
+            "emails": [],
+            "phones": [],
+            "error": None,
+            "source_table": "public.sg_sub_domains",
+            "source_id": "uuid-1",
+        }
+    )
+    payload = site_pages._row_payload(rec)
+    assert payload["source_table"] == "public.sg_sub_domains"
+    assert payload["source_id"] == "uuid-1"
+    assert "<" not in (payload["body_text"] or "")

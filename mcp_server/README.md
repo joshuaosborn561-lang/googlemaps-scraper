@@ -40,7 +40,7 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `probe_maps` | 1 Maps req | Schema check |
 | `run_leads` | **yes** | Full pipeline; `plan_path` optional (uses latest plan) |
 | `scrape_maps` | **yes** | Scrape stage only; no spend approval |
-| `enrich_sites` | no | Website fetch → `public.site_pages` (counts only) |
+| `enrich_sites` | no | Website fetch → `public.site_pages` (Supabase source_table or domains; counts only) |
 | `crawl_team_pages` | no | Backfill team/about crawl on already-fetched sites |
 | `extract_team_contacts` | optional LLM | Person+title → local `contacts` |
 | `classify_leads` | no | No-op; classify in SQL against `site_pages` |

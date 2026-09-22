@@ -16,10 +16,13 @@ CREATE TABLE IF NOT EXISTS public.site_pages (
     emails text[],
     phones text[],
     error text,
+    source_table text,
+    source_id text,
     UNIQUE (domain, url)
 );
 
 CREATE INDEX IF NOT EXISTS site_pages_domain_idx ON public.site_pages (domain);
+CREATE INDEX IF NOT EXISTS site_pages_source_idx ON public.site_pages (source_table, source_id);
 
 CREATE INDEX IF NOT EXISTS site_pages_fts_idx ON public.site_pages
     USING gin (
