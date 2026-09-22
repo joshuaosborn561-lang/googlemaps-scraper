@@ -66,7 +66,7 @@ Do NOT use this for:
 | "what verticals exist?" | `list_categories` |
 | "is the API working?" | `probe_maps` (1 paid Maps request) |
 | "re-run classify only" / tighten ICP | SQL against `public.site_pages` (`classify_leads` is a no-op) |
-| "pull emails from sites" / capture pages | `enrich_sites` (source_table+where or domains; writes `site_pages`) |
+| "pull emails from sites" / capture pages | `enrich_sites` (source_project + source_table, or domains; writes `site_pages`) |
 | "crawl team pages on already-fetched sites" | `crawl_team_pages` then `extract_team_contacts` |
 | "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
 | "Apify website contact crawl" | `estimate_apify_contact_crawl` → `apify_contact_crawl` → `parse_contacts_openai` |

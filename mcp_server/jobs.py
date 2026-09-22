@@ -130,8 +130,10 @@ def _scope_fingerprint(meta: dict[str, Any]) -> str:
         "client_tag",
         "source",
         "source_table",
+        "source_project",
         "schema",
         "where",
+        "key_column",
         "force",
         "project_id",
     ):
