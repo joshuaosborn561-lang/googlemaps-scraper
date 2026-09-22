@@ -5,7 +5,7 @@ Five stages, each resumable and each with its own CLI subcommand:
     zips      build the US ZIP list (offline, no API calls)
     scrape    Maps Data (RapidAPI), one request per (zip, category)
     enrich    pull homepage/about/team/contact text with html2text
-    classify  local Gemma on Ollama confirms the business fits the ICP
+    classify  retired — qualify in SQL against public.site_pages
     owners    local Gemma pulls the owner's name (+ optional web fallback)
     export    write the CSV
 

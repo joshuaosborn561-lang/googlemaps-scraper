@@ -129,6 +129,11 @@ def _scope_fingerprint(meta: dict[str, Any]) -> str:
         "run_id",
         "client_tag",
         "source",
+        "source_table",
+        "schema",
+        "where",
+        "force",
+        "project_id",
     ):
         val = str(meta.get(key) or "").strip()
         if val:

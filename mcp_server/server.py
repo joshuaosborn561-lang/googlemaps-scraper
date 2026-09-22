@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.8.3",
+    version="1.9.0",
 )
 
 
@@ -493,6 +493,8 @@ def health() -> str:
             "supabase_configured": bool(supabase_url and supabase_key),
             "supabase_url": supabase_url or None,
             "supabase_project_ref": project_ref,
+            "supabase_project_ref_source": "SUPABASE_URL" if supabase_url else None,
+            "site_pages_table": "public.site_pages",
             "leads_supabase_project_id": leads_ref,
             "auto_resume": os.environ.get("MCP_AUTO_RESUME", "true").lower()
             not in ("0", "false", "no"),
@@ -1083,8 +1085,8 @@ def _execute_run_leads(
             "rows": 0,
             "message": (
                 f"Maps scrape finished. {len(pending):,} domains still need "
-                "enrich_sites — call that next (then classify_leads / "
-                "find_owners / export_csv). Large enrich is deferred so the "
+                "enrich_sites — call that next (writes site_pages; classify "
+                "in SQL, then find_owners / export_csv). Large enrich is deferred so the "
                 "MCP stays responsive."
             ),
         }
@@ -1096,13 +1098,8 @@ def _execute_run_leads(
         on_progress=lambda **p: _job_progress("enrich", **p),
     )
 
-    _job_progress("classify")
-    classify.run(
-        store,
-        llm,
-        plan.icp,
-        workers=default_workers(llm),
-    )
+    _job_progress("classify_skipped")
+    classify_res = classify.run()
     if plan.require_owner:
         _job_progress("owners")
         backend = make_backend(settings, "") if include_owner_fallback else None
@@ -1131,6 +1128,7 @@ def _execute_run_leads(
         "csv": str(out),
         "plan_path": record.plan_path,
         "scrape": scrape_res,
+        "classify": classify_res,
         "stats": store.stats(),
         "llm_spend": llm.spend_line() if hasattr(llm, "spend_line") else None,
         "resume_note": (
@@ -1574,7 +1572,7 @@ def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
 )
 def enrich_sites(
     limit: int = 0,
-    workers: int = 3,
+    workers: int = 20,
     background: bool = True,
     city: str = "",
     state: str = "",
@@ -1584,18 +1582,22 @@ def enrich_sites(
     run_id: str = "",
     client_tag: str = "",
     source: str = "",
+    source_table: str = "",
+    schema: str = "public",
+    where: str = "",
+    domains: str = "",
+    domain_column: str = "domain",
+    website_column: str = "website",
+    force: bool = False,
+    project_id: str = "",
 ) -> str:
-    """Fetch website text/emails for pending domains (free, no Maps spend).
+    """Fetch websites (free). Writes public.site_pages on SUPABASE_URL.
 
-    Shallow same-domain crawl: homepage + up to 3 about/team pages
-    (/about, /team, /leadership, …). Per-page text is stored with page_type.
+    Preferred: pass source_table + where (reads domain/website) or a comma/
+    newline list of domains. Homepage + up to 4 matching internal pages,
+    max 5 per domain. Counts only — never returns page text.
 
-    Scope with city/state/main_category/plan_path/plan_id/run_id/client_tag/
-    source so one client's rows can be enriched without draining another
-    client's global backlog. Scoped runs jump the queue (priority > backlog).
-
-    On Railway/HTTP this defaults to a background job — poll get_job_status.
-    Unscoped work runs in a subprocess so the MCP HTTP loop stays responsive.
+    Legacy (no table/domains): shallow SQLite crawl of pending local sites.
     """
     _ensure_repo_cwd()
     scope = _normalize_scope(
@@ -1609,16 +1611,35 @@ def enrich_sites(
         source=source,
     )
     scoped = _scope_is_set(scope)
+    capture = bool((source_table or "").strip() or (domains or "").strip())
+    table = (source_table or "").strip()
+    n_workers = max(1, min(int(workers or 20), 20 if capture else 3))
 
-    def _run() -> dict[str, Any]:
-        # Subprocess CLI has no scope filters — run scoped work in-process.
+    def _run_capture() -> dict[str, Any]:
+        from gmscraper import site_pages
+
+        return site_pages.crawl_and_store(
+            domains=domains,
+            schema=schema or "public",
+            table=table,
+            where=where,
+            domain_column=domain_column or "domain",
+            website_column=website_column or "website",
+            project_id=project_id,
+            limit=int(limit or 0),
+            force=bool(force),
+            workers=n_workers,
+            on_progress=lambda **p: _job_progress("site_pages", **p),
+        )
+
+    def _run_legacy() -> dict[str, Any]:
         if _http_mode() and not scoped:
-            return _enrich_sites_via_subprocess(limit, workers)
+            return _enrich_sites_via_subprocess(limit, n_workers)
         from gmscraper import enrich_site
 
         store = _store()
         store.queue_sites()
-        domains = store.pending_sites(
+        pending = store.pending_sites(
             limit=limit or None,
             city=scope["city"],
             state=scope["state"],
@@ -1628,28 +1649,37 @@ def enrich_sites(
             client_tag=scope["client_tag"],
             source=scope["source"],
         )
-        _job_progress("enrich", done=0, total=len(domains), **{
+        _job_progress("enrich", done=0, total=len(pending), **{
             k: v for k, v in scope.items() if v
         })
         res = enrich_site.run(
             store,
-            domains,
-            workers=max(1, min(int(workers or 3), 3)),
+            pending,
+            workers=n_workers,
             on_progress=lambda **p: _job_progress("enrich", **p),
         )
         return {
             "result": res,
             "stats": store.stats(),
-            "domains": len(domains),
+            "domains": len(pending),
             "scope": scope,
         }
+
+    _run = _run_capture if capture else _run_legacy
 
     if _http_mode() and background:
         from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
 
         meta = {
             "limit": limit,
-            "workers": max(1, min(int(workers or 3), 3)),
+            "workers": n_workers,
+            "source_table": table or None,
+            "schema": schema or None,
+            "where": where or None,
+            "domains_chars": len(domains or ""),
+            "force": bool(force),
+            "project_id": project_id or None,
+            "capture": capture,
             **scope,
         }
         before = find_active_by_queue_key(make_queue_key("enrich_sites", meta))
@@ -1657,7 +1687,7 @@ def enrich_sites(
             "enrich_sites",
             _run,
             meta=meta,
-            priority=10 if scoped else 5,
+            priority=10 if (scoped or capture) else 5,
         )
         return _json(
             _started_response(job, attached=before is not None and before.id == job.id)
@@ -2258,111 +2288,28 @@ def classify_leads(
     run_id: str = "",
     client_tag: str = "",
 ) -> str:
-    """LLM-classify businesses against an ICP (LLM cost only; not Maps).
+    """No-op. LLM classification is retired.
 
-    Only businesses with fetched website text are eligible by default. Scope
-    with source/city/state/main_category/plan_path/plan_id/run_id/client_tag,
-    re-run with force=true, and cap with limit. Foreground batches that hit
-    the timeout return has_more=true + remaining instead of a generic error.
-
-    On Railway/HTTP, background=true (default) returns job_id immediately and
-    classifies on the worker — use limit=0 to drain all eligible rows.
-
-    Geography is a free deterministic gate applied BEFORE the LLM. Default
-    require_geo=true — pass center + radius_miles (or center_lat/center_lng).
-    Out-of-radius rows are saved as in_icp=false with reason outside_radius.
-    Pass require_geo=false for ICPs with no geographic constraint.
-    When nothing is eligible, result.reason explains why.
+    Capture pages with enrich_sites (writes public.site_pages), then classify
+    in SQL against title / meta_description / body_text. Signature kept so
+    existing callers do not error.
     """
-    _ensure_repo_cwd()
-    from mcp_server.errors import tool_error_from_exception
+    from gmscraper.classify import REMOVED_MESSAGE, run as classify_run
 
-    scope = _normalize_scope(
-        city=city,
-        state=state,
-        main_category=main_category,
-        plan_path=plan_path,
-        plan_id=plan_id,
-        run_id=run_id,
-        client_tag=client_tag,
-        source=source,
-    )
-
-    def _run() -> dict[str, Any]:
-        from gmscraper import classify
-        from gmscraper.cli import pick_vertical
-        from gmscraper.config import DEFAULT_CATEGORIES
-        from gmscraper.llm import default_workers
-
-        text = icp
-        if not text and vertical:
-            text, _ = pick_vertical(DEFAULT_CATEGORIES, vertical)
-        if not text:
-            raise ValueError("Provide icp text or a known vertical.")
-        store = _store()
-        llm = _llm()
-        res = classify.run(
-            store,
-            llm,
-            text,
-            workers=workers or default_workers(llm),
-            source=scope["source"],
-            force=force,
-            limit=limit or None,
-            include_no_site=include_no_site,
-            center=center or "",
-            radius_miles=float(radius_miles or 0),
-            center_lat=float(center_lat) if center_lat else None,
-            center_lng=float(center_lng) if center_lng else None,
-            require_geo=bool(require_geo),
-            city=scope["city"],
-            state=scope["state"],
-            main_category=scope["main_category"],
-            plan_id=scope["plan_id"],
-            run_id=scope["run_id"],
-            client_tag=scope["client_tag"],
-        )
-        out: dict[str, Any] = {
+    res = classify_run()
+    return _json(
+        {
+            "ok": True,
+            "removed": True,
+            "message": REMOVED_MESSAGE,
             "result": res,
-            "stats": store.stats(),
-            "llm_spend": llm.spend_line(),
-            "scope": scope,
-            "has_more": bool(res.get("has_more")),
-            "remaining": res.get("remaining"),
-            "total_eligible": res.get("total_eligible"),
+            "reason": REMOVED_MESSAGE,
+            "next_step": (
+                "Call enrich_sites(source_table=…, where=… or domains=…) "
+                "then qualify in SQL against public.site_pages."
+            ),
         }
-        if res.get("reason"):
-            out["reason"] = res["reason"]
-        return out
-
-    try:
-        if background and _http_mode():
-            from mcp_server.jobs import find_active_by_queue_key, make_queue_key, start_job
-
-            meta = {
-                "icp": (icp or vertical or "")[:200],
-                "vertical": vertical,
-                "force": force,
-                "limit": limit,
-                "include_no_site": include_no_site,
-                "center": center,
-                "radius_miles": radius_miles,
-                "center_lat": center_lat,
-                "center_lng": center_lng,
-                "require_geo": require_geo,
-                "workers": workers,
-                **scope,
-            }
-            before = find_active_by_queue_key(make_queue_key("classify_leads", meta))
-            job = start_job("classify_leads", _run, meta=meta, priority=10)
-            return _json(
-                _started_response(
-                    job, attached=before is not None and before.id == job.id
-                )
-            )
-        return _json(_run())
-    except Exception as exc:  # noqa: BLE001
-        return _json(tool_error_from_exception(exc))
+    )
 
 
 @mcp.tool(
@@ -3423,58 +3370,8 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
                 )
                 resumed.append(job.id)
             elif kind == "classify_leads":
-                m = dict(meta)
-
-                def _classify(mm=m) -> dict[str, Any]:
-                    from gmscraper import classify
-                    from gmscraper.llm import default_workers
-
-                    store = _store()
-                    llm = _llm()
-                    text = (mm.get("icp") or "").strip()
-                    if not text:
-                        raise ValueError("classify_leads resume missing icp")
-                    res = classify.run(
-                        store,
-                        llm,
-                        text,
-                        workers=int(mm.get("workers") or 0) or default_workers(llm),
-                        source=str(mm.get("source") or ""),
-                        force=bool(mm.get("force")),
-                        limit=int(mm.get("limit") or 0) or None,
-                        include_no_site=bool(mm.get("include_no_site")),
-                        center=str(mm.get("center") or ""),
-                        radius_miles=float(mm.get("radius_miles") or 0),
-                        center_lat=float(mm["center_lat"])
-                        if mm.get("center_lat")
-                        else None,
-                        center_lng=float(mm["center_lng"])
-                        if mm.get("center_lng")
-                        else None,
-                        require_geo=bool(mm.get("require_geo", True)),
-                        city=str(mm.get("city") or ""),
-                        state=str(mm.get("state") or ""),
-                        main_category=str(mm.get("main_category") or ""),
-                        plan_id=str(mm.get("plan_id") or ""),
-                        run_id=str(mm.get("run_id") or ""),
-                        client_tag=str(mm.get("client_tag") or ""),
-                    )
-                    return {
-                        "result": res,
-                        "stats": store.stats(),
-                        "llm_spend": llm.spend_line(),
-                        "has_more": bool(res.get("has_more")),
-                        "remaining": res.get("remaining"),
-                    }
-
-                job = start_job(
-                    "classify_leads",
-                    _classify,
-                    meta={**meta, "auto_resumed_from": rec.get("id")},
-                    queue_key=make_queue_key("classify_leads", meta),
-                    priority=int(meta.get("priority") or 10),
-                )
-                resumed.append(job.id)
+                # LLM classify is retired — do not resume a leftover classify job.
+                continue
             elif kind == "resolve_places" and meta.get("table"):
                 from gmscraper import resolve_places as rp
 

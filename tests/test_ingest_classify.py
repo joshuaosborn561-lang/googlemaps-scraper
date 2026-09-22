@@ -141,16 +141,13 @@ def test_classify_source_and_force(tmp_path: Path) -> None:
         def json_chat(self, *a, **k):
             return {"in_icp": True, "confidence": 0.8, "reason": "gc"}
 
-    # Without force, source=shovels has nothing pending.
     res = classify.run(store, Dummy(), "commercial GC", source="shovels")
     assert res["done"] == 0
-    assert "already" in res["reason"] or "verdicts" in res["reason"]
-
-    # force re-classifies only shovels.
+    assert "site_pages" in res["message"]
     res2 = classify.run(
         store, Dummy(), "commercial GC", source="shovels", force=True, limit=10
     )
-    assert res2["done"] == 1
+    assert res2["removed"] is True
 
     # maps row still unclassified until scoped to maps/all.
     pending_maps = store.conn.execute(

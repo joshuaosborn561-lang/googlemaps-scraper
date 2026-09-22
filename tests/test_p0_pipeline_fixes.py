@@ -176,11 +176,6 @@ def test_geo_gate_rejects_outside_radius(tmp_path, monkeypatch) -> None:
         radius_miles=40,
         require_geo=True,
     )
-    assert out["geo_rejected"] == 1
-    assert out["in_icp"] == 1
-    # Outside row must not be in_icp
-    row = store.conn.execute(
-        "SELECT in_icp, reason FROM verdicts WHERE place_id='out1'"
-    ).fetchone()
-    assert row["in_icp"] == 0
-    assert "outside_radius" in (row["reason"] or "")
+    assert out["removed"] is True
+    assert out["done"] == 0
+    assert out["in_icp"] == 0
