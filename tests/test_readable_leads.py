@@ -75,8 +75,7 @@ def test_classify_empty_reason(tmp_path: Path) -> None:
 
     res = classify.run(store, DummyLLM(), "commercial general contractors")
     assert res["done"] == 0
-    assert "nothing eligible" in res["reason"]
-    assert "already" in res["reason"] or "no site text" in res["reason"]
+    assert "site_pages" in res["message"]
 
 
 def test_iter_leads_columns(tmp_path: Path) -> None:

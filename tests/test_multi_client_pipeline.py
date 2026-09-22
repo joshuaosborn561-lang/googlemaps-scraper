@@ -227,10 +227,8 @@ def test_classify_has_more(tmp_path: Path, monkeypatch) -> None:
         require_geo=False,
         state="TX",
     )
-    assert out["total_eligible"] == 5
-    assert out["processed"] == 2
-    assert out["remaining"] == 3
-    assert out["has_more"] is True
+    assert out["removed"] is True
+    assert "site_pages" in out["message"]
 
 
 def test_make_queue_key_includes_scope() -> None:

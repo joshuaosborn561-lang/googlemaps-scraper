@@ -8,8 +8,8 @@ A US local-business lead generator. The user describes who they want
 (e.g. "HVAC companies in Ohio with owner names and emails") and this MCP
 turns that into a downloadable CSV of businesses from Google Maps.
 
-Pipeline: plan → scrape Google Maps → enrich websites/emails → classify ICP fit
-→ find owners → export CSV.
+Pipeline: plan → scrape Google Maps → enrich websites into site_pages →
+qualify ICP in SQL → find owners → export CSV.
 
 No login/auth and no spend-approval gate. The connector is open — just run tools.
 Claude tool annotations mark estimates read-only and writes non-destructive so
@@ -65,8 +65,8 @@ Do NOT use this for:
 | "how much would X cost?" | `plan_leads` or `estimate_cost` (stop before run) |
 | "what verticals exist?" | `list_categories` |
 | "is the API working?" | `probe_maps` (1 paid Maps request) |
-| "re-run classify only" / tighten ICP | `classify_leads` (no re-scrape) |
-| "pull emails from sites" | `enrich_sites` (homepage + up to 3 about/team pages) |
+| "re-run classify only" / tighten ICP | SQL against `public.site_pages` (`classify_leads` is a no-op) |
+| "pull emails from sites" / capture pages | `enrich_sites` (source_table+where or domains; writes `site_pages`) |
 | "crawl team pages on already-fetched sites" | `crawl_team_pages` then `extract_team_contacts` |
 | "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
 | "Apify website contact crawl" | `estimate_apify_contact_crawl` → `apify_contact_crawl` → `parse_contacts_openai` |
@@ -83,7 +83,7 @@ Do NOT use this for:
 | "put results in Supabase / SQL" | `sync_to_supabase(client_tag=…)` (counts only; dataset='contacts' for people) |
 | "load Shovels / external CSV rows" | `ingest_external_leads` (set source_tag; counts only) |
 | "these rows have no website" | `estimate_resolve_domains` → `resolve_domains` → `enrich_sites` |
-| "classify only shovels / re-run" | `classify_leads(source=…, force=…, limit=…)` |
+| "classify only shovels / re-run" | qualify in SQL on `site_pages` after `enrich_sites` |
 | "job status?" | `get_job_status` (live counters + ETA) / `list_job_queue` |
 | "history on the website?" | `list_remote_jobs` / `download_remote_csv` |
 | config check | `health` |
@@ -93,7 +93,7 @@ Do NOT use this for:
 - Prefer state-level pilots for a new vertical before offering nationwide.
 - Never ask the user for spend approval.
 - Do not re-scrape to fix field mapping; use `renormalize` after alias fixes.
-- Maps scrape costs money; enrich/classify/export (without Apify fallback) do not.
+- Maps scrape costs money; enrich/export (without Apify fallback) do not. Classify is SQL on site_pages.
 - Be decisive. User wants the CSV, not a menu of options.
 """.strip()
 

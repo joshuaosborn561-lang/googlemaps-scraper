@@ -201,22 +201,8 @@ def cmd_enrich(args) -> None:
 
 
 def cmd_classify(args) -> None:
-    icp, _ = resolve_categories(args)
-    if not icp:
-        raise SystemExit("No ICP text. Pass --icp or use a --vertical that defines one.")
-    store = make_store(args)
-    llm = make_ollama(args)
-    res = classify.run(
-        store, llm, icp,
-        workers=_workers(args, llm),
-        limit=args.limit,
-        include_no_site=args.include_no_site,
-        min_confidence=args.min_confidence,
-        max_evidence_chars=args.evidence_chars or None,
-    )
-    print(f"classified={res['done']:,} in-ICP={res['in_icp']:,} errors={res['errors']:,}")
-    if llm.spend_line():
-        print(llm.spend_line())
+    res = classify.run()
+    print(res.get("message") or res.get("reason"))
 
 
 def cmd_owners(args) -> None:
@@ -313,9 +299,8 @@ def cmd_run(args) -> None:
                     respect_robots=not args.ignore_robots)
 
     print("\n[3/5] qualifying against the ICP")
-    classify.run(store, ollama, plan.icp,
-                 workers=args.llm_workers or default_workers(ollama),
-                 min_confidence=args.min_confidence)
+    cres = classify.run()
+    print(cres.get("message") or "LLM classification removed, classify in SQL against site_pages")
 
     if plan.require_owner or args.owners:
         print("\n[4/5] finding owner names")
@@ -508,7 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--ignore-robots", action="store_true")
     sp.set_defaults(func=cmd_enrich)
 
-    sp = sub.add_parser("classify", help="local LLM confirms the ICP fit")
+    sp = sub.add_parser("classify", help="retired — qualify in SQL against site_pages")
     add_cat_args(sp, need_icp=True)
     add_llm_args(sp)
     sp.add_argument("--workers", type=int, default=0,

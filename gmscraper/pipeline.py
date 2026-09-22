@@ -212,6 +212,18 @@ def run(
                 )
             else:
                 enrich_res = {"fetched": 0, "skipped": len(domains)}
+            from . import site_pages
+
+            try:
+                capture = site_pages.crawl_and_store(
+                    domains=domains,
+                    project_id=project_id,
+                    force=False,
+                    workers=max(1, min(int(workers or 20), 20)),
+                    on_progress=lambda **p: _tick("site_pages", **p),
+                )
+            except Exception as exc:  # noqa: BLE001
+                capture = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             # Always try team/about backfill for these domains.
             team_res = enrich_site.crawl_team_pages(
                 store, domains=domains, workers=max(1, min(int(workers or 8), 3)), force=False
@@ -220,6 +232,19 @@ def run(
                 "domains": len(domains),
                 "site_fetch": enrich_res,
                 "team_crawl": team_res,
+                "site_pages": {
+                    k: capture.get(k)
+                    for k in (
+                        "ok",
+                        "domains_attempted",
+                        "domains_skipped_fresh",
+                        "pages_stored",
+                        "errors_by_type",
+                        "supabase_project_ref",
+                        "error",
+                    )
+                    if k in capture
+                },
                 "cost_usd": 0.0,
             }
         stages_done += 1
