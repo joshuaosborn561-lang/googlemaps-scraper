@@ -423,6 +423,29 @@ def _classify_transport_error(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _http_get(session: requests.Session, url: str) -> tuple[str, int, str]:
+    """GET a page without stream=True so the full HTML is read."""
+    r = session.get(
+        url,
+        timeout=TIMEOUT,
+        allow_redirects=True,
+        headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
+    )
+    try:
+        status = int(r.status_code)
+        final = _canon_url(str(r.url or url))
+        raw = r.content or b""
+        if len(raw) > MAX_BYTES:
+            raw = raw[:MAX_BYTES]
+        html = raw.decode(r.encoding or "utf-8", errors="replace")
+        return html, status, final
+    finally:
+        try:
+            r.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def fetch_one(
     session: requests.Session,
     url: str,
@@ -446,27 +469,18 @@ def fetch_one(
         return row
     html = ""
     try:
-        r = session.get(
-            url,
-            timeout=TIMEOUT,
-            allow_redirects=True,
-            stream=True,
-            headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
-        )
-        row["http_status"] = int(r.status_code)
-        row["url"] = _canon_url(str(r.url or url))
-        if r.status_code == 403:
+        html, row["http_status"], row["url"] = _http_get(session, url)
+        if row["http_status"] == 403:
             row["error"] = "403"
-        raw = r.raw.read(MAX_BYTES, decode_content=True) or b""
-        html = raw.decode(r.encoding or "utf-8", errors="replace")
+        # Some hosts answer the first GET (often after robots.txt) with
+        # 202 / empty HTML, then serve the real page on retry.
+        if (row["http_status"] or 0) < 400 and not (html or "").strip():
+            html, row["http_status"], row["url"] = _http_get(session, url)
+            if row["http_status"] == 403:
+                row["error"] = "403"
     except Exception as exc:  # noqa: BLE001
         row["error"] = row["error"] or _classify_transport_error(exc)
         return row
-    finally:
-        try:
-            r.close()  # type: ignore[possibly-undefined]
-        except Exception:  # noqa: BLE001
-            pass
 
     parsed = parse_page(html, row["url"])
     row.update(parsed)
@@ -525,6 +539,9 @@ def crawl_domain(domain: str, robots: RobotsCache | None = None) -> list[dict[st
                     continue
                 if rec.get("body_text") or rec.get("error") in ("403", "parked", "robots"):
                     break
+                # Empty 2xx (WAF / 202 handshake) — try the other scheme.
+                if scheme == "https" and not rec.get("body_text"):
+                    continue
                 if rec.get("http_status"):
                     break
         if home is None:
