@@ -41,6 +41,54 @@ def test_classify_is_noop() -> None:
     assert REMOVED_MESSAGE in out["message"]
 
 
+def test_never_stores_meta_as_body() -> None:
+    meta = "Trusted local HVAC for homes and businesses in Dallas."
+    html = f"""
+    <html><head>
+      <title>{meta}</title>
+      <meta name="description" content="{meta}">
+    </head><body><nav><span>menu</span></body></html>
+    """
+    rec = site_pages.parse_page(html, "https://acme-mech.example/")
+    assert rec["meta_description"] == meta
+    assert rec["body_text"] != meta
+
+
+def test_long_body_not_truncated_near_120() -> None:
+    paragraph = "Commercial HVAC for multifamily property owners. " * 80
+    html = f"<html><body><main><p>{paragraph}</p></main></body></html>"
+    rec = site_pages.parse_page(html, "https://acme-mech.example/")
+    body = rec["body_text"] or ""
+    assert len(body) > 1000
+    assert len(body) == len(body[: site_pages.MAX_BODY])
+    assert site_pages.MAX_BODY == 60_000
+
+
+def test_body_is_not_meta_and_survives_unclosed_nav() -> None:
+    meta = "Short meta about the firm for search engines."
+    paragraph = "Commercial HVAC for multifamily property owners. " * 40
+    html = f"""
+    <html><head>
+      <title>Acme Mechanical</title>
+      <meta name="description" content="{meta}">
+    </head>
+    <body>
+      <nav><a href="/">Home</a>
+      <main>
+        <h1>Commercial HVAC</h1>
+        <p>{paragraph}</p>
+      </main>
+    </body></html>
+    """
+    rec = site_pages.parse_page(html, "https://acme-mech.example/")
+    body = rec["body_text"] or ""
+    assert rec["meta_description"] == meta
+    assert body != meta
+    assert len(body) > 400
+    assert "Commercial HVAC" in body
+    assert "multifamily" in body
+
+
 def test_parse_page_strips_chrome_and_html() -> None:
     rec = site_pages.parse_page(HOME_HTML, "https://acme-mech.example/")
     assert rec["title"] == "Acme Mechanical"
