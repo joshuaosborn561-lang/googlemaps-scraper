@@ -1,0 +1,192 @@
+# PROPOSED category additions — not applied.
+# Review, strike junk, then copy approved lines into config/categories.yml
+# (or into a client plan). Nothing in this file is live.
+#
+# There is no category_synonyms table. Taxonomy lives in this YAML file
+# plus per-brief LLM expansion in gmscraper/brief.py. Live ICPs
+# (basco / peterson / commercial GC) never wrote their plan back here.
+#
+# Counts below are from master.businesses + client leads as of 2026-08-23.
+# "types_n" = businesses that carry the string in Maps `types`.
+# A type we already have is an accidental find, not a missed business —
+# searching it later finds shops that ONLY file under that string.
+
+status: proposed
+applied: false
+source: stored Maps types vs config/categories.yml and live source_category
+
+# ---------------------------------------------------------------------------
+# What is actually in config/categories.yml today
+# ---------------------------------------------------------------------------
+yaml_inventory:
+  funeral:        {n: 12, thin: false}
+  hvac:           {n: 14, thin: false}
+  gyms:           {n: 15, thin: false}
+  home_services:  {n: 21, thin: false, note: "kitchen-sink of trades, not a roofing ICP"}
+  dental:         {n: 12, thin: false}
+  restaurants:    {n: 22, thin: false}
+  auto:           {n: 14, thin: false, note: "generic repair, not brand dealers"}
+  med_spa:        {n: 11, thin: false}
+  legal:          {n: 12, thin: false}
+  veterinary:     {n: 8,  thin: false}
+
+# Live ICPs are the thin ones. They live in scrape jobs, not this file.
+live_icp_searched:
+  peterson_pm:
+    n: 2
+    terms: [property manager, property managers]
+    thin: true
+  basco_dealers:
+    n: 22
+    note: "brand dealers only; no Toyota/Lexus/BMW/Mercedes as search terms"
+    thin: false
+  commercial_gc:
+    n: 17
+    note: "public.maps_leads source_category list"
+    thin: false
+
+# ---------------------------------------------------------------------------
+# Proposed additions (approve / reject per line)
+# ---------------------------------------------------------------------------
+proposed:
+
+  # Peterson — commercial roofing via property managers.
+  # Searched 2 colloquial strings. 46 distinct main_categories came back.
+  # 64% of rows are "Property management company"; the rest leaked in.
+  # Searching the leaky categories finds firms that NEVER match
+  # "property manager". Apartment complex / real estate agent are
+  # properties or agents, not managers — left out on purpose.
+  peterson_property_managers:
+    estimate_miss_pct: "15-30"
+    estimate_note: >
+      Estimate. Maps already spills adjacent types into a "property manager"
+      query, so the miss is firms that ONLY file as HOA / apartment rental /
+      commercial RE / property maintenance. Not the 36% of current rows
+      that have a non-PM main_category — those were already found.
+    add:
+      - {category: property management company, types_n: 2934, why: "actual Maps category string; we searched the colloquial query only"}
+      - {category: apartment rental agency, types_n: 228, why: "third-party managers file here"}
+      - {category: property maintenance, types_n: 84, why: "same buyer, different self-file"}
+      - {category: homeowners' association, types_n: 24, why: "controls roofs; rarely tagged PM"}
+      - {category: housing association, types_n: 10, why: "same as HOA"}
+      - {category: property administration service, types_n: 10, why: "seen on PM results, never searched"}
+      - {category: condominium rental agency, types_n: 36, why: "condo management slice"}
+      - {category: office space rental agency, types_n: 42, why: "commercial PM slice"}
+      - {category: commercial real estate agency, types_n: 214, why: "some are true PMs; expect junk — classify will drop brokers"}
+      - {category: real estate rental agency, types_n: 248, why: "same; classify required"}
+      - {category: industrial real estate agency, types_n: 16, why: "industrial PM slice"}
+    do_not_add:
+      - {category: apartment complex, why: "the property, not the manager"}
+      - {category: apartment building, why: "the property, not the manager"}
+      - {category: real estate agent, why: "individual agents, not the ICP"}
+      - {category: vacation home rental agency, why: "wrong buyer"}
+
+  # HVAC YAML is 14 deep — not thin. Gap is GC-only shops and a few
+  # exact-string misses. We never ran HVAC as a live vertical at scale
+  # (214 HVAC main_category rows, all side-effect of other pulls).
+  hvac:
+    estimate_miss_pct: "20-40"
+    estimate_note: >
+      Estimate. 517 businesses in store carry an HVAC synonym type;
+      71 (14%) also carry general contractor / construction company.
+      Dual-tagged shops are found either way. The miss is HVAC shops
+      that ONLY file as GC. We cannot count those without searching GC
+      and classifying. 20-40% assumes a meaningful GC-only slice;
+      14% dual-tag is a floor on overlap, not the miss rate.
+    already_in_yaml_and_seen:
+      - hvac contractor                    # types_n 380
+      - heating contractor                 # 187
+      - air conditioning contractor        # 237
+      - air conditioning repair service    # 188
+      - furnace repair service             # 117
+      - heating equipment supplier         # 49
+      - air conditioning system supplier   # 58
+      - air duct cleaning service          # 122
+      - boiler supplier                    # 4
+    in_yaml_never_seen_in_store:
+      - ventilating equipment manufacturer
+      - refrigeration service
+      - heat pump supplier
+      - duct cleaning service              # we see "air duct cleaning service" instead
+      - hvac repair service
+    add:
+      - {category: mechanical contractor, why: "showed up on commercial-GC results; common HVAC self-file"}
+      - {category: air conditioning store, types_n: 17, why: "small; some are contractors"}
+    do_not_add:
+      - {category: general contractor, why: "too broad; search it only for a GC ICP, then classify"}
+      - {category: construction company, why: "same"}
+      - {category: auto air conditioning service, types_n: 181, why: "cars, not buildings"}
+      - {category: heating equipment supplier, why: "already in YAML; ICP excludes suppliers anyway"}
+
+  # Roofing sits inside home_services YAML (21 cats) but a dedicated
+  # roofing ICP would still miss restoration / gutter / waterproofing.
+  # 51% of roofing-typed businesses also carry a GC type (806/1586).
+  roofing:
+    estimate_miss_pct: "20-35"
+    estimate_note: >
+      Estimate. 426 businesses carry siding / gutter / restoration
+      types WITHOUT "roofing contractor". Those are the shops a
+      roofing-only search never asks for. Dual-tag with GC is 51%,
+      so a GC search finds a lot of roofers as a side effect — and
+      also a lot of junk.
+    add:
+      - {category: gutter service, types_n: 116, why: "YAML has gutter cleaning service only (90)"}
+      - {category: water damage restoration service, types_n: 370, why: "storm/roof work files here"}
+      - {category: fire damage restoration service, types_n: 245, why: "same restoration cluster"}
+      - {category: building restoration service, types_n: 258, why: "same"}
+      - {category: waterproofing service, types_n: 106, why: "roof/envelope adjacent"}
+    do_not_add:
+      - {category: roofing supply store, types_n: 86, why: "supplier; ICP exclude"}
+      - {category: storm damage restoration, why: "never appeared as a Maps string in 41k rows — do not invent it"}
+      - {category: roofer, why: "never appeared as an exact Maps category"}
+
+  # Commercial GC (maps_leads searched 17 contractor variants).
+  commercial_gc:
+    estimate_miss_pct: "5-15"
+    estimate_note: >
+      Estimate. List is already 17 deep. These are unsearched types
+      that showed up on the 604-row commercial pull.
+    add:
+      - {category: interior construction contractor, types_n: 18}
+      - {category: building firm, types_n: 8}
+      - {category: metal construction company, types_n: 10}
+      - {category: mechanical contractor, types_n: 1}
+      - {category: masonry contractor, types_n: 5}
+      - {category: demolition contractor, types_n: 6}
+
+  # Basco — brand dealers. 22 brands searched. Dual-franchise lots
+  # leaked Toyota/BMW/etc. as main_category. Searching those brands
+  # finds standalone lots that are not dualled with a searched brand.
+  basco_dealers:
+    estimate_miss_pct: "10-20"
+    estimate_note: >
+      Estimate for unsearched import/luxury brands only. 41 Toyota
+      dealers already leaked in via another brand. The miss is
+      Toyota-only (etc.) rooftops.
+    add:
+      - toyota dealer          # 41 accidental main_category
+      - lexus dealer           # 15
+      - mercedes-benz dealer   # 18
+      - bmw dealer             # 13
+      - land rover dealer      # 13
+      - volvo dealer           # 12
+      - porsche dealer         # 8
+      - jaguar dealer          # 5
+      - mini dealer            # 4
+      - alfa romeo dealer      # 4
+      - fiat dealer            # 5
+    do_not_add:
+      - {category: used car dealer, why: "already the #2 main_category; not a franchise brand"}
+      - {category: auto repair shop, why: "out of ICP; 506 leaked into Basco and classify should drop them"}
+
+# YAML verticals we have almost no stored rows for (never the live ICP).
+# Lists look filled (8-22). Do not treat them as thin. A 3-metro probe
+# would be the paid next step if you want to validate funeral/dental/etc.
+unvalidated_yaml_verticals:
+  funeral: 0
+  gyms: 21
+  dental: 8
+  restaurants: 19
+  med_spa: 9
+  legal: 6
+  veterinary: 5
