@@ -1,16 +1,18 @@
 """Email / DM enrichment waterfall.
 
-Order (fixed): apify(+OpenAI discovery) → AI Ark → getleads → LeadMagic → FullEnrich.
+Order (fixed): apify(+OpenAI discovery) → AI Ark → getleads → FullEnrich.
 
 - Apify is a discovery tier for domains with no known person (before paid lookups).
 - AI Ark is people discovery only (never email-to-profile reverse lookup) — tier 2.
 - FullEnrich is email-only and runs only when max_tier allows it (default does not).
+- LeadMagic was dropped Oct 8 2026. Legacy names are no-ops (map to getleads).
 - Results write to Supabase gc.companies / gc.contacts (not MCP response body).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Literal
 
 from . import apify_contacts, gc_sync
@@ -20,21 +22,48 @@ from .vendors.ai_ark import AiArkClient
 from .vendors.base import EmailHit, PersonHit, split_name
 from .vendors.fullenrich import FullEnrichClient
 from .vendors.getleads import GetLeadsClient
-from .vendors.leadmagic import LeadMagicClient
+
+log = logging.getLogger("gmscraper.waterfall")
 
 Need = Literal["email", "dm", "both"]
-MaxTier = Literal["apify", "aiark", "getleads", "leadmagic", "fullenrich"]
+MaxTier = Literal["apify", "aiark", "getleads", "fullenrich"]
 
-# Discovery first, AI Ark second, then paid person/email vendors. FullEnrich last.
+# Discovery first, AI Ark second, then getleads. FullEnrich last (opt-in).
 TIER_ORDER: list[str] = [
     "apify",
     "aiark",
     "getleads",
-    "leadmagic",
     "fullenrich",
 ]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
-DEFAULT_MAX_TIER: MaxTier = "leadmagic"
+DEFAULT_MAX_TIER: MaxTier = "getleads"
+
+TIER_ALIASES: dict[str, str] = {
+    "ai_ark": "aiark",
+    "ai-ark": "aiark",
+    "full_enrich": "fullenrich",
+    "full-enrich": "fullenrich",
+    "fe": "fullenrich",
+    "get_leads": "getleads",
+}
+
+# Retired LeadMagic names. max_tier maps to the old stop-before-FullEnrich
+# ceiling (getleads). No replacement vendor.
+LEGACY_TIER_NAMES: frozenset[str] = frozenset(
+    {
+        "leadmagic",
+        "lm",
+        "lead_magic",
+        "lead-magic",
+        "leadmagic_employee",
+        "leadmagic_role",
+        "leadmagic_search_free",
+        "employee_finder",
+        "lm_employee",
+        "lm_role",
+    }
+)
+LEGACY_MAX_TIER_CEILING = "getleads"
 
 DM_TITLE_HINTS = (
     "owner", "founder", "principal", "president", "ceo", "partner",
@@ -42,22 +71,46 @@ DM_TITLE_HINTS = (
 )
 
 
+def _canon_tier_name(raw: str) -> str:
+    return (raw or "").strip().lower().replace(" ", "_")
+
+
+def is_legacy_tier(name: str) -> bool:
+    return _canon_tier_name(name) in LEGACY_TIER_NAMES
+
+
+def _legacy_max_tier_warning(raw: str, ceiling: str) -> str:
+    return (
+        f"deprecated max_tier={raw!r} is a retired LeadMagic name; "
+        f"treated as max_tier={ceiling!r} (old stop-before-FullEnrich ceiling)"
+    )
+
+
 def normalize_max_tier(max_tier: str | None) -> str:
-    t = (max_tier or DEFAULT_MAX_TIER).strip().lower()
-    aliases = {
-        "ai_ark": "aiark",
-        "ai-ark": "aiark",
-        "full_enrich": "fullenrich",
-        "full-enrich": "fullenrich",
-        "get_leads": "getleads",
-        "lead_magic": "leadmagic",
-    }
-    t = aliases.get(t, t)
+    raw = max_tier if max_tier not in (None, "") else DEFAULT_MAX_TIER
+    t = _canon_tier_name(str(raw))
+    if is_legacy_tier(t):
+        return LEGACY_MAX_TIER_CEILING
+    t = TIER_ALIASES.get(t, t)
     if t not in TIER_RANK:
         raise ValueError(
             f"max_tier must be one of {', '.join(TIER_ORDER)}; got {max_tier!r}"
         )
     return t
+
+
+def resolve_max_tier(max_tier: str | None) -> tuple[str, str | None, list[str]]:
+    """Return (canonical, deprecated_input_or_None, warnings)."""
+    raw = max_tier if max_tier not in (None, "") else DEFAULT_MAX_TIER
+    t = _canon_tier_name(str(raw))
+    warnings: list[str] = []
+    if is_legacy_tier(t):
+        warnings.append(
+            _legacy_max_tier_warning(str(raw).strip(), LEGACY_MAX_TIER_CEILING)
+        )
+        log.warning("%s", warnings[-1])
+        return LEGACY_MAX_TIER_CEILING, t, warnings
+    return normalize_max_tier(max_tier), None, warnings
 
 
 def tier_allowed(tier: str, max_tier: str) -> bool:
@@ -143,14 +196,12 @@ class Waterfall:
         *,
         getleads: GetLeadsClient | None = None,
         ai_ark: AiArkClient | None = None,
-        leadmagic: LeadMagicClient | None = None,
         fullenrich: FullEnrichClient | None = None,
         store: Store | None = None,
         max_tier: str = DEFAULT_MAX_TIER,
     ):
         self.getleads = getleads or GetLeadsClient()
         self.ai_ark = ai_ark or AiArkClient()
-        self.leadmagic = leadmagic or LeadMagicClient()
         self.fullenrich = fullenrich or FullEnrichClient()
         self.store = store
         self.max_tier = normalize_max_tier(max_tier)
@@ -158,7 +209,6 @@ class Waterfall:
             "apify": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
             "getleads": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
             "ai_ark": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
-            "leadmagic": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
             "fullenrich": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
             "team_page": {"calls": 0, "email_hits": 0, "dm_hits": 0, "skips": []},
         }
@@ -187,7 +237,7 @@ class Waterfall:
         return tier_allowed(tier, self.max_tier)
 
     def resolve_email(self, row: dict[str, Any]) -> EmailHit | None:
-        """getleads → LeadMagic → FullEnrich (respecting max_tier)."""
+        """getleads → FullEnrich (respecting max_tier). LeadMagic is retired."""
         first, last, domain = row["first_name"], row["last_name"], row["domain"]
         if row.get("email"):
             return EmailHit(email=row["email"], source_tier="input", status="provided")
@@ -201,13 +251,6 @@ class Waterfall:
                 self._bump("getleads", "email_hits")
                 return hit
 
-        if self.leadmagic.enabled and self._allowed("leadmagic"):
-            self._bump("leadmagic", "calls")
-            hit = self.leadmagic.find_email(first, last, domain, row.get("company_name") or "")
-            if hit:
-                self._bump("leadmagic", "email_hits")
-                return hit
-
         if self.fullenrich.enabled and self._allowed("fullenrich"):
             self._bump("fullenrich", "calls")
             hit = self.fullenrich.find_email(first, last, domain, row.get("company_name") or "")
@@ -217,7 +260,7 @@ class Waterfall:
         return None
 
     def resolve_dm(self, row: dict[str, Any]) -> PersonHit | None:
-        """Discover a decision-maker: local → apify → AI Ark → getleads → LeadMagic."""
+        """Discover a decision-maker: local → apify → AI Ark → getleads."""
         domain = row["domain"]
         if not domain:
             return None
@@ -280,18 +323,6 @@ class Waterfall:
                     if apify_contacts._looks_like_person(p.first_name, p.last_name):
                         self._bump("getleads", "dm_hits")
                         return p
-
-        if not self._allowed("leadmagic"):
-            self._skip("leadmagic", "max_tier_excludes_leadmagic")
-        elif not self.leadmagic.enabled:
-            self._skip("leadmagic", "vendor_disabled_or_missing_key")
-        else:
-            self._bump("leadmagic", "calls")
-            people = self.leadmagic.find_people(domain, row.get("company_name") or "")
-            for p in people:
-                if apify_contacts._looks_like_person(p.first_name, p.last_name):
-                    self._bump("leadmagic", "dm_hits")
-                    return p
         return None
 
     def discover_apify(self, domains: list[str]) -> dict[str, Any]:
@@ -390,15 +421,16 @@ def enrich_waterfall(
 ) -> dict[str, Any]:
     """Walk tiers per row; upsert companies/contacts to Supabase; return counts only.
 
-    max_tier (default leadmagic) hard-stops the walk so FullEnrich never fires
+    max_tier (default getleads) hard-stops the walk so FullEnrich never fires
     unless explicitly requested. Pass client_tag so writes go to
     client_<slug>.contacts / .companies instead of the shared gc.* schema.
+    Legacy LeadMagic names are accepted as no-ops (ceiling = getleads).
     """
-    max_tier_n = normalize_max_tier(max_tier)
+    max_tier_n, deprecated_max_tier, tier_warnings = resolve_max_tier(max_tier)
     parsed = [_norm_row(r) for r in _parse_rows(rows)]
     parsed = [r for r in parsed if r.get("domain")]
     if not parsed:
-        return {
+        empty: dict[str, Any] = {
             "rows_in": 0,
             "companies_upserted": 0,
             "contacts_written": 0,
@@ -407,7 +439,11 @@ def enrich_waterfall(
             "tier_stats": {},
             "need": need,
             "max_tier": max_tier_n,
+            "warnings": list(tier_warnings),
         }
+        if deprecated_max_tier:
+            empty["deprecated_max_tier"] = deprecated_max_tier
+        return empty
 
     def _tick(**extra: Any) -> None:
         if on_progress is None:
@@ -466,7 +502,7 @@ def enrich_waterfall(
             and apify_contacts._looks_like_person(row["first_name"], row["last_name"])
         )
 
-        # People discovery (AI Ark / getleads / LeadMagic find_people) whenever
+        # People discovery (AI Ark / getleads find_people) whenever
         # we need a DM, or need an email but have no usable name yet.
         need_people = need in ("dm", "both") or (
             need == "email" and not has_person_name and not email
@@ -491,7 +527,7 @@ def enrich_waterfall(
             wf._skip("ai_ark", "need=email_with_names; ai_ark_is_people_discovery_only")
 
         if need in ("email", "both") and not email:
-            # Inline getleads + leadmagic; defer fullenrich to bulk when allowed.
+            # Inline getleads; defer fullenrich to bulk when allowed.
             first, last, domain = row["first_name"], row["last_name"], row["domain"]
             if first and last and domain:
                 if wf.getleads.enabled and wf._allowed("getleads"):
@@ -507,19 +543,6 @@ def enrich_waterfall(
                 elif not wf.getleads.enabled:
                     wf._skip("getleads", "vendor_disabled_or_missing_key")
 
-                if not email and wf.leadmagic.enabled and wf._allowed("leadmagic"):
-                    wf._bump("leadmagic", "calls")
-                    hit = wf.leadmagic.find_email(
-                        first, last, domain, row.get("company_name") or ""
-                    )
-                    if hit:
-                        wf._bump("leadmagic", "email_hits")
-                        email, email_tier = hit.email, hit.source_tier
-                elif not email and not wf._allowed("leadmagic"):
-                    wf._skip("leadmagic", "max_tier_excludes_leadmagic")
-                elif not email and not wf.leadmagic.enabled:
-                    wf._skip("leadmagic", "vendor_disabled_or_missing_key")
-
                 if (
                     not email
                     and wf.fullenrich.enabled
@@ -530,7 +553,6 @@ def enrich_waterfall(
                     wf._skip("fullenrich", "max_tier_excludes_fullenrich")
             else:
                 wf._skip("getleads", "missing_first_last_for_email_lookup")
-                wf._skip("leadmagic", "missing_first_last_for_email_lookup")
 
         enriched.append(
             {
@@ -673,7 +695,6 @@ def enrich_waterfall(
     for name, client in (
         ("getleads", wf.getleads),
         ("ai_ark", wf.ai_ark),
-        ("leadmagic", wf.leadmagic),
         ("fullenrich", wf.fullenrich),
     ):
         wf.tier_stats[name]["vendor_calls"] = getattr(client, "calls", 0)
@@ -698,7 +719,7 @@ def enrich_waterfall(
             "estimated_cost_usd": 0.0,
         }
 
-    return {
+    result: dict[str, Any] = {
         "rows_in": len(parsed),
         "companies_upserted": companies_upserted,
         "contacts_written": contacts_written,
@@ -711,11 +732,14 @@ def enrich_waterfall(
         "client_tag": write_target.get("client_tag") or None,
         "supabase_schema": write_target.get("schema"),
         "apify": apify_result or None,
+        "warnings": list(tier_warnings),
         "vendors_enabled": {
             "apify": bool(settings.apify_token) and wf._allowed("apify"),
             "getleads": wf.getleads.enabled and wf._allowed("getleads"),
             "ai_ark": wf.ai_ark.enabled and wf._allowed("aiark"),
-            "leadmagic": wf.leadmagic.enabled and wf._allowed("leadmagic"),
             "fullenrich": wf.fullenrich.enabled and wf._allowed("fullenrich"),
         },
     }
+    if deprecated_max_tier:
+        result["deprecated_max_tier"] = deprecated_max_tier
+    return result

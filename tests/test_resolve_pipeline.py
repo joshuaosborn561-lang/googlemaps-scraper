@@ -619,7 +619,6 @@ def test_waterfall_tier_order_aiark_is_second() -> None:
         "apify",
         "aiark",
         "getleads",
-        "leadmagic",
         "fullenrich",
     ]
     assert waterfall.tier_allowed("aiark", "aiark")
@@ -651,16 +650,12 @@ def test_waterfall_aiark_runs_before_getleads(monkeypatch) -> None:
             source_tier="ai_ark",
         )
     ]
-    lm = MagicMock(enabled=True, calls=0, hits=0)
-    lm.find_email.return_value = EmailHit(email="x@y.com", source_tier="leadmagic")
-    lm.find_people.return_value = []
     fe = MagicMock(enabled=True, calls=0, hits=0)
     fe.find_email_bulk.return_value = []
     fe.find_email.return_value = None
 
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
-    monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
     monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
@@ -673,13 +668,12 @@ def test_waterfall_aiark_runs_before_getleads(monkeypatch) -> None:
         need="dm",
         store=None,
         write_supabase=True,
-        max_tier="leadmagic",
+        max_tier="getleads",
         run_apify=False,
     )
     assert out["dms_found"] == 1
     ark.find_people.assert_called()
     gl.find_people.assert_not_called()
-    lm.find_people.assert_not_called()
 
 
 def test_waterfall_max_tier_aiark_blocks_later(monkeypatch) -> None:
@@ -692,16 +686,12 @@ def test_waterfall_max_tier_aiark_blocks_later(monkeypatch) -> None:
 
     ark = MagicMock(enabled=True, calls=0, hits=0)
     ark.find_people.return_value = []
-    lm = MagicMock(enabled=True, calls=0, hits=0)
-    lm.find_email.return_value = EmailHit(email="x@y.com", source_tier="leadmagic")
-    lm.find_people.return_value = []
     fe = MagicMock(enabled=True, calls=0, hits=0)
     fe.find_email_bulk.return_value = []
     fe.find_email.return_value = None
 
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
-    monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
     monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
@@ -721,12 +711,10 @@ def test_waterfall_max_tier_aiark_blocks_later(monkeypatch) -> None:
     ark.find_people.assert_called()
     gl.find_people.assert_not_called()
     gl.find_email.assert_not_called()
-    lm.find_email.assert_not_called()
-    lm.find_people.assert_not_called()
     fe.find_email_bulk.assert_not_called()
     assert out["vendors_enabled"]["ai_ark"] is True
     assert out["vendors_enabled"]["getleads"] is False
-    assert out["vendors_enabled"]["leadmagic"] is False
+    assert "leadmagic" not in out["vendors_enabled"]
     assert out["vendors_enabled"]["fullenrich"] is False
 
 

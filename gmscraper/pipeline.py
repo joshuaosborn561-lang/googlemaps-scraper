@@ -49,14 +49,18 @@ def run(
     override_quota_guard: bool = False,
     on_progress: Any | None = None,
 ) -> dict[str, Any]:
+    max_tier_n, deprecated_max_tier, tier_warnings = waterfall.resolve_max_tier(max_tier)
     stage_list = _parse_stages(stages)
     out: dict[str, Any] = {
         "stages": stage_list,
         "estimate_only": bool(estimate_only),
-        "max_tier": max_tier,
+        "max_tier": max_tier_n,
         "per_stage": {},
         "cumulative_cost_usd": 0.0,
+        "warnings": list(tier_warnings),
     }
+    if deprecated_max_tier:
+        out["deprecated_max_tier"] = deprecated_max_tier
 
     def _tick(stage: str, **extra: Any) -> None:
         if on_progress is None:
@@ -329,7 +333,7 @@ def run(
                 need="both",
                 store=store,
                 write_supabase=True,
-                max_tier=max_tier,
+                max_tier=max_tier_n,
                 run_apify=False,  # discovery already handled by extract/resolve
                 on_progress=lambda **p: _tick("contacts", **p),
             )

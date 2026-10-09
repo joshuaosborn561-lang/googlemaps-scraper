@@ -9,6 +9,9 @@ read the company's own site first, and if that comes up empty, Google it.
 
 The model is told to return null rather than guess. A wrong first name in a
 cold email is worse than no first name.
+
+Does not use LeadMagic or other email-waterfall vendors. Website text first;
+optional Apify/SERP fallback only.
 """
 
 from __future__ import annotations

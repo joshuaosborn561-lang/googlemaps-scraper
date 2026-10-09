@@ -174,13 +174,6 @@ def test_waterfall_max_tier_blocks_fullenrich(tmp_path: Path, monkeypatch) -> No
     gl.find_email.return_value = None
     gl.find_people.return_value = []
 
-    lm = MagicMock()
-    lm.enabled = True
-    lm.calls = 0
-    lm.hits = 0
-    lm.find_email.return_value = None
-    lm.find_people.return_value = []
-
     fe = MagicMock()
     fe.enabled = True
     fe.calls = 0
@@ -195,7 +188,6 @@ def test_waterfall_max_tier_blocks_fullenrich(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
-    monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
     monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
     monkeypatch.setattr(
@@ -216,13 +208,14 @@ def test_waterfall_max_tier_blocks_fullenrich(tmp_path: Path, monkeypatch) -> No
         need="email",
         store=store,
         write_supabase=True,
-        max_tier="leadmagic",
+        max_tier="getleads",
         run_apify=False,
     )
-    assert out["max_tier"] == "leadmagic"
+    assert out["max_tier"] == "getleads"
     fe.find_email_bulk.assert_not_called()
     fe.find_email.assert_not_called()
     assert out["vendors_enabled"]["fullenrich"] is False
+    assert "leadmagic" not in out["vendors_enabled"]
 
 
 def test_waterfall_max_tier_apify_skips_paid_dm(tmp_path: Path, monkeypatch) -> None:
@@ -250,9 +243,6 @@ def test_waterfall_max_tier_apify_skips_paid_dm(tmp_path: Path, monkeypatch) -> 
         waterfall, "AiArkClient", lambda: MagicMock(enabled=False, calls=0, hits=0)
     )
     monkeypatch.setattr(
-        waterfall, "LeadMagicClient", lambda: MagicMock(enabled=False, calls=0, hits=0)
-    )
-    monkeypatch.setattr(
         waterfall, "FullEnrichClient", lambda: MagicMock(enabled=False, calls=0, hits=0)
     )
     monkeypatch.setattr(waterfall.gc_sync, "upsert_companies", lambda rows, **kw: len(rows))
@@ -276,15 +266,13 @@ def test_waterfall_max_tier_apify_skips_paid_dm(tmp_path: Path, monkeypatch) -> 
 def test_resolve_email_respects_max_tier() -> None:
     gl = MagicMock(enabled=True, calls=0, hits=0)
     gl.find_email.return_value = None
-    lm = MagicMock(enabled=True, calls=0, hits=0)
-    lm.find_email.return_value = None
     fe = MagicMock(enabled=True, calls=0, hits=0)
     fe.find_email.return_value = EmailHit(
         email="x@y.com", source_tier="fullenrich", status="valid"
     )
 
     wf = waterfall.Waterfall(
-        getleads=gl, leadmagic=lm, fullenrich=fe, max_tier="leadmagic"
+        getleads=gl, fullenrich=fe, max_tier="getleads"
     )
     hit = wf.resolve_email(
         {
@@ -299,7 +287,7 @@ def test_resolve_email_respects_max_tier() -> None:
     fe.find_email.assert_not_called()
 
     wf2 = waterfall.Waterfall(
-        getleads=gl, leadmagic=lm, fullenrich=fe, max_tier="fullenrich"
+        getleads=gl, fullenrich=fe, max_tier="fullenrich"
     )
     hit2 = wf2.resolve_email(
         {

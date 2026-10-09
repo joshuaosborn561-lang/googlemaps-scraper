@@ -242,13 +242,11 @@ class Settings:
         default_factory=lambda: _env_float("MAPS_MAX_COST_USD", 25.0)
     )
 
-    # Contact enrichment waterfall (AI Ark → getleads → LeadMagic → FullEnrich)
+    # Contact enrichment waterfall (AI Ark → getleads → FullEnrich).
+    # LeadMagic was dropped Oct 8 2026; LEADMAGIC_API_KEY is unused.
     getleads_api_key: str = field(default_factory=lambda: _env("GETLEADS_API_KEY"))
     ai_ark_api_key: str = field(
         default_factory=lambda: _env("AI_ARK_API_KEY") or _env("AIARK_API_KEY")
-    )
-    leadmagic_api_key: str = field(
-        default_factory=lambda: _env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY")
     )
     fullenrich_api_key: str = field(default_factory=lambda: _env("FULLENRICH_API_KEY"))
 
