@@ -74,7 +74,7 @@ Do NOT use this for:
 | "raw list → people end-to-end" | `pipeline_run` (resolve,enrich,extract,contacts; max_tier default getleads) |
 | "sync parcels with county + cursor" | `sync_to_supabase(dataset='parcels', county=…, cursor=…)` |
 | "sync team contacts / owners to Supabase" | `sync_to_supabase(client_tag=…, dataset='contacts')` then `sync_to_supabase(client_tag=…)` for lead owner backfill |
-| "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (apify→AI Ark→getleads→LeadMagic; max_tier default leadmagic) |
+| "waterfall email/DM enrich → Supabase gc.*" | `enrich_waterfall` (apify→AI Ark→getleads; max_tier default getleads; LeadMagic names are no-ops) |
 | "FullEnrich email only" | `fullenrich_find_email` / `_bulk` (only if max_tier=fullenrich) |
 | "export what we have" | `export_csv` (CSV text in response; capped 5000; clean=true) |
 | "browse / page through leads" | `query_leads` (page_size max 50) |

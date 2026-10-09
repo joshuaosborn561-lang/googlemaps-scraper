@@ -92,7 +92,6 @@ def test_ai_ark_skip_reason_when_email_with_names(monkeypatch) -> None:
     monkeypatch.setenv("AI_ARK_API_KEY", "test-key")
     for key in (
         "GETLEADS_API_KEY",
-        "LEADMAGIC_API_KEY",
         "FULLENRICH_API_KEY",
         "APIFY_TOKEN",
     ):

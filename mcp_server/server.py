@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.10.0",
+    version="1.11.0",
 )
 
 
@@ -2107,7 +2107,7 @@ def pipeline_run(
     """Chain optional stages from a raw list to contactable people.
 
     stages = comma list of resolve,enrich,extract,contacts.
-    max_tier caps the contacts waterfall (default getleads).
+    max_tier caps the contacts waterfall (default getleads; LeadMagic names are no-ops).
     target_titles steers LLM extraction (comma-separated).
     override_quota_guard passes through to resolve_places.
     Returns per-stage counts + cumulative cost. Never returns rows.
@@ -2351,8 +2351,9 @@ def find_owners(
     """Extract owners + team contacts from site text.
 
     First pulls person+title pairs from team/about pages into `contacts`
-    (source=team_page). Then LLM single-owner extraction. Website-only is free;
+    (source=team_page). Then LLM single-owner extraction.     Website-only is free;
     Apify fallback is paid — set use_paid_fallback=true. No approval required.
+    Does not use LeadMagic or other email-waterfall vendors.
     """
     _ensure_repo_cwd()
     from gmscraper import owner
@@ -2558,7 +2559,7 @@ def fullenrich_find_email(
     """FullEnrich email lookup (last tier). 1 credit on work-email hit, 0 on miss.
 
     Call only after earlier waterfall tiers miss — or use enrich_waterfall
-    with max_tier='fullenrich'. Default waterfall max_tier is leadmagic.
+    with max_tier='fullenrich'. Default waterfall max_tier is getleads.
     Requires FULLENRICH_API_KEY.
     """
     _ensure_repo_cwd()
@@ -2664,12 +2665,12 @@ def debug_echo(message: str = "ping") -> str:
 def enrich_waterfall(
     rows: str,
     need: str = "both",
-    max_tier: str = "leadmagic",
+    max_tier: str = "getleads",
     run_apify: bool = True,
     background: bool = True,
     client_tag: str = "",
 ) -> str:
-    """Walk apify → AI Ark → getleads → LeadMagic → FullEnrich.
+    """Walk apify → AI Ark → getleads → FullEnrich.
 
     Pass client_tag (peterson / basco / emcor) so contacts write to
     {slug}_contacts / {slug}_companies. Omitting client_tag falls back to
@@ -2677,8 +2678,10 @@ def enrich_waterfall(
 
     `rows` = JSON list of {domain, first_name?, last_name?, company_name?, ...}.
     need = 'email' | 'dm' | 'both'.
-    max_tier = 'apify' | 'aiark' | 'getleads' | 'leadmagic' | 'fullenrich'
-    (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
+    max_tier = 'apify' | 'aiark' | 'getleads' | 'fullenrich'
+    (default 'getleads' — FullEnrich never runs unless explicitly requested).
+    Retired LeadMagic names (leadmagic, lm, lead_magic, …) are accepted as
+    no-ops and treated as getleads, with a warning.
     Response is counts only.
     """
     _ensure_repo_cwd()
@@ -2687,7 +2690,7 @@ def enrich_waterfall(
     need_norm = (need or "both").strip().lower()
     if need_norm not in ("email", "dm", "both"):
         raise ValueError("need must be 'email', 'dm', or 'both'")
-    max_tier_n = wf.normalize_max_tier(max_tier)
+    max_tier_n, deprecated_max_tier, _tier_warnings = wf.resolve_max_tier(max_tier)
 
     store = _store()
 
@@ -2700,7 +2703,7 @@ def enrich_waterfall(
                 need=need_norm,  # type: ignore[arg-type]
                 store=store,
                 write_supabase=True,
-                max_tier=max_tier_n,
+                max_tier=max_tier,
                 run_apify=bool(run_apify),
                 on_progress=lambda **p: _job_progress("enrich_waterfall", **p),
                 client_tag=client_tag,
@@ -2720,6 +2723,8 @@ def enrich_waterfall(
             "rows_chars": len(rows or ""),
             "rows_fingerprint": hashlib.sha1((rows or "").encode()).hexdigest()[:16],
         }
+        if deprecated_max_tier:
+            meta["deprecated_max_tier"] = deprecated_max_tier
         before = find_active_by_queue_key(make_queue_key("enrich_waterfall", meta))
         job = start_job("enrich_waterfall", _run, meta=meta)
         return _json(

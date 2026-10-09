@@ -98,14 +98,6 @@ def test_waterfall_stops_at_getleads(tmp_path: Path) -> None:
         )
     ]
 
-    lm = MagicMock()
-    lm.enabled = True
-    lm.calls = 0
-    lm.hits = 0
-    lm.find_email.return_value = EmailHit(
-        email="should-not-call@x.com", source_tier="leadmagic"
-    )
-
     fe = MagicMock()
     fe.enabled = True
     fe.calls = 0
@@ -118,7 +110,7 @@ def test_waterfall_stops_at_getleads(tmp_path: Path) -> None:
     ark.hits = 0
 
     wf = waterfall.Waterfall(
-        getleads=gl, ai_ark=ark, leadmagic=lm, fullenrich=fe, store=store
+        getleads=gl, ai_ark=ark, fullenrich=fe, store=store
     )
     # Patch module-level enrich to use our wf via direct call path
     hit = wf.resolve_email(
@@ -132,7 +124,7 @@ def test_waterfall_stops_at_getleads(tmp_path: Path) -> None:
     )
     assert hit and hit.email == "jane@acme.test"
     assert hit.source_tier == "getleads"
-    lm.find_email.assert_not_called()
+    fe.find_email.assert_not_called()
     fe.find_email_bulk.assert_not_called()
 
 
@@ -152,9 +144,6 @@ def test_waterfall_writes_counts_only(tmp_path: Path, monkeypatch) -> None:
     )
     monkeypatch.setattr(
         waterfall, "AiArkClient", lambda: MagicMock(enabled=False, calls=0, hits=0)
-    )
-    monkeypatch.setattr(
-        waterfall, "LeadMagicClient", lambda: MagicMock(enabled=False, calls=0, hits=0)
     )
     monkeypatch.setattr(
         waterfall, "FullEnrichClient", lambda: MagicMock(enabled=False, calls=0, hits=0)

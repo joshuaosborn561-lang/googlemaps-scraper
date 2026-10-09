@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     name        TEXT NOT NULL,
     title       TEXT,
     email       TEXT,
-    source      TEXT,            -- team_page|getleads|ai_ark|leadmagic|fullenrich
+    source      TEXT,            -- team_page|getleads|ai_ark|fullenrich (leadmagic historical)
     source_tier TEXT,
     confidence  REAL,
     source_url  TEXT,
