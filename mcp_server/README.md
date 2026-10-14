@@ -25,7 +25,7 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 
 - `RAPIDAPI_KEY`
 - `OPENAI_API_KEY` (or `LLM_PROVIDER=ollama` + reachable Ollama)
-- optional: `APIFY_TOKEN`, `MAPS_PLAN`, `MAPS_QUOTA_RESET_DAY`
+- optional: `SERPER_API_KEY`, `APIFY_TOKEN`, `MAPS_PLAN`, `MAPS_QUOTA_RESET_DAY`
 
 ## Tools
 
@@ -44,7 +44,7 @@ Set these Railway env vars on service `google-maps-mcp` for paid runs:
 | `crawl_team_pages` | no | Backfill team/about crawl on already-fetched sites |
 | `extract_team_contacts` | optional LLM | Person+title → local `contacts` |
 | `classify_leads` | no | No-op; classify in SQL against `site_pages` |
-| `find_owners` | optional Apify | Team contacts + owner; paid fallback needs no approval |
+| `find_owners` | optional Serper | Team contacts + owner; paid fallback needs no approval |
 | `estimate_resolve_places` | no | Read-only cost estimate for resolve_places |
 | `resolve_places` | **yes** | Address/name → business writeback (no approval) |
 | `estimate_apify_contact_crawl` | no | Read-only Apify cost estimate |

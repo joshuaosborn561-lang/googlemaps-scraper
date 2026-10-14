@@ -2352,7 +2352,7 @@ def find_owners(
 
     First pulls person+title pairs from team/about pages into `contacts`
     (source=team_page). Then LLM single-owner extraction.     Website-only is free;
-    Apify fallback is paid — set use_paid_fallback=true. No approval required.
+    Serper fallback is paid — set use_paid_fallback=true. No approval required.
     Does not use LeadMagic or other email-waterfall vendors.
     """
     _ensure_repo_cwd()
