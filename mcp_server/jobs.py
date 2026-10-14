@@ -1,14 +1,17 @@
 """Background job runner so Claude web (5 min timeout) can start long scrapes.
 
 Jobs persist as JSON under data/jobs/ (on the Railway volume). Workers are
-in-process daemon threads, so a container restart kills them while leaving
-status="running" on disk. Mitigations:
+in-process daemon threads, so a container restart (or Railway app sleep)
+kills them while leaving status="running" on disk. Mitigations:
 
 1. heartbeat_at updated while a worker is alive, plus stage progress
 2. get_job / get_job_status mark stale heartbeats as status="stalled"
 3. sweep_orphaned_jobs() on process start flips leftover running/queued → interrupted
 4. Serial FIFO queue + queue_key dedupe so multiple Claude chats can enqueue
    work without killing or duplicating an active run
+5. Finished jobs drop their result payload from RAM after persist; status
+   tools reload it from disk. In-memory map keeps running jobs plus the
+   last MAX_FINISHED_IN_MEMORY finished summaries.
 """
 
 from __future__ import annotations
@@ -37,6 +40,9 @@ ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset(
     {"completed", "failed", "stalled", "interrupted", "cancelled"}
 )
+# Running/queued jobs stay in RAM. Finished jobs keep a summary only, and
+# only the newest N of those — older ones are reloaded from data/jobs/.
+MAX_FINISHED_IN_MEMORY = 50
 
 
 @dataclass
@@ -115,6 +121,71 @@ def _load_from_disk(job_id: str) -> Job:
     data.setdefault("meta", {})
     data.setdefault("result", {})
     return Job(**{k: v for k, v in data.items() if k in Job.__dataclass_fields__})
+
+
+def _as_summary(job: Job) -> Job:
+    """In-memory copy without the heavy result payload."""
+    data = asdict(job)
+    data["result"] = {}
+    return Job(**{k: v for k, v in data.items() if k in Job.__dataclass_fields__})
+
+
+def _prune_finished_locked() -> None:
+    """Keep active jobs plus the newest MAX_FINISHED_IN_MEMORY finished summaries."""
+    finished = [j for j in _jobs.values() if j.status in TERMINAL_STATUSES]
+    overflow = len(finished) - MAX_FINISHED_IN_MEMORY
+    if overflow <= 0:
+        return
+    finished.sort(
+        key=lambda j: (float(j.finished_at or 0.0), float(j.created_at or 0.0), j.id)
+    )
+    for stale in finished[:overflow]:
+        _jobs.pop(stale.id, None)
+        _fns.pop(stale.id, None)
+        _cancel_requested.discard(stale.id)
+
+
+def _cache_job_locked(job: Job) -> None:
+    """Store a job in RAM. Terminal jobs keep only a summary and are capped."""
+    if job.status in TERMINAL_STATUSES:
+        _jobs[job.id] = _as_summary(job)
+        _prune_finished_locked()
+        return
+    _jobs[job.id] = job
+
+
+def _offload_finished_job(job_id: str) -> None:
+    """Drop the persisted result from RAM and evict overflow summaries."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is None or job.status not in TERMINAL_STATUSES:
+            return
+        _cache_job_locked(job)
+
+
+def _job_from_memory_or_disk_locked(job_id: str) -> Job | None:
+    """Resolve a job under ``_lock``, reloading from disk after eviction/restart."""
+    job = _jobs.get(job_id)
+    if job is not None:
+        return job
+    try:
+        job = _load_from_disk(job_id)
+    except ValueError:
+        return None
+    _cache_job_locked(job)
+    return _jobs.get(job_id) or job
+
+
+def _hydrate_result(job: Job) -> Job:
+    """Load result from data/jobs so status/result tools stay unchanged."""
+    if job.status not in TERMINAL_STATUSES or job.result:
+        return job
+    try:
+        disk = _load_from_disk(job.id)
+    except ValueError:
+        return job
+    job.result = disk.result if isinstance(disk.result, dict) else {}
+    return job
 
 
 def _scope_fingerprint(meta: dict[str, Any]) -> str:
@@ -196,7 +267,7 @@ def heartbeat(
         if job is None:
             try:
                 job = _load_from_disk(jid)
-                _jobs[jid] = job
+                _cache_job_locked(job)
             except ValueError:
                 return
         if job.status not in ("queued", "running"):
@@ -243,34 +314,54 @@ def _maybe_mark_stalled(job: Job, *, persist: bool = True) -> Job:
     return job
 
 
-def get_job(job_id: str) -> Job:
+def get_job(job_id: str, *, hydrate_result: bool = True) -> Job:
+    """Return a job, loading from data/jobs/ after a restart or eviction.
+
+    Finished in-memory copies omit ``result``; when ``hydrate_result`` is True
+    the persisted payload is filled back in so tool output is unchanged.
+    """
+    loaded_from_disk: Job | None = None
     with _lock:
         job = _jobs.get(job_id)
     if job is None:
         job = _load_from_disk(job_id)
+        loaded_from_disk = job
         with _lock:
-            _jobs[job_id] = job
+            existing = _jobs.get(job_id)
+            if existing is not None:
+                job = existing
+                loaded_from_disk = None
+            else:
+                _cache_job_locked(job)
     persist_snap: Job | None = None
     with _lock:
-        before = job.status
-        _maybe_mark_stalled(job, persist=False)
-        if job.status != before:
-            persist_snap = Job(**asdict(job))
+        live = _jobs.get(job_id) or job
+        before = live.status
+        _maybe_mark_stalled(live, persist=False)
+        if live.status != before:
+            persist_snap = Job(**asdict(live))
             # Free the runner slot if this was the active job.
             global _running_id
-            if _running_id == job.id:
+            if _running_id == live.id:
                 _running_id = None
                 _dispatcher_wakeup.set()
-        out = Job(**asdict(job))
+            if live.status in TERMINAL_STATUSES:
+                _cache_job_locked(live)
+        out = Job(**asdict(live))
     if persist_snap is not None:
         try:
             _persist(persist_snap)
         except OSError:
             pass
+    if hydrate_result and out.status in TERMINAL_STATUSES and not out.result:
+        if loaded_from_disk is not None and loaded_from_disk.result:
+            out.result = dict(loaded_from_disk.result)
+        else:
+            _hydrate_result(out)
     return out
 
 
-def list_jobs(limit: int = 20) -> list[Job]:
+def list_jobs(limit: int = 20, *, hydrate_result: bool = False) -> list[Job]:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     files = sorted(
         JOBS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
@@ -278,7 +369,7 @@ def list_jobs(limit: int = 20) -> list[Job]:
     out: list[Job] = []
     for path in files[:limit]:
         try:
-            out.append(get_job(path.stem))
+            out.append(get_job(path.stem, hydrate_result=hydrate_result))
         except Exception:
             continue
     return out
@@ -395,6 +486,8 @@ def cancel_job(job_id: str, *, reason: str = "") -> dict[str, Any]:
             }
         snap = Job(**asdict(job))
     _persist(snap)
+    if snap.status in TERMINAL_STATUSES:
+        _offload_finished_job(jid)
     _dispatcher_wakeup.set()
 
     # Re-read after persist for the response.
@@ -462,9 +555,9 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
         if mark_attempt:
             meta["auto_resume_attempted"] = True
             job.meta = meta
-            with _lock:
-                _jobs[job.id] = job
             _persist(job)
+            with _lock:
+                _cache_job_locked(job)
         records.append(
             {
                 "id": job.id,
@@ -491,9 +584,9 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
                 "ZIP×category pairs in SQLite."
             )
         )
-        with _lock:
-            _jobs[job.id] = job
         _persist(job)
+        with _lock:
+            _cache_job_locked(job)
         flipped.append(job.id)
         _record(job, mark_attempt=True)
 
@@ -524,9 +617,9 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
                 (job.error or "")
                 + " | Not auto-resumed: paid job requires approve_paid=true"
             ).strip(" |")
-            with _lock:
-                _jobs[job.id] = job
             _persist(job)
+            with _lock:
+                _cache_job_locked(job)
             continue
         if job.kind not in _RESUMABLE_KINDS:
             continue
@@ -540,9 +633,9 @@ def sweep_orphaned_jobs() -> dict[str, Any]:
                 meta["auto_resume_attempted"] = True
                 meta["resume_skipped_reason"] = "global_enrich_or_backlog"
                 job.meta = meta
-                with _lock:
-                    _jobs[job.id] = job
                 _persist(job)
+                with _lock:
+                    _cache_job_locked(job)
                 continue
         finished = float(job.finished_at or job.heartbeat_at or job.created_at or 0)
         if finished and (now - finished) > max_age:
@@ -600,10 +693,14 @@ def _dispatcher_loop() -> None:
                     job.error = "Internal error: job callable missing from queue"
                     job.finished_at = time.time()
                     _wait_queue.pop(0)
+                    persisted = False
                     try:
                         _persist(job)
+                        persisted = True
                     except OSError:
                         pass
+                    if persisted:
+                        _cache_job_locked(job)
                     continue
                 _wait_queue.pop(0)
                 job_id = candidate
@@ -625,7 +722,7 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
         if job is None:
             try:
                 job = _load_from_disk(job_id)
-                _jobs[job_id] = job
+                _cache_job_locked(job)
             except ValueError:
                 _running_id = None
                 _dispatcher_wakeup.set()
@@ -640,10 +737,14 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
                     "Cancelled by cancel_job"
                 )
                 job.finished_at = time.time()
+                persisted = False
                 try:
                     _persist(job)
+                    persisted = True
                 except OSError:
                     pass
+                if persisted:
+                    _cache_job_locked(job)
             _running_id = None
             _fns.pop(job_id, None)
             _dispatcher_wakeup.set()
@@ -673,7 +774,9 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
             raise JobCancelled("Cancelled by cancel_job")
         result = fn() or {}
         with _lock:
-            job = _jobs[job_id]
+            job = _job_from_memory_or_disk_locked(job_id)
+            if job is None:
+                raise RuntimeError(f"Job {job_id} vanished from memory and disk")
             if job_id in _cancel_requested or (job.meta or {}).get(
                 "cancel_requested"
             ):
@@ -688,41 +791,52 @@ def _run_worker(job_id: str, fn: Callable[[], dict[str, Any]]) -> None:
                 job.error = None
     except JobCancelled as exc:
         with _lock:
-            job = _jobs[job_id]
-            job.status = "cancelled"
-            job.error = str(exc) or "Cancelled by cancel_job"
-            job.result = {}
+            job = _job_from_memory_or_disk_locked(job_id)
+            if job is not None:
+                job.status = "cancelled"
+                job.error = str(exc) or "Cancelled by cancel_job"
+                job.result = {}
     except Exception as exc:  # noqa: BLE001
         with _lock:
-            job = _jobs[job_id]
-            if job_id in _cancel_requested or (job.meta or {}).get(
-                "cancel_requested"
-            ):
-                job.status = "cancelled"
-                job.error = (job.meta or {}).get("cancelled_reason") or (
-                    f"Cancelled by cancel_job ({type(exc).__name__}: {exc})"
-                )
-            else:
-                job.status = "failed"
-                job.error = f"{type(exc).__name__}: {exc}"
-            job.result = {"traceback": traceback.format_exc()[-4000:]}
+            job = _job_from_memory_or_disk_locked(job_id)
+            if job is not None:
+                if job_id in _cancel_requested or (job.meta or {}).get(
+                    "cancel_requested"
+                ):
+                    job.status = "cancelled"
+                    job.error = (job.meta or {}).get("cancelled_reason") or (
+                        f"Cancelled by cancel_job ({type(exc).__name__}: {exc})"
+                    )
+                else:
+                    job.status = "failed"
+                    job.error = f"{type(exc).__name__}: {exc}"
+                job.result = {"traceback": traceback.format_exc()[-4000:]}
     finally:
         stop_hb.set()
+        snap: Job | None = None
         with _lock:
-            job = _jobs[job_id]
-            job.heartbeat_at = time.time()
-            job.finished_at = time.time()
-            snap = Job(**asdict(job))
+            job = _job_from_memory_or_disk_locked(job_id)
+            if job is not None:
+                job.heartbeat_at = time.time()
+                job.finished_at = time.time()
+                snap = Job(**asdict(job))
             if _running_id == job_id:
                 _running_id = None
             _cancel_requested.discard(job_id)
-        try:
-            _persist(snap)
-        except OSError:
-            pass
+        persisted = False
+        if snap is not None:
+            try:
+                _persist(snap)
+                persisted = True
+            except OSError:
+                pass
         _tls.job_id = ""
         with _lock:
             _fns.pop(job_id, None)
+            if persisted:
+                mem = _jobs.get(job_id)
+                if mem is not None and mem.status in TERMINAL_STATUSES:
+                    _cache_job_locked(mem)
         _dispatcher_wakeup.set()
 
 

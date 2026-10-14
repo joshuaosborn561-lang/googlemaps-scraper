@@ -199,6 +199,9 @@ def test_cancel_queued_job_never_starts(tmp_path: Path, monkeypatch) -> None:
     blocker = jobs.start_job(
         "enrich_sites", slow, meta={"limit": 1}, queue_key="enrich_sites:limit=1"
     )
+    deadline = time.time() + 3
+    while time.time() < deadline and jobs.get_job(blocker.id).status != "running":
+        time.sleep(0.02)
     target = jobs.start_job(
         "apify_contact_crawl",
         lambda: started.append("apify") or {"ok": True},

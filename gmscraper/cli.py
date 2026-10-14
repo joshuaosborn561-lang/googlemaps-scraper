@@ -496,8 +496,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("classify", help="retired — qualify in SQL against site_pages")
     add_cat_args(sp, need_icp=True)
     add_llm_args(sp)
-    sp.add_argument("--workers", type=int, default=0,
-                    help="0 = 8 for cloud, 1 for local CPU")
+    sp.add_argument("--workers", type=int, default=4,
+                    help="CLASSIFY_WORKERS default (4). Classify is retired.")
     sp.add_argument("--limit", type=int)
     sp.add_argument("--evidence-chars", type=int, default=0,
                     help="0 = use LLM_MAX_EVIDENCE_CHARS from .env")
