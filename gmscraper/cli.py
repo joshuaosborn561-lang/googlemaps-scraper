@@ -212,8 +212,8 @@ def cmd_owners(args) -> None:
         print(
             "--fallback requested but no credentials for "
             f"'{args.fallback_source or settings.fallback_source}'. "
-            "Set APIFY_TOKEN in .env (or FALLBACK_SOURCE=openwebninja). "
-            "Running website-only."
+            "Set SERPER_API_KEY in .env (or FALLBACK_SOURCE=apify / "
+            "openwebninja). Running website-only."
         )
     llm = make_ollama(args)
     res = owner.run(
@@ -441,7 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--owners", action="store_true", help="force the owner stage")
     sp.add_argument("--fallback", action="store_true", help="also web-search for owners")
     sp.add_argument("--fallback-source", default="",
-                    help="apify (default) | openwebninja | none")
+                    help="serper (default) | apify | openwebninja | none")
     sp.add_argument("--ignore-robots", action="store_true")
     add_zip_args(sp)
     add_llm_args(sp)
@@ -515,7 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="0 = use LLM_MAX_EVIDENCE_CHARS from .env")
     sp.add_argument("--fallback", action="store_true", help="also web-search for owners")
     sp.add_argument("--fallback-source", default="",
-                    help="apify (default) | openwebninja | none")
+                    help="serper (default) | apify | openwebninja | none")
     sp.add_argument("--all", action="store_true", help="not just in-ICP rows")
     sp.set_defaults(func=cmd_owners)
 

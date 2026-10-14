@@ -68,7 +68,7 @@ Do NOT use this for:
 | "re-run classify only" / tighten ICP | SQL against `public.site_pages` (`classify_leads` is a no-op) |
 | "pull emails from sites" / capture pages | `enrich_sites` (source_project + source_table, or domains; writes `site_pages`) |
 | "crawl team pages on already-fetched sites" | `crawl_team_pages` then `extract_team_contacts` |
-| "find owners" | `find_owners` (also fills contacts from team pages; Apify optional) |
+| "find owners" | `find_owners` (also fills contacts from team pages; Serper optional) |
 | "Apify website contact crawl" | `estimate_apify_contact_crawl` → `apify_contact_crawl` → `parse_contacts_openai` |
 | "address → business + domain" | `estimate_resolve_places` then `resolve_places` |
 | "raw list → people end-to-end" | `pipeline_run` (resolve,enrich,extract,contacts; max_tier default getleads) |
@@ -93,7 +93,7 @@ Do NOT use this for:
 - Prefer state-level pilots for a new vertical before offering nationwide.
 - Never ask the user for spend approval.
 - Do not re-scrape to fix field mapping; use `renormalize` after alias fixes.
-- Maps scrape costs money; enrich/export (without Apify fallback) do not. Classify is SQL on site_pages.
+- Maps scrape costs money; enrich/export (without Serper fallback) do not. Classify is SQL on site_pages.
 - Be decisive. User wants the CSV, not a menu of options.
 """.strip()
 

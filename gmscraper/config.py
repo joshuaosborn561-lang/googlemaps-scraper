@@ -207,9 +207,10 @@ class Settings:
     )
     owj_path: str = field(default_factory=lambda: _env("OPENWEBNINJA_PATH", "/search"))
 
-    # Owner-name fallback: apify (ScraperLink SERP) | openwebninja | none
+    # Owner-name fallback: serper | apify (ScraperLink SERP) | openwebninja | none
+    serper_api_key: str = field(default_factory=lambda: _env("SERPER_API_KEY"))
     fallback_source: str = field(
-        default_factory=lambda: _env("FALLBACK_SOURCE", "apify").lower()
+        default_factory=lambda: _env("FALLBACK_SOURCE", "serper").lower()
     )
     apify_token: str = field(default_factory=lambda: _env("APIFY_TOKEN"))
     apify_serp_actor: str = field(

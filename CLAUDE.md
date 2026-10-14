@@ -87,7 +87,7 @@ python -m gmscraper estimate --vertical hvac --states OH
 python -m gmscraper scrape --vertical hvac --states OH --workers 8
 python -m gmscraper enrich --workers 12
 python -m gmscraper classify --vertical hvac --workers 1
-python -m gmscraper owners --workers 1 [--fallback]    # --fallback is paid, ~$0.0005/lookup
+python -m gmscraper owners --workers 1 [--fallback]    # --fallback is paid, ~$0.001/lookup (Serper)
 python -m gmscraper export --out out/x.csv --with-email --min-rating 4.0
 python -m gmscraper stats
 python -m gmscraper bench                     # measure LLM speed, pick a model
@@ -114,18 +114,13 @@ without re-scraping).
 
 ## Things that will bite you
 
-- **The owner fallback is ScraperLink on Apify, not OpenWeb Ninja.** We
-  switched: OpenWeb Ninja charged ~$0.0025 per search *plus $25/month*, and
-  this stage only fires on leftovers (in-ICP businesses whose own site did not
-  name an owner), so a standing monthly fee was the wrong shape. ScraperLink
-  is $0.0005 per search with no floor, and Apify's free tier ($5/mo credit)
-  covers ~10,000 lookups. Needs `APIFY_TOKEN` in `.env`; blank means the
-  stage skips itself and `owners` runs website-only. `--fallback-source
-  openwebninja` still works for anyone already subscribed.
-  Neither backend returns Google's AI Overview — that is a $0.003 add-on on
-  Apify's *official* actor (15x the price). Don't add it without measuring:
-  the overview is synthesised from the same organic snippets we already read,
-  and it strips the attribution the extractor uses to avoid guessing.
+- **The owner fallback is Serper, not Apify ScraperLink or OpenWeb Ninja.**
+  Default is `POST https://google.serper.dev/search` at $0.001 per search
+  (`SERPER_API_KEY`). If `FALLBACK_SOURCE=serper` and the key is blank, the
+  factory returns `NullSearch` — it does **not** silently fall back to
+  Apify. `--fallback-source apify` still runs ScraperLink ($0.0005/search,
+  needs `APIFY_TOKEN`); `openwebninja` still works for anyone already
+  subscribed. Neither backend returns Google's AI Overview as a paid add-on.
 - **Watch the `schema repairs` count in the spend line.** Zero is expected.
   Nonzero means the endpoint is not enforcing the JSON schema and responses
   are being corrected on a retry — common on OpenRouter, where a model is
@@ -180,7 +175,7 @@ gmscraper/
   bench.py       measure prefill/generation speed, project a run
   classify.py    ICP verdict via local Gemma
   owner.py       owner-name extraction (+ web-search fallback)
-  websearch.py   SERP backends: ScraperLink/Apify (default), OpenWeb Ninja
+  websearch.py   SERP backends: Serper (default), Apify ScraperLink, OpenWeb Ninja
   store.py       SQLite: jobs, businesses, sites, emails, verdicts, owners
   export.py      CSV
 config/categories.yml   verticals: icp + category aliases

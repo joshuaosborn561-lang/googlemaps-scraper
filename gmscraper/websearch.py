@@ -1,22 +1,21 @@
 """Web-search backends for the owner-name fallback.
 
 When the website scrape finds no owner, we Google "who owns <business> in
-<city>" and let the local model read the results. Two backends implement the
-same tiny interface (`enabled`, `search_text`), so `owners` does not care
-which one is configured.
+<city>" and let the local model read the results. Backends implement the
+same tiny interface (`enabled`, `request_count`, `cost_per_search`,
+`search_text(query, limit)`), so `owners` does not care which one is
+configured.
 
-Default is ScraperLink on Apify, at $0.0005 per search page against OpenWeb
-Ninja's ~$0.0025 plus a $25/month floor. The floor is what actually decided
-it: this stage only fires on leftovers -- the in-ICP businesses whose own
-website did not name an owner -- so a standing monthly charge is the wrong
-shape. Apify bills per call, and its free tier ($5/month of credits) covers
-about 10,000 lookups.
+Default is Serper (`POST https://google.serper.dev/search`) at $0.001 per
+search. Apify ScraperLink and OpenWeb Ninja stay available via
+`FALLBACK_SOURCE`. If `FALLBACK_SOURCE=serper` and `SERPER_API_KEY` is
+blank, the factory returns `NullSearch` — it does not silently fall back
+to Apify.
 
-Neither backend returns Google's AI Overview. ScraperLink returns organic
-results only; Apify's official actor sells the overview as a $0.003 add-on,
-15x the per-lookup price. Organic snippets are the same source material the
-overview is synthesised from, and they keep the evidence attributable, which
-matters when the extractor is told to return null rather than guess.
+None of the backends return Google's AI Overview as a paid add-on. Serper
+organic titles/snippets (plus answerBox and knowledgeGraph descriptions
+when present) are harvested into the same text shape the extractor already
+reads.
 """
 
 from __future__ import annotations
@@ -34,6 +33,7 @@ TEXT_KEYS = {
     "ai_overview", "aioverview", "overview", "summary", "body",
 }
 MAX_CHARS = 4000
+SERPER_URL = "https://google.serper.dev/search"
 
 
 def harvest_text(node: Any, out: list[str], depth: int = 0) -> None:
@@ -61,6 +61,58 @@ class NullSearch:
     cost_per_search = 0.0
 
     def search_text(self, query: str, limit: int = 10) -> str:
+        return ""
+
+
+class SerperSearch:
+    """Serper.dev Google Search. Default owner-name fallback."""
+
+    cost_per_search = 0.001
+
+    def __init__(
+        self,
+        settings: Settings,
+        timeout: int = 25,
+        max_retries: int = 3,
+    ):
+        self.s = settings
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.enabled = bool(settings.serper_api_key)
+        self.request_count = 0
+        self.session = requests.Session()
+        if self.enabled:
+            self.session.headers.update(
+                {
+                    "X-API-KEY": settings.serper_api_key,
+                    "Content-Type": "application/json",
+                }
+            )
+
+    def search_text(self, query: str, limit: int = 10) -> str:
+        if not self.enabled:
+            return ""
+        payload = {"q": query, "gl": "us", "hl": "en", "num": limit}
+        for attempt in range(self.max_retries + 1):
+            try:
+                self.request_count += 1
+                r = self.session.post(
+                    SERPER_URL,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                if r.status_code in (401, 403):
+                    return ""             # bad key; fail quiet, not loud
+                if r.status_code == 429 or r.status_code >= 500:
+                    time.sleep(min(2 ** attempt, 20))
+                    continue
+                r.raise_for_status()
+                chunks: list[str] = []
+                harvest_text(r.json(), chunks)
+                return "\n".join(chunks)[:MAX_CHARS]
+            except (requests.RequestException, ValueError):
+                if attempt < self.max_retries:
+                    time.sleep(min(2 ** attempt, 20))
         return ""
 
 
@@ -173,16 +225,25 @@ class OpenWebNinja:
         return ""
 
 
-BACKENDS = {"apify": ApifySerp, "openwebninja": OpenWebNinja, "none": NullSearch}
+BACKENDS = {
+    "serper": SerperSearch,
+    "apify": ApifySerp,
+    "openwebninja": OpenWebNinja,
+    "none": NullSearch,
+}
 
 
 def make_backend(settings: Settings, source: str = ""):
     """Build the configured backend. Unknown/absent credentials -> NullSearch."""
-    name = (source or settings.fallback_source or "apify").lower()
+    name = (source or settings.fallback_source or "serper").lower()
     cls = BACKENDS.get(name)
     if cls is None:
         raise SystemExit(
             f"Unknown fallback source '{name}'. Options: {', '.join(BACKENDS)}"
         )
-    backend = cls(settings) if cls is not NullSearch else NullSearch()
+    if cls is NullSearch:
+        return NullSearch()
+    backend = cls(settings)
+    if not backend.enabled:
+        return NullSearch()
     return backend
