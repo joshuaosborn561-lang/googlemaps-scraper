@@ -36,7 +36,7 @@ mcp = MCPServer(
     instructions=INSTRUCTIONS,
     website_url="https://google-maps-mcp-production-88a3.up.railway.app/mcp",
     # Bump when annotations/schemas change so Claude refreshes its tool cache.
-    version="1.11.0",
+    version="1.11.1",
 )
 
 
@@ -1429,7 +1429,7 @@ def list_background_jobs(limit: int = 20) -> str:
     from mcp_server.jobs import list_jobs, live_progress, queue_position
 
     out = []
-    for j in list_jobs(limit=limit):
+    for j in list_jobs(limit=limit, hydrate_result=True):
         row = j.to_public()
         row["queue_position"] = queue_position(j.id)
         row["live"] = live_progress(j)
@@ -2292,7 +2292,7 @@ def resolve_domains(
 def classify_leads(
     icp: str = "",
     vertical: str = "",
-    workers: int = 0,
+    workers: int = 4,
     source: str = "",
     force: bool = False,
     limit: int = 0,

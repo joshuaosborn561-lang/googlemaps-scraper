@@ -250,6 +250,11 @@ class Settings:
         default_factory=lambda: _env("AI_ARK_API_KEY") or _env("AIARK_API_KEY")
     )
     fullenrich_api_key: str = field(default_factory=lambda: _env("FULLENRICH_API_KEY"))
+    # LLM classify is retired; kept so leftover callers / env still resolve.
+    # Default 4 (was 12) — Railway sleeps and 12 classify threads held RAM.
+    classify_workers: int = field(
+        default_factory=lambda: int(_env_float("CLASSIFY_WORKERS", 4))
+    )
 
     @property
     def plan(self) -> Plan:
