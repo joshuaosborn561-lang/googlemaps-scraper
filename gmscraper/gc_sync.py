@@ -13,6 +13,7 @@ from typing import Any
 from urllib import error, request
 
 from . import clients as client_reg
+from . import db_write
 
 # Legacy shared schema (only used when client_tag is omitted).
 DEFAULT_SCHEMA = "gc"
@@ -78,8 +79,9 @@ def _request(
         method=method,
     )
     try:
-        with request.urlopen(req, timeout=120) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")
+        with db_write.slot(write=db_write.is_write_method(method)):
+            with request.urlopen(req, timeout=120) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
