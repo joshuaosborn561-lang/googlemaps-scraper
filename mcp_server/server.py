@@ -500,6 +500,8 @@ def health() -> str:
             not in ("0", "false", "no"),
             "backlog_drain": os.environ.get("MCP_BACKLOG_DRAIN", "true").lower()
             not in ("0", "false", "no"),
+            "backlog_workers": _backlog_workers(),
+            "db_write_concurrency": _db_write_concurrency(),
             "db": str(DEFAULT_DB),
             "zips": str(DEFAULT_ZIPS),
             "zips_ready": Path(DEFAULT_ZIPS).exists(),
@@ -1528,7 +1530,7 @@ def _enrich_sites_via_subprocess(limit: int, workers: int) -> dict[str, Any]:
     if total == 0:
         return {"result": {"ok": 0, "error": 0, "skipped": 0}, "stats": store.stats(), "domains": 0}
 
-    w = max(1, min(int(workers or 3), 3))
+    w = _enrich_subprocess_workers(workers)
     cmd = [sys.executable, "-m", "gmscraper", "enrich", "--workers", str(w)]
     if limit:
         cmd.extend(["--limit", str(int(limit))])
@@ -3536,6 +3538,31 @@ def _auto_resume_orphans(swept: dict[str, Any]) -> list[str]:
     return resumed
 
 
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    try:
+        n = int(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        n = default
+    return max(1, n)
+
+
+def _backlog_workers() -> int:
+    """Idle enrich_sites pool size. Default 6; was hardcoded to 3."""
+    return _env_positive_int("MCP_BACKLOG_WORKERS", 6)
+
+
+def _enrich_subprocess_workers(workers: int) -> int:
+    """Honor the caller's worker count. Callers already cap user-facing jobs."""
+    return max(1, int(workers or 3))
+
+
+def _db_write_concurrency() -> int:
+    from gmscraper.db_write import concurrency
+
+    return concurrency()
+
+
 def _start_backlog_drain() -> None:
     """Background loop that drains pending sites / team pages when idle."""
     enabled = os.environ.get("MCP_BACKLOG_DRAIN", "true").lower() not in (
@@ -3548,6 +3575,7 @@ def _start_backlog_drain() -> None:
     interval = int(os.environ.get("MCP_BACKLOG_DRAIN_SEC", "300") or 300)
     batch = int(os.environ.get("MCP_BACKLOG_BATCH", "200") or 200)
     team_workers = int(os.environ.get("MCP_BACKLOG_TEAM_WORKERS", "4") or 4)
+    backlog_workers = _backlog_workers()
 
     def loop() -> None:
         import time
@@ -3574,8 +3602,12 @@ def _start_backlog_drain() -> None:
                     )
                     start_job(
                         "enrich_sites",
-                        lambda: _enrich_sites_via_subprocess(batch, 3),
-                        meta={"limit": batch, "workers": 3, "backlog_drain": True},
+                        lambda: _enrich_sites_via_subprocess(batch, backlog_workers),
+                        meta={
+                            "limit": batch,
+                            "workers": backlog_workers,
+                            "backlog_drain": True,
+                        },
                         queue_key=f"enrich_sites:backlog:{batch}",
                         dedupe=True,
                         priority=0,
