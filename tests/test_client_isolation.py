@@ -264,4 +264,4 @@ def test_list_clients_public() -> None:
     client_reg.load_clients(reload=True)
     pubs = client_reg.list_clients_public()
     slugs = {p["client_tag"] for p in pubs}
-    assert slugs == {"peterson", "basco", "emcor"}
+    assert slugs == {"peterson", "basco", "emcor", "vector"}

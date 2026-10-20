@@ -36,3 +36,14 @@ clients:
     companies_table: companies
     default_geo: ""
     notes: "EMCOR — mechanical / electrical / facilities contractors"
+
+  vector:
+    display_name: Vector Energy Group
+    contact_name: Al Gancman
+    aliases: [vector_energy, vector_energy_group, al_gancman]
+    supabase_schema: client_vector
+    leads_table: leads
+    contacts_table: contacts
+    companies_table: companies
+    default_geo: "Encino, CA"
+    notes: "EV charger installs — multifamily, hotels, grocers, retail centers, parking, private schools, clubs within ~2 hours of Encino"
