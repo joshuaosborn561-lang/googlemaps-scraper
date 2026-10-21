@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Sequence
 
 from .mapsdata import AuthError, MapsDataClient, MapsDataError
+from . import territory
 from .store import Store
 
 ProgressCb = Callable[[dict[str, Any]], None]
@@ -105,6 +106,7 @@ def run(
     plan_id: str = "",
     run_id: str = "",
     client_tag: str = "",
+    allowed_states: Sequence[str] | None = None,
 ) -> dict[str, int]:
     """Scrape every pending (zip, category) pair. Safe to re-run after a kill.
 
@@ -116,6 +118,11 @@ def run(
     tag_plan = (plan_id or "").strip()
     tag_run = (run_id or "").strip()
     tag_client = (client_tag or "").strip()
+    # Territory lock: a result whose Maps state is outside the territory is
+    # never stored. Default territory = the states of the seed ZIPs, so a
+    # search seeded from a CA ZIP can never keep an out-of-state listing.
+    allowed = territory.allowed_state_set(allowed_states, zip_rows)
+    geo_drops = territory.DropCounter()
 
     pending = [
         (z, c) for z, c in store.pending_jobs(limit=max_jobs) if z in by_zip
@@ -158,6 +165,7 @@ def run(
             return
         try:
             rows = client.search(category, by_zip[zip_code])
+            rows = territory.filter_rows(rows, allowed, geo_drops)
             if tag_plan or tag_run or tag_client:
                 for r in rows:
                     if tag_plan:
@@ -200,4 +208,6 @@ def run(
         "new": prog.new_rows,
         "errors": prog.errors,
         "pending_at_start": len(pending),
+        "dropped_out_of_territory": geo_drops.total,
+        "dropped_by_state": dict(geo_drops.by_state),
     }
