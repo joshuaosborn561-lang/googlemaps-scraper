@@ -47,3 +47,13 @@ clients:
     companies_table: companies
     default_geo: "Encino, CA"
     notes: "EV charger installs — multifamily, hotels, grocers, retail centers, parking, private schools, clubs within ~2 hours of Encino"
+  pe:
+    display_name: PE deal origination
+    contact_name: ""
+    aliases: [private_equity, pe_deals, home_services_sellers]
+    supabase_schema: client_pe
+    leads_table: leads
+    contacts_table: contacts
+    companies_table: companies
+    default_geo: ""
+    notes: "Owners of businesses that could sell to PE buyers (Bob Carlson, Shore Capital); Josh brokers both sides. First lane: home services (roofing, HVAC, plumbing, electrical, pools, pest, landscaping)"
