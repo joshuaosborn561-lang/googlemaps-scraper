@@ -78,6 +78,28 @@ def _zip(addr: str, explicit: str = "") -> str:
     return m.group(1) if m else ""
 
 
+def is_premise(result: dict[str, Any]) -> bool:
+    """True when the Maps hit is the building/address itself, not a business.
+
+    Address searches often return the premise first: its name is the street
+    address and it has no category. Measured Nov 2026 on LLC mailing
+    addresses: every top pick on the first 600 was the premise, while real
+    tenants sat lower in the candidates.
+    """
+    name = (result.get("name") or "").strip()
+    cat = (result.get("main_category") or "").strip().lower()
+    if cat in ("premise", "street address", "street_address", "building"):
+        return True
+    if not name:
+        return True
+    if cat:
+        return False
+    rn = _street_number(name)
+    if rn and _street_number(result.get("address") or "") == rn:
+        return True
+    return bool(re.match(r"^\d+[A-Z]?\s+\S+", name)) and not result.get("website")
+
+
 def score_candidate(query_address: str, result: dict[str, Any]) -> float:
     """0..1 confidence that result is the right business for the query address."""
     q_addr = query_address or ""
@@ -106,6 +128,8 @@ def score_candidate(query_address: str, result: dict[str, Any]) -> float:
     blob = f"{result.get('name') or ''} {result.get('main_category') or ''}"
     if VIRTUAL_OFFICE.search(blob):
         score -= 0.55
+    if is_premise(result):
+        score -= 0.60
 
     return max(0.0, min(1.0, score))
 
@@ -123,7 +147,9 @@ def pick_best(
     best_score, best = scored[0]
     # Cap when many distinct businesses share the address (multi-tenant).
     distinct = {
-        (r.get("place_id") or r.get("name") or "").lower() for _, r in scored
+        (r.get("place_id") or r.get("name") or "").lower()
+        for s_, r in scored
+        if not is_premise(r) and s_ >= min_confidence
     }
     n = len([d for d in distinct if d])
     if n >= 4:
