@@ -20,3 +20,12 @@ def test_business_beats_premise():
 def test_premise_only_is_no_match():
     best, conf, _ = pick_best(Q, [{"name": "1200 Main St", "address": Q}], min_confidence=0.5)
     assert best is None
+
+
+def test_business_name_prefixed_address():
+    rs = [
+        {"name": "1200 Main St", "address": Q},
+        {"name": "Acme Holdings", "address": "Acme Holdings, 1200 Main St, Dallas, TX 75201", "website": "acme.com"},
+    ]
+    best, conf, _ = pick_best(Q, rs, min_confidence=0.5)
+    assert best["name"] == "Acme Holdings" and conf > 0.8

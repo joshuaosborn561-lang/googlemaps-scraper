@@ -78,6 +78,15 @@ def _zip(addr: str, explicit: str = "") -> str:
     return m.group(1) if m else ""
 
 
+def _addr_core(addr: str) -> str:
+    """Drop a leading business name: 'Acme, 123 Main St, City' -> '123 Main St, City'."""
+    parts = [p.strip() for p in (addr or "").split(",")]
+    for i, p in enumerate(parts):
+        if re.match(r"^\d", p):
+            return ", ".join(parts[i:])
+    return addr or ""
+
+
 def is_premise(result: dict[str, Any]) -> bool:
     """True when the Maps hit is the building/address itself, not a business.
 
@@ -95,7 +104,7 @@ def is_premise(result: dict[str, Any]) -> bool:
     if cat:
         return False
     rn = _street_number(name)
-    if rn and _street_number(result.get("address") or "") == rn:
+    if rn and _street_number(_addr_core(result.get("address") or "")) == rn:
         return True
     return bool(re.match(r"^\d+[A-Z]?\s+\S+", name)) and not result.get("website")
 
@@ -103,7 +112,7 @@ def is_premise(result: dict[str, Any]) -> bool:
 def score_candidate(query_address: str, result: dict[str, Any]) -> float:
     """0..1 confidence that result is the right business for the query address."""
     q_addr = query_address or ""
-    r_addr = result.get("address") or ""
+    r_addr = _addr_core(result.get("address") or "")
     score = 0.35  # base for any Maps hit
 
     qn, rn = _street_number(q_addr), _street_number(r_addr)
